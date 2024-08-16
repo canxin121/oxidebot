@@ -25,7 +25,7 @@ impl OxideBotManager {
         }
     }
 
-    pub async fn bot<B: Into<BotObject>>(self, bot: B) -> Self {
+    pub async fn bot(self, bot: BotObject) -> Self {
         add_bots(vec![bot.into()], self.sender.clone()).await;
         self
     }
