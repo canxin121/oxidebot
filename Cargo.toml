@@ -1,0 +1,29 @@
+[package]
+name = "oxidebot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["canxin121 <q1969730106@gmail.com>"]
+homepage = "https://github.com/canxin121/oxidebot"
+repository = "https://github.com/canxin121/oxidebot"
+readme = "Readme.md"
+keywords = ["bot", "chatbot", "oxidebot"]
+categories = [
+    "science::robotics",
+    "api-bindings",
+]
+        
+[dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.81"
+chrono = "0.4.38"
+futures = "0.3.30"
+hyper = "1.4.1"
+mime = "0.3.17"
+mime_guess = "2.0.5"
+reqwest = "0.12.5"
+serde = { version = "1.0.205", features = ["derive"] }
+serde_json = "1.0.122"
+tokio = { version = "1.39.2", features = ["full"] }
+tracing = "0.1.40"
+url = "2.5.2"
