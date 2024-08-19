@@ -8,7 +8,7 @@ use crate::{
         notice::{
             GroupAdminChangeEvent, GroupHightLightChangeEvent, GroupMemberAliasChangeEvent,
             GroupMemberDecreaseEvent, GroupMemberIncreseEvent, GroupMemberMuteChangeEvent,
-            GroupMuteChangeEvent,
+            GroupMuteChangeEvent, MessageDeletedEvent, MessageEditedEvent,
         },
         Event, EventObject,
     },
@@ -188,7 +188,14 @@ impl Matcher {
                         )
                         .await
                 }
-                event::NoticeEvent::MessageDeletedEvent(event) => match event.group.as_ref() {
+                event::NoticeEvent::MessageDeletedEvent(MessageDeletedEvent {
+                    user,
+                    group,
+                    ..
+                })
+                | event::NoticeEvent::MessageEditedEvent(MessageEditedEvent {
+                    user, group, ..
+                }) => match group.as_ref() {
                     Some(group) => {
                         self.bot
                             .send_message(
@@ -201,9 +208,7 @@ impl Matcher {
                         self.bot
                             .send_message(
                                 message,
-                                crate::api::payload::SendMessageTarget::Private(
-                                    event.user.id.clone(),
-                                ),
+                                crate::api::payload::SendMessageTarget::Private(user.id.clone()),
                             )
                             .await
                     }

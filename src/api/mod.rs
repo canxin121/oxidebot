@@ -28,6 +28,12 @@ pub trait CallApiTrait {
 
     async fn delete_message(&self, message_id: String) -> Result<()>;
 
+    async fn edit_messagee(
+        &self,
+        message_id: String,
+        new_message: Vec<MessageSegment>,
+    ) -> Result<SendMessageResponse>;
+    
     async fn get_message_detail(&self, message_id: String) -> Result<GetMessageDetailResponse>;
 
     async fn set_message_reaction(&self, message_id: String, reaction_id: String) -> Result<()>;

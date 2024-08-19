@@ -21,6 +21,7 @@ pub enum NoticeEvent {
     GroupHightLightChangeEvent(GroupHightLightChangeEvent),
     GroupMemberAliasChangeEvent(GroupMemberAliasChangeEvent),
     MessageDeletedEvent(MessageDeletedEvent),
+    MessageEditedEvent(MessageEditedEvent),
 }
 
 impl NoticeEvent {
@@ -76,6 +77,13 @@ impl NoticeEvent {
                     Err(anyhow::anyhow!("Group is muted, can't send message"))
                 } else {
                     send_group_message_helper(bot, message, group.id.clone()).await
+                }
+            }
+            NoticeEvent::MessageEditedEvent(MessageEditedEvent { user, group, .. }) => {
+                if let Some(group) = group {
+                    send_group_message_helper(bot, message, group.id.clone()).await
+                } else {
+                    send_private_message_helper(bot, message, user.id.clone()).await
                 }
             }
         }
@@ -183,4 +191,13 @@ pub enum MuteType {
     Mute { duration: Option<Duration> },
     UnMute,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageEditedEvent {
+    pub user: User,
+    pub group: Option<Group>,
+    pub new_message: Message,
+    pub operator: Option<User>,
+    pub old_message: Message,
 }
