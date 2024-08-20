@@ -3,8 +3,8 @@
 **Oxidebot** is a lightweight yet powerful chatbot framework based on Rust and the Tokio runtime. It aims to provide developers with a flexible and extensible environment for bot development through modular design.
 
 ## Available Bots
-- onebot_v11_oxidebot
-- telegram_bot_oxidebot
+- [onebot_v11_oxidebot](https://github.com/canxin121/onebot_v11_oxidebot)
+- [telegram_bot_oxidebot](https://github.com/canxin121/telegram_bot_oxidebot)
 
 ## Example Usage
 - [oxidebot_example](https://github.com/canxin121/oxidebot_example)
