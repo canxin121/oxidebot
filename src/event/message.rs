@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MessageEvent {
     pub id: String,
-    pub platform: &'static str,
     pub time: Option<DateTime<Utc>>,
     pub sender: User,
     pub group: Option<Group>,
@@ -25,7 +24,7 @@ impl MessageEvent {
         &self,
         bot: BotObject,
         message: Vec<MessageSegment>,
-    ) -> Result<response::SendMessageResponse> {
+    ) -> Result<Vec<response::SendMessageResponse>> {
         match &self.group {
             Some(group) => {
                 bot.send_message(message, SendMessageTarget::Group(group.id.clone()))
@@ -42,7 +41,7 @@ impl MessageEvent {
         &self,
         bot: BotObject,
         message: Vec<MessageSegment>,
-    ) -> Result<response::SendMessageResponse> {
+    ) -> Result<Vec<response::SendMessageResponse>> {
         bot.send_message(message, SendMessageTarget::Private(self.sender.id.clone()))
             .await
     }
@@ -55,7 +54,7 @@ impl MessageEvent {
         &self,
         bot: BotObject,
         message: Vec<MessageSegment>,
-    ) -> Result<response::SendMessageResponse> {
+    ) -> Result<Vec<response::SendMessageResponse>> {
         let mut message = message;
         message.push(MessageSegment::Reply {
             message_id: self.message.id.clone(),

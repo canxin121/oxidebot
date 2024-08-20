@@ -20,6 +20,7 @@ pub enum NoticeEvent {
     GroupMemberMuteChangeEvent(GroupMemberMuteChangeEvent),
     GroupHightLightChangeEvent(GroupHightLightChangeEvent),
     GroupMemberAliasChangeEvent(GroupMemberAliasChangeEvent),
+    MessageReactionsEvent(MessageReactionsEvent),
     MessageDeletedEvent(MessageDeletedEvent),
     MessageEditedEvent(MessageEditedEvent),
 }
@@ -29,12 +30,12 @@ impl NoticeEvent {
         &self,
         bot: BotObject,
         message: Vec<MessageSegment>,
-    ) -> Result<response::SendMessageResponse> {
+    ) -> Result<Vec<response::SendMessageResponse>> {
         async fn send_group_message_helper(
             bot: BotObject,
             message: Vec<MessageSegment>,
             group_id: String,
-        ) -> Result<response::SendMessageResponse> {
+        ) -> Result<Vec<response::SendMessageResponse>> {
             bot.send_message(
                 message,
                 crate::api::payload::SendMessageTarget::Group(group_id),
@@ -45,7 +46,7 @@ impl NoticeEvent {
             bot: BotObject,
             message: Vec<MessageSegment>,
             user_id: String,
-        ) -> Result<response::SendMessageResponse> {
+        ) -> Result<Vec<response::SendMessageResponse>> {
             bot.send_message(
                 message,
                 crate::api::payload::SendMessageTarget::Private(user_id),
@@ -65,7 +66,8 @@ impl NoticeEvent {
             | NoticeEvent::GroupMemberMuteChangeEvent(GroupMemberMuteChangeEvent {
                 group, ..
             }) => send_group_message_helper(bot, message, group.id.clone()).await,
-            NoticeEvent::MessageDeletedEvent(MessageDeletedEvent { user, group, .. }) => {
+            NoticeEvent::MessageEditedEvent(MessageEditedEvent { user, group, .. })
+            | NoticeEvent::MessageReactionsEvent(MessageReactionsEvent { user, group, .. }) => {
                 if let Some(group) = group {
                     send_group_message_helper(bot, message, group.id.clone()).await
                 } else {
@@ -79,11 +81,13 @@ impl NoticeEvent {
                     send_group_message_helper(bot, message, group.id.clone()).await
                 }
             }
-            NoticeEvent::MessageEditedEvent(MessageEditedEvent { user, group, .. }) => {
+            NoticeEvent::MessageDeletedEvent(MessageDeletedEvent { user, group, .. }) => {
                 if let Some(group) = group {
                     send_group_message_helper(bot, message, group.id.clone()).await
-                } else {
+                } else if let Some(user) = user {
                     send_private_message_helper(bot, message, user.id.clone()).await
+                } else {
+                    Err(anyhow::anyhow!("Can't send message to unknown user"))
                 }
             }
         }
@@ -146,10 +150,10 @@ pub struct GroupMemberAliasChangeEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageDeletedEvent {
-    pub user: User,
+    pub user: Option<User>,
     pub operator: Option<User>,
     pub group: Option<Group>,
-    pub message: Message,
+    pub message: Option<Message>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,7 +201,15 @@ pub enum MuteType {
 pub struct MessageEditedEvent {
     pub user: User,
     pub group: Option<Group>,
-    pub new_message: Message,
+    pub new_message: Option<Message>,
     pub operator: Option<User>,
-    pub old_message: Message,
+    pub old_message: Option<Message>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageReactionsEvent {
+    pub user: User,
+    pub group: Option<Group>,
+    pub message: Message,
+    pub reactions: Vec<String>,
 }

@@ -3,15 +3,7 @@ use std::sync::Arc;
 use crate::{
     api::SendMessageResponse,
     bot::BotObject,
-    event::{
-        self,
-        notice::{
-            GroupAdminChangeEvent, GroupHightLightChangeEvent, GroupMemberAliasChangeEvent,
-            GroupMemberDecreaseEvent, GroupMemberIncreseEvent, GroupMemberMuteChangeEvent,
-            GroupMuteChangeEvent, MessageDeletedEvent, MessageEditedEvent,
-        },
-        Event, EventObject,
-    },
+    event::{self, Event, EventObject},
     source::{
         group::Group,
         message::{Message, MessageSegment},
@@ -29,13 +21,17 @@ pub struct Matcher {
 }
 
 impl Matcher {
-    pub fn new(event_object: EventObject, bot: BotObject) -> Result<Self> {
-        let event = Arc::new(event_object.into_event()?);
-        Ok(Self {
-            event_object,
-            event,
-            bot,
-        })
+    pub fn new(event_object: EventObject, bot: BotObject) -> Vec<Self> {
+        let event = event_object.get_events();
+        let mut matchers = Vec::new();
+        for event in event.into_iter() {
+            matchers.push(Self {
+                event_object: event_object.clone(),
+                event: Arc::new(event),
+                bot: bot.clone(),
+            });
+        }
+        matchers
     }
 
     pub fn try_get_user(&self) -> Option<&User> {
@@ -47,7 +43,7 @@ impl Matcher {
                 event::NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.user),
                 event::NoticeEvent::GroupHightLightChangeEvent(event) => event.sender.as_ref(),
                 event::NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.user),
-                event::NoticeEvent::MessageDeletedEvent(event) => Some(&event.user),
+                event::NoticeEvent::MessageDeletedEvent(event) => event.user.as_ref(),
                 _ => None,
             },
             Event::RequestEvent(event) => match event {
@@ -109,7 +105,11 @@ impl Matcher {
                     .and_then(|s| Some(s.id == user_id))
                     .unwrap_or(false),
                 event::NoticeEvent::GroupMemberAliasChangeEvent(event) => event.user.id == user_id,
-                event::NoticeEvent::MessageDeletedEvent(event) => event.user.id == user_id,
+                event::NoticeEvent::MessageDeletedEvent(event) => event
+                    .user
+                    .as_ref()
+                    .and_then(|u| Some(u.id == user_id))
+                    .unwrap_or(false),
                 _ => false,
             },
             Event::RequestEvent(event) => match event {
@@ -124,7 +124,7 @@ impl Matcher {
     pub async fn try_send_message(
         &self,
         message: Vec<MessageSegment>,
-    ) -> Result<SendMessageResponse> {
+    ) -> Result<Vec<SendMessageResponse>> {
         match self.event.as_ref() {
             Event::MessageEvent(event) => match event.group.as_ref() {
                 Some(group) => {
@@ -146,74 +146,7 @@ impl Matcher {
                         .await
                 }
             },
-            Event::NoticeEvent(event) => match event {
-                crate::event::NoticeEvent::GroupMemberIncreseEvent(GroupMemberIncreseEvent {
-                    group: Group { id, .. },
-                    ..
-                })
-                | crate::event::NoticeEvent::GroupMemberDecreaseEvent(GroupMemberDecreaseEvent {
-                    group: Group { id, .. },
-                    ..
-                })
-                | crate::event::NoticeEvent::GroupAdminChangeEvent(GroupAdminChangeEvent {
-                    group: Group { id, .. },
-                    ..
-                })
-                | crate::event::NoticeEvent::GroupMuteChangeEvent(GroupMuteChangeEvent {
-                    group: Group { id, .. },
-                    ..
-                })
-                | crate::event::NoticeEvent::GroupMemberMuteChangeEvent(
-                    GroupMemberMuteChangeEvent {
-                        group: Group { id, .. },
-                        ..
-                    },
-                )
-                | crate::event::NoticeEvent::GroupHightLightChangeEvent(
-                    GroupHightLightChangeEvent {
-                        group: Group { id, .. },
-                        ..
-                    },
-                )
-                | crate::event::NoticeEvent::GroupMemberAliasChangeEvent(
-                    GroupMemberAliasChangeEvent {
-                        group: Group { id, .. },
-                        ..
-                    },
-                ) => {
-                    self.bot
-                        .send_message(
-                            message,
-                            crate::api::payload::SendMessageTarget::Group(id.clone()),
-                        )
-                        .await
-                }
-                event::NoticeEvent::MessageDeletedEvent(MessageDeletedEvent {
-                    user,
-                    group,
-                    ..
-                })
-                | event::NoticeEvent::MessageEditedEvent(MessageEditedEvent {
-                    user, group, ..
-                }) => match group.as_ref() {
-                    Some(group) => {
-                        self.bot
-                            .send_message(
-                                message,
-                                crate::api::payload::SendMessageTarget::Group(group.id.clone()),
-                            )
-                            .await
-                    }
-                    None => {
-                        self.bot
-                            .send_message(
-                                message,
-                                crate::api::payload::SendMessageTarget::Private(user.id.clone()),
-                            )
-                            .await
-                    }
-                },
-            },
+            Event::NoticeEvent(event) => event.send_message(self.bot.clone(), message).await,
             Event::RequestEvent(event) => match event {
                 event::RequestEvent::GroupAddEvent(event) => {
                     self.bot
@@ -232,7 +165,7 @@ impl Matcher {
     pub async fn try_reply_message(
         &self,
         message: Vec<MessageSegment>,
-    ) -> Result<SendMessageResponse> {
+    ) -> Result<Vec<SendMessageResponse>> {
         let message_id = self
             .try_get_message()
             .ok_or(anyhow::anyhow!("No message"))?

@@ -16,23 +16,23 @@ pub struct Message {
 }
 
 impl Message {
+    // The first text segment is starts with the specified text
     pub fn starts_with_text(&self, text: &str) -> bool {
-        if let Some(MessageSegment::Text { content }) = self.segments.first() {
-            content.starts_with(text)
-        } else {
-            false
-        }
+        self.segments.iter().any(|seg| match seg {
+            MessageSegment::Text { content } => content.starts_with(text),
+            _ => false,
+        })
     }
     
+    // Trim the first text segment that starts with the specified text
     pub fn trim_head_text(&self, text: &str) -> Vec<MessageSegment> {
         let mut segments = self.segments.clone();
-        if let Some(MessageSegment::Text { content }) = segments.first() {
-            if content.starts_with(text) {
-                let len = text.len();
-                let content = content.clone();
-                segments[0] = MessageSegment::Text {
-                    content: content[len..].to_string(),
-                };
+        for seg in &mut segments {
+            if let MessageSegment::Text { content } = seg {
+                if content.starts_with(text) {
+                    *content = content.trim_start_matches(text).to_string();
+                    break;
+                }
             }
         }
         segments
@@ -64,21 +64,17 @@ pub enum MessageSegment {
         content: String,
     },
     Image {
-        id: Option<String>,
         file: Option<File>,
     },
     Video {
-        id: Option<String>,
         file: Option<File>,
         length: Option<i32>,
     },
     Audio {
-        id: Option<String>,
         file: Option<File>,
         length: Option<i32>,
     },
     File {
-        id: Option<String>,
         file: Option<File>,
     },
     Reply {
@@ -131,15 +127,11 @@ impl MessageSegment {
     }
 
     pub fn image(file: File) -> Self {
-        MessageSegment::Image {
-            id: None,
-            file: Some(file),
-        }
+        MessageSegment::Image { file: Some(file) }
     }
 
     pub fn video(file: File, length: Option<i32>) -> Self {
         MessageSegment::Video {
-            id: None,
             file: Some(file),
             length,
         }
@@ -147,17 +139,13 @@ impl MessageSegment {
 
     pub fn audio(file: File, length: Option<i32>) -> Self {
         MessageSegment::Audio {
-            id: None,
             file: Some(file),
             length,
         }
     }
 
     pub fn file(file: File) -> Self {
-        MessageSegment::File {
-            id: None,
-            file: Some(file),
-        }
+        MessageSegment::File { file: Some(file) }
     }
 
     pub fn reply<T: Into<String>>(message_id: T) -> Self {

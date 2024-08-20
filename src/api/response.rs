@@ -45,7 +45,7 @@ pub struct UserGetProfileResponse {
 
 #[derive(Debug)]
 pub struct BotGetProfileResponse {
-    pub profile: User,
+    pub profile: UserProfile,
 }
 
 #[derive(Debug)]

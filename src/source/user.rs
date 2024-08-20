@@ -8,24 +8,19 @@ pub struct User {
     pub group_info: Option<UserGroupInfo>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub enum Role {
     Owner,
     Admin,
+    #[default]
     Member,
     Guest,
     Unknown,
 }
 
-impl Default for Role {
-    fn default() -> Self {
-        Role::Unknown
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct UserGroupInfo {
-    pub title: Option<String>,
+    pub alias: Option<String>,
     pub role: Option<Role>,
     pub join_time: Option<DateTime<Utc>>,
     pub last_active_time: Option<DateTime<Utc>>,
@@ -62,7 +57,7 @@ impl Default for Sex {
 pub struct UserProfile {
     pub nickname: Option<String>,
     pub sex: Option<Sex>,
-    pub age: Option<u8>,
+    pub age: Option<u64>,
     pub avatar: Option<Uri>,
     pub email: Option<String>,
     pub phone: Option<String>,

@@ -1,7 +1,6 @@
 use std::any::Any;
 
 use any::AnyEvent;
-use anyhow::Result;
 pub use message::MessageEvent;
 pub use meta::MetaEvent;
 pub use notice::NoticeEvent;
@@ -25,7 +24,7 @@ pub enum Event {
 /// TraitObject can't take self:Arc<Self>, so you should impl Send and Sync And Clone for you event
 /// Tip: use `Arc` to wrap the your event.
 pub trait EventTrait: Send + Sync + Any {
-    fn into_event(&self) -> Result<Event>;
+    fn get_events(&self) -> Vec<Event>;
     fn server(&self) -> &'static str;
     // TraitObject can't inherit Clone, so you should manually implement it
     fn clone_box(&self) -> EventObject;
@@ -39,11 +38,11 @@ impl Clone for EventObject {
     fn clone(&self) -> Self {
         self.clone_box()
     }
-}
+}                           
 
 impl std::fmt::Debug for EventObject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let event = self.into_event();
+        let event = self.get_events();
         write!(f, "{:?}", event)
     }
 }
