@@ -4,6 +4,7 @@
 
 ## Available Bots
 - onebot_v11_oxidebot
+- telegram_bot_oxidebot
 
 ## Example Usage
 - [oxidebot_example](https://github.com/canxin121/oxidebot_example)
