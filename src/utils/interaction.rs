@@ -18,7 +18,7 @@ macro_rules! wait_for_input {
     ($receiver:expr) => {
         oxidebot::utils::interaction::wait_for_input(
             $receiver,
-            std::time::std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
         )
         .await
     };
