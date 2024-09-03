@@ -52,9 +52,12 @@ pub async fn add_bots(bots: Vec<BotObject>, sender: mpsc::Sender<Matcher>) {
     }
 }
 
-pub async fn get_bot(bot_id: &str) -> Option<BotObject> {
+pub async fn get_bot(server:&str, bot_id: &str) -> Option<BotObject> {
     let bots = GLOBAL_BOTS.read().await; // 使用异步的 .read().await
     for bot in bots.iter() {
+        if server != bot.server(){
+            continue;
+        }
         if let Some(bot_info) = bot.bot_info().await.id {
             if bot_info == bot_id {
                 return Some(bot.clone());
