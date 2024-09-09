@@ -175,4 +175,21 @@ impl Matcher {
         message.push(MessageSegment::reply(message_id));
         self.try_send_message(message).await
     }
+
+    pub async fn try_delete_msg(&self) -> Result<()> {
+        let message_id = self
+            .try_get_message()
+            .ok_or(anyhow::anyhow!("No message"))?
+            .id
+            .clone();
+        self.bot.delete_message(message_id).await
+    }
+
+    pub async fn is_group(&self) -> bool {
+        self.try_get_group().is_some()
+    }
+
+    pub async fn is_private(&self) -> bool {
+        self.try_get_group().is_none()
+    }
 }
