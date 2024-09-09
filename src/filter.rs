@@ -2,9 +2,14 @@ use async_trait::async_trait;
 
 use crate::matcher::Matcher;
 
+/// Filter runs before the Handler, allowing it to process the event and decide whether the event should continue to be handled by the Handler.
+/// The Filter runs in order of priority, from low to high and stops when one of the Filters returns false.
+/// It's a good idea to allow the user to customize the priority of the Filter.
 #[async_trait]
 pub trait FilterTrait: Send + Sync {
+    /// Filter the event with the Matcher.
     async fn filter(&self, matcher: Matcher) -> bool;
+    /// Get the priority of the Filter.
     fn get_priority(&self) -> u8;
 }
 

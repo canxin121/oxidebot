@@ -13,6 +13,8 @@ use crate::{
 
 use anyhow::Result;
 
+/// Matcher is a struct that contains the eventObject, event and the bot.
+/// It implements some methods to get the user, message, group and so on.
 #[derive(Clone, Debug)]
 pub struct Matcher {
     pub event_object: EventObject,

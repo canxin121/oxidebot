@@ -5,13 +5,16 @@ use tokio::task::JoinHandle;
 
 use crate::matcher::Matcher;
 
+/// Active handler runs forever, and you can do something in the background at any time.
 #[async_trait]
 pub trait ActiveHandlerTrait: Send + Sync {
     async fn run_forever(&self) -> Result<()>;
 }
 
+/// Event handler only runs when an event is triggered.
 #[async_trait]
 pub trait EventHandlerTrait: Send + Sync {
+    /// Handle the triggered event with the matcher.
     async fn handle(&self, matcher: Matcher) -> Result<()>;
 }
 

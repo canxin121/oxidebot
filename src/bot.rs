@@ -6,17 +6,20 @@ use tokio::task::JoinHandle;
 use crate::{api::CallApiTrait, matcher::Matcher, source::bot::BotInfo};
 
 pub type BotObject = Box<dyn BotTrait>;
-
-/// TraitObject can't take self:Arc<Self>, so you should impl Send and Sync And Clone for you bot
+/// Bot should impl CallApiTrait before impl BotTrait
+/// TraitObject can't take self:`Arc<Self>`, so you should impl Send and Sync And Clone(costless clone) for you bot
 /// Tip: use `Arc` to wrap the your bot.
 #[async_trait::async_trait]
 pub trait BotTrait: Send + Sync + CallApiTrait {
+    /// get the basic information of the bot
     async fn bot_info(&self) -> BotInfo;
+    /// start_sending_events is a async function that will be `tokio::spawn` called when the bot is started
     async fn start_sending_events(&self, sender: broadcast::Sender<Matcher>);
+    /// server means the server that the bot belongs to
     fn server(&self) -> &'static str;
-    // TraitObject can't inherit Clone, so you should manually implement it
+    /// TraitObject can't inherit Clone, so you should manually implement it
     fn clone_box(&self) -> BotObject;
-    // TraitObject can't downcast to the concrete type, so you should implement it manually
+    /// TraitObject can't downcast to the concrete type, so you should implement it manually
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -36,7 +39,7 @@ static GLOBAL_BOTS: LazyLock<RwLock<Vec<BotObject>>> = LazyLock::new(|| RwLock::
 static GLOBAL_HANDLERS: LazyLock<RwLock<Vec<JoinHandle<()>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-pub async fn add_bots(bots: Vec<BotObject>, sender: broadcast::Sender<Matcher>) {
+pub(crate) async fn add_bots(bots: Vec<BotObject>, sender: broadcast::Sender<Matcher>) {
     let mut bots_lock = GLOBAL_BOTS.write().await;
     let mut handlers_lock = GLOBAL_HANDLERS.write().await;
 
@@ -52,8 +55,9 @@ pub async fn add_bots(bots: Vec<BotObject>, sender: broadcast::Sender<Matcher>) 
     }
 }
 
+/// Get bot registed in OxideBotManager by server and bot_id
 pub async fn get_bot(server: &str, bot_id: &str) -> Option<BotObject> {
-    let bots = GLOBAL_BOTS.read().await; // 使用异步的 .read().await
+    let bots = GLOBAL_BOTS.read().await;
     for bot in bots.iter() {
         if server != bot.server() {
             continue;

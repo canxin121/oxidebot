@@ -18,6 +18,8 @@ use crate::source::{
     user::UserProfile,
 };
 
+/// CallApiTrait is a trait that defines the methods that a bot should implement to interact with the API.
+/// If the bot does not implement the method, it will return an error.
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait CallApiTrait {

@@ -43,7 +43,7 @@ A `Handler` can include either an `EventHandler` or an `ActiveHandler`, or both.
 ### OxideBotManager
 `OxideBotManager` is the manager of the framework, the entry point for starting and running the bot. Developers should call its `run_block` method at the end of the `main` function to launch the entire framework along with all registered `Bot`s, `Filter`s, and `Handler`s.
 
-## Auxiliary Tools
+## Auxiliary Tools for Handler Writer
 
 ### Wait
 

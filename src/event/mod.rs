@@ -21,7 +21,8 @@ pub enum Event {
     AnyEvent(AnyEvent),
 }
 
-/// TraitObject can't take self:Arc<Self>, so you should impl Send and Sync And Clone for you event
+/// EventTrait is a trait that represents the event that the bot triggers.
+/// TraitObject can't take self:`Arc<Self>`, so you should impl Send and Sync And Clone(costless clone) for you event
 /// Tip: use `Arc` to wrap the your event.
 pub trait EventTrait: Send + Sync + Any {
     fn get_events(&self) -> Vec<Event>;
@@ -38,7 +39,7 @@ impl Clone for EventObject {
     fn clone(&self) -> Self {
         self.clone_box()
     }
-}                           
+}
 
 impl std::fmt::Debug for EventObject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

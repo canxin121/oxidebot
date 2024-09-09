@@ -28,6 +28,8 @@ impl BroadcastSender {
     }
 }
 
+/// OxideBotManager is the main struct and the entry of OxideBot
+/// Use it to build your bot framework and run it.
 pub struct OxideBotManager {
     handler_pool: EventHandlerPool,
     filter_pool: FilterPool,
@@ -36,6 +38,7 @@ pub struct OxideBotManager {
 }
 
 impl OxideBotManager {
+    /// Create a new OxideBotManager
     pub fn new() -> Self {
         let (broadcast_sender, broadcast_receiver) = broadcast::channel(100);
         OxideBotManager {
@@ -45,7 +48,7 @@ impl OxideBotManager {
             broadcast_receiver,
         }
     }
-
+    /// Build a OxideBotManager with bots, handlers and filters
     pub async fn build(
         bots: Vec<BotObject>,
         handlers: Vec<Handler>,
@@ -60,17 +63,17 @@ impl OxideBotManager {
             broadcast_receiver,
         }
     }
-
+    /// Add a bot to the OxideBotManager
     pub async fn bot(self, bot: BotObject) -> Self {
         add_bots(vec![bot.into()], self.broadcast_sender.clone_sender()).await;
         self
     }
-
+    /// Add a handler to the OxideBotManager
     pub fn handler<H: Into<Handler>>(mut self, handler: H) -> Self {
         self.handler_pool.add_handler(handler.into());
         self
     }
-
+    /// Add a handler to the OxideBotManager with a handler creator
     pub fn wait_handler<H>(self, handler_creator: impl FnOnce(BroadcastSender) -> H) -> Self
     where
         H: Into<Handler>,
@@ -78,13 +81,13 @@ impl OxideBotManager {
         let handler = handler_creator(self.broadcast_sender.clone());
         self.handler(handler)
     }
-
+    /// Add a filter to the OxideBotManager
     pub fn filter<F: Into<FilterObject>>(mut self, filter: F) -> Self {
         self.filter_pool.add_filter(filter.into());
         self
     }
-
-    pub async fn run_block(mut self) {
+    /// Run the OxideBotManager, this function will block the current thread
+    pub async fn run_block(mut self) -> ! {
         loop {
             if let Ok(matcher) = self.broadcast_receiver.recv().await {
                 if self.filter_pool.filter(matcher.clone()).await {
