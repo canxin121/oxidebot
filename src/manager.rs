@@ -71,7 +71,7 @@ impl OxideBotManager {
         self
     }
 
-    pub async fn wait_handler<H>(self, handler_creator: impl FnOnce(BroadcastSender) -> H) -> Self
+    pub fn wait_handler<H>(self, handler_creator: impl FnOnce(BroadcastSender) -> H) -> Self
     where
         H: Into<Handler>,
     {

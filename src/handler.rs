@@ -16,7 +16,6 @@ pub trait EventHandlerTrait: Send + Sync {
 }
 
 pub type EventHandlerObject = Box<dyn EventHandlerTrait>;
-
 pub type ActiveHandlerObject = Box<dyn ActiveHandlerTrait>;
 
 #[derive(Default)]
