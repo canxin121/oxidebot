@@ -12,7 +12,7 @@ keywords = ["bot", "chatbot", "oxidebot"]
 categories = ["science::robotics", "api-bindings"]
 
 [dependencies]
-anyhow = "1.0.86"
+anyhow = "1.0.87"
 async-trait = "0.1.82"
 chrono = "0.4.38"
 hyper = "1.4.1"

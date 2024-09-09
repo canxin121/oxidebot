@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::LazyLock;
-use tokio::sync::RwLock;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::{broadcast, RwLock};
+use tokio::task::JoinHandle;
 
 use crate::{api::CallApiTrait, matcher::Matcher, source::bot::BotInfo};
 
@@ -12,7 +12,7 @@ pub type BotObject = Box<dyn BotTrait>;
 #[async_trait::async_trait]
 pub trait BotTrait: Send + Sync + CallApiTrait {
     async fn bot_info(&self) -> BotInfo;
-    async fn start_sending_events(&self, sender: mpsc::Sender<Matcher>);
+    async fn start_sending_events(&self, sender: broadcast::Sender<Matcher>);
     fn server(&self) -> &'static str;
     // TraitObject can't inherit Clone, so you should manually implement it
     fn clone_box(&self) -> BotObject;
@@ -36,7 +36,7 @@ static GLOBAL_BOTS: LazyLock<RwLock<Vec<BotObject>>> = LazyLock::new(|| RwLock::
 static GLOBAL_HANDLERS: LazyLock<RwLock<Vec<JoinHandle<()>>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-pub async fn add_bots(bots: Vec<BotObject>, sender: mpsc::Sender<Matcher>) {
+pub async fn add_bots(bots: Vec<BotObject>, sender: broadcast::Sender<Matcher>) {
     let mut bots_lock = GLOBAL_BOTS.write().await;
     let mut handlers_lock = GLOBAL_HANDLERS.write().await;
 
@@ -52,10 +52,10 @@ pub async fn add_bots(bots: Vec<BotObject>, sender: mpsc::Sender<Matcher>) {
     }
 }
 
-pub async fn get_bot(server:&str, bot_id: &str) -> Option<BotObject> {
+pub async fn get_bot(server: &str, bot_id: &str) -> Option<BotObject> {
     let bots = GLOBAL_BOTS.read().await; // 使用异步的 .read().await
     for bot in bots.iter() {
-        if server != bot.server(){
+        if server != bot.server() {
             continue;
         }
         if let Some(bot_info) = bot.bot_info().await.id {
