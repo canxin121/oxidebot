@@ -45,8 +45,27 @@ A `Handler` can include either an `EventHandler` or an `ActiveHandler`, or both.
 
 ## Auxiliary Tools
 
-### Interaction
-`Interaction` provides an interaction mode similar to `dialoguer`, supporting more intuitive event handling and dialogue flow management. It helps developers implement continuous dialogue logic and enhance the user interaction experience.
+### Wait
+
+Include a restricted `BroadcastSender` that can only use `subscribe` fn in your handler
+```rust
+pub struct WaitHandler {
+    pub broadcast_sender: BroadcastSender,
+}
+```
+
+And then use `wait` in you `HandlerTrait` impl.
+You can find all the `wait` method in `utils::wait` or define a new one youself.
+```rust
+    let (number, matcher) = wait_user_text_generic::<u8>(
+        &matcher,
+        &self.broadcast_sender,
+        Duration::from_secs(30),
+        3,
+        Some("Please send a unsigned int8".to_string()),
+    )
+    .await?;
+```
 
 ## License
 MIT OR Apache-2.0
