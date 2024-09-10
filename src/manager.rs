@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use crate::{
     bot::{add_bots, BotObject},
     filter::{FilterObject, FilterPool},
@@ -74,11 +76,11 @@ impl OxideBotManager {
         self
     }
     /// Add a handler to the OxideBotManager with a handler creator
-    pub fn wait_handler<H>(self, handler_creator: impl FnOnce(BroadcastSender) -> H) -> Self
-    where
-        H: Into<Handler>,
-    {
-        let handler = handler_creator(self.broadcast_sender.clone());
+    pub async fn wait_handler(
+        self,
+        handler_creator: impl Fn(BroadcastSender) -> Pin<Box<dyn Future<Output = Handler>>>,
+    ) -> Self {
+        let handler = handler_creator(self.broadcast_sender.clone()).await;
         self.handler(handler)
     }
     /// Add a filter to the OxideBotManager
