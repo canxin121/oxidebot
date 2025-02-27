@@ -1,4 +1,4 @@
-#![doc = include_str!("/mnt/disk/git/oxidebot/Readme.md")]
+#![doc = include_str!("../Readme.md")]
 
 pub mod api;
 pub mod bot;
