@@ -17,6 +17,8 @@
 ### Bot
 `Bot` is the core component of the framework, responsible for providing `Event`s and offering basic API methods for developers to call. It serves as the bridge between the framework and external platforms (such as QQ, Telegram, etc.).
 
+The common API is complemented by `PlatformApiRequest`. Every adapter can expose its complete native API through the same lossless JSON request, response, and multipart-file abstraction. This second layer deliberately retains platform-only capabilities even when no honest cross-platform semantic model exists. Unsupported adapters return a downcastable `UnsupportedPlatformApiError` by default, while callers can inspect `platform_api_methods` or `supports_platform_api_method` before calling a platform-only feature.
+
 ### Event
 `Event` is the object that the framework processes, representing the various events received by the bot. Event types include:
 
@@ -49,22 +51,36 @@ A `Handler` can include either an `EventHandler` or an `ActiveHandler`, or both.
 
 Include a restricted `BroadcastSender` that can only use `subscribe` fn in your handler
 ```rust
+use oxidebot::manager::BroadcastSender;
+
 pub struct WaitHandler {
     pub broadcast_sender: BroadcastSender,
 }
 ```
 
-And then use `wait` in you `HandlerTrait` impl.
-You can find all the `wait` method in `utils::wait` or define a new one youself.
+Then use `wait` in your `HandlerTrait` implementation.
+You can find the provided `wait` methods in `utils::wait` or define your own.
 ```rust
+use std::time::Duration;
+
+use anyhow::Result;
+use oxidebot::{manager::BroadcastSender, matcher::Matcher, wait_user_text_generic};
+
+async fn wait_for_number(
+    matcher: &Matcher,
+    broadcast_sender: &BroadcastSender,
+) -> Result<()> {
     let (number, matcher) = wait_user_text_generic::<u8>(
-        &matcher,
-        &self.broadcast_sender,
+        matcher,
+        broadcast_sender,
         Duration::from_secs(30),
         3,
-        Some("Please send a unsigned int8".to_string()),
+        Some("Please send an unsigned 8-bit integer".to_string()),
     )
     .await?;
+    # let _ = (number, matcher);
+    Ok(())
+}
 ```
 
 ## License

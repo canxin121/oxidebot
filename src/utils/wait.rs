@@ -99,15 +99,13 @@ where
                                             .await?;
                                     }
                                     return Err(anyhow::anyhow!("Max retries exceeded"));
-                                } else {
-                                    if let Some(error_message) = error_message.clone() {
-                                        matcher
-                                            .try_send_message(vec![MessageSegment::text(format!(
-                                                "{error_message}\nError: {:?}",
-                                                err
-                                            ))])
-                                            .await?;
-                                    }
+                                } else if let Some(error_message) = error_message.clone() {
+                                    matcher
+                                        .try_send_message(vec![MessageSegment::text(format!(
+                                            "{error_message}\nError: {:?}",
+                                            err
+                                        ))])
+                                        .await?;
                                 }
                             }
                         }

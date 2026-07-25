@@ -7,7 +7,7 @@ use tokio::fs::metadata;
 
 use super::user::User;
 
-static REQWESR_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| reqwest::Client::new());
+static REQUEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Message {
@@ -23,7 +23,7 @@ impl Message {
             _ => false,
         })
     }
-    
+
     // Trim the first text segment that starts with the specified text
     pub fn trim_head_text(&self, text: &str) -> Vec<MessageSegment> {
         let mut segments = self.segments.clone();
@@ -267,11 +267,11 @@ impl File {
         let url = url::Url::parse(url)?;
         let file_name = url
             .path_segments()
-            .and_then(|segments| segments.last())
+            .and_then(|mut segments| segments.next_back())
             .unwrap_or_default()
             .to_string();
 
-        let response = REQWESR_CLIENT.head(url.clone()).send().await?;
+        let response = REQUEST_CLIENT.head(url.clone()).send().await?;
         let size = response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -291,7 +291,7 @@ impl File {
             name: file_name,
             uri: Some(url.as_str().parse()?),
             base64: None,
-            mime: mime,
+            mime,
             size,
         })
     }

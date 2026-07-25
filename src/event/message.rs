@@ -50,7 +50,7 @@ impl MessageEvent {
         bot.delete_message(self.id.clone()).await
     }
 
-    pub async fn replay_message(
+    pub async fn reply_message(
         &self,
         bot: BotObject,
         message: Vec<MessageSegment>,
@@ -60,6 +60,15 @@ impl MessageEvent {
             message_id: self.message.id.clone(),
         });
         self.send_message(bot, message).await
+    }
+
+    /// Legacy spelling retained for 0.1 compatibility.
+    pub async fn replay_message(
+        &self,
+        bot: BotObject,
+        message: Vec<MessageSegment>,
+    ) -> Result<Vec<response::SendMessageResponse>> {
+        self.reply_message(bot, message).await
     }
 
     pub async fn set_reactions(&self, bot: BotObject, reaction_ids: Vec<String>) -> Result<()> {

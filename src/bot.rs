@@ -31,7 +31,7 @@ impl Clone for BotObject {
 
 impl std::fmt::Debug for BotObject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BotObejct")
+        write!(f, "BotObject")
     }
 }
 

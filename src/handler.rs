@@ -32,6 +32,12 @@ pub struct EventHandlerPool {
     active_handler_joinhandsles: Vec<JoinHandle<()>>,
 }
 
+impl Default for EventHandlerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventHandlerPool {
     pub fn new() -> Self {
         EventHandlerPool {

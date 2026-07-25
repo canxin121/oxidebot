@@ -10,6 +10,10 @@ pub mod matcher;
 pub mod source;
 pub mod utils;
 
+pub use api::platform::{
+    PlatformApiFile, PlatformApiFileSource, PlatformApiRequest, PlatformApiResponse,
+    UnsupportedPlatformApiError,
+};
 pub use api::CallApiTrait;
 pub use bot::{get_bot, BotTrait};
 pub use event::EventTrait;

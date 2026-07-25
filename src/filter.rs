@@ -19,6 +19,12 @@ pub struct FilterPool {
     filters: Vec<FilterObject>,
 }
 
+impl Default for FilterPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FilterPool {
     pub fn new() -> Self {
         FilterPool {

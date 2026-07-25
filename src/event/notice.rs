@@ -11,6 +11,7 @@ use crate::{
     },
 };
 
+#[allow(clippy::large_enum_variant)] // Kept inline for public API compatibility.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoticeEvent {
     GroupMemberIncreseEvent(GroupMemberIncreseEvent),
@@ -101,6 +102,9 @@ pub struct GroupMemberIncreseEvent {
     pub reason: GroupMemberIncreseReason,
 }
 
+/// Correctly spelled alias for the original 0.1 public type name.
+pub type GroupMemberIncreaseEvent = GroupMemberIncreseEvent;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMemberDecreaseEvent {
     pub group: Group,
@@ -139,6 +143,9 @@ pub struct GroupHightLightChangeEvent {
     pub operator: Option<User>,
 }
 
+/// Correctly spelled alias for the original 0.1 public type name.
+pub type GroupHighlightChangeEvent = GroupHightLightChangeEvent;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMemberAliasChangeEvent {
     pub group: Group,
@@ -156,6 +163,7 @@ pub struct MessageDeletedEvent {
     pub message: Option<Message>,
 }
 
+#[allow(clippy::large_enum_variant)] // Kept inline for public API compatibility.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupMemberIncreseReason {
     Approve {
@@ -167,6 +175,9 @@ pub enum GroupMemberIncreseReason {
     },
     Unknown,
 }
+
+/// Correctly spelled alias for the original 0.1 public type name.
+pub type GroupMemberIncreaseReason = GroupMemberIncreseReason;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupMemberDecreaseReason {
@@ -189,6 +200,9 @@ pub enum GroupHightLightChangeType {
     Unset,
     Unknown,
 }
+
+/// Correctly spelled alias for the original 0.1 public type name.
+pub type GroupHighlightChangeType = GroupHightLightChangeType;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MuteType {

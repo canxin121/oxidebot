@@ -37,52 +37,15 @@ impl Matcher {
     }
 
     pub fn try_get_user(&self) -> Option<&User> {
-        match self.event.as_ref() {
-            Event::MessageEvent(event) => Some(&event.sender),
-            Event::NoticeEvent(event) => match event {
-                event::NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.user),
-                event::NoticeEvent::GroupMuteChangeEvent(_) => None,
-                event::NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.user),
-                event::NoticeEvent::GroupHightLightChangeEvent(event) => event.sender.as_ref(),
-                event::NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.user),
-                event::NoticeEvent::MessageDeletedEvent(event) => event.user.as_ref(),
-                _ => None,
-            },
-            Event::RequestEvent(event) => match event {
-                event::RequestEvent::FriendAddEvent(event) => Some(&event.user),
-                event::RequestEvent::GroupAddEvent(_) => None,
-                event::RequestEvent::GroupInviteEvent(event) => Some(&event.user),
-            },
-            _ => None,
-        }
+        event_user(self.event.as_ref())
     }
 
     pub fn try_get_message(&self) -> Option<&Message> {
-        match self.event.as_ref() {
-            Event::MessageEvent(event) => Some(&event.message),
-            _ => None,
-        }
+        event_message(self.event.as_ref())
     }
 
     pub fn try_get_group(&self) -> Option<&Group> {
-        match self.event.as_ref() {
-            Event::MessageEvent(event) => event.group.as_ref(),
-            Event::NoticeEvent(event) => match event {
-                event::NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.group),
-                event::NoticeEvent::GroupMuteChangeEvent(event) => Some(&event.group),
-                event::NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.group),
-                event::NoticeEvent::GroupHightLightChangeEvent(event) => Some(&event.group),
-                event::NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.group),
-                event::NoticeEvent::MessageDeletedEvent(event) => event.group.as_ref(),
-                _ => None,
-            },
-            Event::RequestEvent(event) => match event {
-                event::RequestEvent::FriendAddEvent(_) => None,
-                event::RequestEvent::GroupAddEvent(_) => None,
-                event::RequestEvent::GroupInviteEvent(_) => None,
-            },
-            _ => None,
-        }
+        event_group(self.event.as_ref())
     }
 
     pub async fn is_related_to_bot(&self) -> bool {
@@ -97,28 +60,10 @@ impl Matcher {
     pub fn is_related_to_user(&self, user_id: &str) -> bool {
         match self.event.as_ref() {
             Event::MessageEvent(event) => event.message.is_related_to_user(user_id),
-            Event::NoticeEvent(event) => match event {
-                event::NoticeEvent::GroupAdminChangeEvent(event) => event.user.id == user_id,
-                event::NoticeEvent::GroupMuteChangeEvent(_) => false,
-                event::NoticeEvent::GroupMemberMuteChangeEvent(event) => event.user.id == user_id,
-                event::NoticeEvent::GroupHightLightChangeEvent(event) => event
-                    .sender
-                    .as_ref()
-                    .and_then(|s| Some(s.id == user_id))
-                    .unwrap_or(false),
-                event::NoticeEvent::GroupMemberAliasChangeEvent(event) => event.user.id == user_id,
-                event::NoticeEvent::MessageDeletedEvent(event) => event
-                    .user
-                    .as_ref()
-                    .and_then(|u| Some(u.id == user_id))
-                    .unwrap_or(false),
-                _ => false,
-            },
-            Event::RequestEvent(event) => match event {
-                event::RequestEvent::FriendAddEvent(_) => true,
-                event::RequestEvent::GroupAddEvent(_) => false,
-                event::RequestEvent::GroupInviteEvent(_) => true,
-            },
+            Event::NoticeEvent(_) | Event::RequestEvent(_) => self
+                .try_get_user()
+                .map(|user| user.id == user_id)
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -193,5 +138,113 @@ impl Matcher {
 
     pub async fn is_private(&self) -> bool {
         self.try_get_group().is_none()
+    }
+}
+
+fn event_user(event: &Event) -> Option<&User> {
+    match event {
+        Event::MessageEvent(event) => Some(&event.sender),
+        Event::NoticeEvent(event) => match event {
+            event::NoticeEvent::GroupMemberIncreseEvent(event) => Some(&event.user),
+            event::NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.user),
+            event::NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.user),
+            event::NoticeEvent::GroupMuteChangeEvent(_) => None,
+            event::NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.user),
+            event::NoticeEvent::GroupHightLightChangeEvent(event) => event.sender.as_ref(),
+            event::NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.user),
+            event::NoticeEvent::MessageReactionsEvent(event) => Some(&event.user),
+            event::NoticeEvent::MessageDeletedEvent(event) => event.user.as_ref(),
+            event::NoticeEvent::MessageEditedEvent(event) => Some(&event.user),
+        },
+        Event::RequestEvent(event) => match event {
+            event::RequestEvent::FriendAddEvent(event) => Some(&event.user),
+            event::RequestEvent::GroupAddEvent(event) => Some(&event.user),
+            event::RequestEvent::GroupInviteEvent(event) => Some(&event.user),
+        },
+        Event::MetaEvent(_) | Event::AnyEvent(_) => None,
+    }
+}
+
+fn event_message(event: &Event) -> Option<&Message> {
+    match event {
+        Event::MessageEvent(event) => Some(&event.message),
+        Event::NoticeEvent(event) => match event {
+            event::NoticeEvent::GroupHightLightChangeEvent(event) => Some(&event.message),
+            event::NoticeEvent::MessageReactionsEvent(event) => Some(&event.message),
+            event::NoticeEvent::MessageDeletedEvent(event) => event.message.as_ref(),
+            event::NoticeEvent::MessageEditedEvent(event) => event.new_message.as_ref(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn event_group(event: &Event) -> Option<&Group> {
+    match event {
+        Event::MessageEvent(event) => event.group.as_ref(),
+        Event::NoticeEvent(event) => match event {
+            event::NoticeEvent::GroupMemberIncreseEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupMuteChangeEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupHightLightChangeEvent(event) => Some(&event.group),
+            event::NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.group),
+            event::NoticeEvent::MessageReactionsEvent(event) => event.group.as_ref(),
+            event::NoticeEvent::MessageDeletedEvent(event) => event.group.as_ref(),
+            event::NoticeEvent::MessageEditedEvent(event) => event.group.as_ref(),
+        },
+        Event::RequestEvent(event::RequestEvent::GroupAddEvent(event)) => Some(&event.group),
+        Event::RequestEvent(_) | Event::MetaEvent(_) | Event::AnyEvent(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        event::{
+            notice::{GroupMemberIncreseEvent, GroupMemberIncreseReason, NoticeEvent},
+            request::{GroupAddEvent, RequestEvent},
+        },
+        source::{group::Group, user::User},
+    };
+
+    use super::*;
+
+    #[test]
+    fn member_increase_exposes_its_user_and_group() {
+        let event = Event::NoticeEvent(NoticeEvent::GroupMemberIncreseEvent(
+            GroupMemberIncreseEvent {
+                group: Group {
+                    id: "group".to_owned(),
+                    ..Default::default()
+                },
+                user: User {
+                    id: "user".to_owned(),
+                    ..Default::default()
+                },
+                reason: GroupMemberIncreseReason::Unknown,
+            },
+        ));
+        assert_eq!(event_user(&event).unwrap().id, "user");
+        assert_eq!(event_group(&event).unwrap().id, "group");
+    }
+
+    #[test]
+    fn group_join_request_exposes_its_user_and_group() {
+        let event = Event::RequestEvent(RequestEvent::GroupAddEvent(GroupAddEvent {
+            id: "request".to_owned(),
+            user: User {
+                id: "user".to_owned(),
+                ..Default::default()
+            },
+            group: Group {
+                id: "group".to_owned(),
+                ..Default::default()
+            },
+            message: None,
+        }));
+        assert_eq!(event_user(&event).unwrap().id, "user");
+        assert_eq!(event_group(&event).unwrap().id, "group");
     }
 }

@@ -27,11 +27,12 @@ pub struct UserGroupInfo {
     pub level: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Sex {
     Male,
     Female,
     Other,
+    #[default]
     Unknown,
 }
 
@@ -44,12 +45,6 @@ impl From<&str> for Sex {
         } else {
             Sex::Unknown
         }
-    }
-}
-
-impl Default for Sex {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 

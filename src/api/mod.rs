@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 pub mod payload;
+pub mod platform;
 pub mod response;
 
 use payload::{GroupAdminChangeType, GroupMuteType, RequestResponse, SendMessageTarget};
@@ -17,12 +18,35 @@ use crate::source::{
     message::{File, MessageSegment},
     user::UserProfile,
 };
+use platform::{PlatformApiRequest, PlatformApiResponse, UnsupportedPlatformApiError};
 
 /// CallApiTrait is a trait that defines the methods that a bot should implement to interact with the API.
 /// If the bot does not implement the method, it will return an error.
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait CallApiTrait {
+    /// Calls a platform-native API without losing platform-specific fields.
+    ///
+    /// Adapters should implement this once to expose their complete native API.
+    /// The common methods below remain the ergonomic cross-platform layer.
+    async fn call_platform_api(&self, request: PlatformApiRequest) -> Result<PlatformApiResponse> {
+        Err(UnsupportedPlatformApiError {
+            method: request.method,
+        }
+        .into())
+    }
+
+    /// Returns the platform-native methods explicitly known by this adapter.
+    /// Calls are not required to be limited to this list, which keeps adapters
+    /// forward-compatible with newly released platform methods.
+    fn platform_api_methods(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn supports_platform_api_method(&self, method: &str) -> bool {
+        self.platform_api_methods().contains(&method)
+    }
+
     async fn send_message(
         &self,
         message: Vec<MessageSegment>,
@@ -35,6 +59,19 @@ pub trait CallApiTrait {
         Err(anyhow::anyhow!("Not implemented"))
     }
 
+    /// Edits an existing message.
+    ///
+    /// The default delegates to the legacy misspelled `edit_messagee` method
+    /// so existing 0.1 adapters remain source-compatible.
+    async fn edit_message(
+        &self,
+        message_id: String,
+        new_message: Vec<MessageSegment>,
+    ) -> Result<()> {
+        self.edit_messagee(message_id, new_message).await
+    }
+
+    /// Legacy spelling retained for 0.1 adapter compatibility.
     async fn edit_messagee(
         &self,
         message_id: String,

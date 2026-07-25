@@ -8,6 +8,7 @@ use crate::{
 };
 use tokio::sync::broadcast;
 
+#[derive(Clone)]
 pub struct BroadcastSender(broadcast::Sender<Matcher>);
 
 impl BroadcastSender {
@@ -17,12 +18,6 @@ impl BroadcastSender {
 
     pub(crate) fn clone_sender(&self) -> broadcast::Sender<Matcher> {
         self.0.clone()
-    }
-
-    // handler maker can only use methods below
-
-    pub fn clone(&self) -> Self {
-        BroadcastSender(self.0.clone())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Matcher> {
@@ -37,6 +32,12 @@ pub struct OxideBotManager {
     filter_pool: FilterPool,
     broadcast_sender: BroadcastSender,
     broadcast_receiver: broadcast::Receiver<Matcher>,
+}
+
+impl Default for OxideBotManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OxideBotManager {
@@ -67,7 +68,7 @@ impl OxideBotManager {
     }
     /// Add a bot to the OxideBotManager
     pub async fn bot(self, bot: BotObject) -> Self {
-        add_bots(vec![bot.into()], self.broadcast_sender.clone_sender()).await;
+        add_bots(vec![bot], self.broadcast_sender.clone_sender()).await;
         self
     }
     /// Add a handler to the OxideBotManager

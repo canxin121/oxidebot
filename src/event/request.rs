@@ -6,7 +6,7 @@ use crate::{
 use anyhow::Result;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum RequestEvent {         
+pub enum RequestEvent {
     FriendAddEvent(FriendAddEvent),
     GroupAddEvent(GroupAddEvent),
     GroupInviteEvent(GroupInviteEvent),

@@ -12,6 +12,7 @@ pub mod meta;
 pub mod notice;
 pub mod request;
 
+#[allow(clippy::large_enum_variant)] // Boxing variants would break the public event API.
 #[derive(Debug, Clone)]
 pub enum Event {
     MessageEvent(MessageEvent),
