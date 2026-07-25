@@ -1,6 +1,6 @@
 [package]
 name = "oxidebot"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "A lightweight yet powerful chatbot framework"
 license = "MIT OR Apache-2.0"

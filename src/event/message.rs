@@ -1,6 +1,8 @@
 use crate::{
     api::{payload::SendMessageTarget, response},
     bot::BotObject,
+    collaboration::Reaction,
+    conversation::MessageRef,
     source::{
         group::Group,
         message::{Message, MessageSegment},
@@ -72,10 +74,13 @@ impl MessageEvent {
     }
 
     pub async fn set_reactions(&self, bot: BotObject, reaction_ids: Vec<String>) -> Result<()> {
-        for reaction_id in reaction_ids {
-            bot.set_message_reaction(self.id.clone(), reaction_id)
-                .await?;
-        }
-        Ok(())
+        bot.set_message_reactions(
+            MessageRef::new(self.id.clone()),
+            reaction_ids
+                .into_iter()
+                .map(Reaction::UnicodeEmoji)
+                .collect(),
+        )
+        .await
     }
 }
