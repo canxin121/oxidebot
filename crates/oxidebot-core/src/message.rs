@@ -1,5 +1,7 @@
-use crate::{BotSlot, CompactId, ConversationKey, InvalidId, PlatformId, RetainedSize, UserKey};
-use bytes::Bytes;
+use crate::{
+    BotSlot, CompactId, ConversationKey, InvalidId, PlatformId, RetainedBytes, RetainedSize,
+    UserKey,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, ops::Range, path::PathBuf, sync::Arc};
@@ -9,6 +11,20 @@ use thiserror::Error;
 pub const MAX_METADATA_ENTRIES: usize = 64;
 /// Maximum combined metadata key and raw JSON bytes.
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;
+/// Maximum bytes accepted for a message idempotency key.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+/// Maximum number of ordered content items in one message.
+pub const MAX_MESSAGE_CONTENT_ITEMS: usize = 4_096;
+/// Maximum explicit recipients in one portable message target.
+pub const MAX_MESSAGE_RECIPIENTS: usize = 4_096;
+/// Maximum UTF-8 bytes in one text or rich-text value.
+pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum number of style spans in one rich-text value.
+pub const MAX_RICH_TEXT_SPANS: usize = 8_192;
+/// Maximum styles attached to one rich-text span.
+pub const MAX_STYLES_PER_SPAN: usize = 64;
+/// Maximum bytes in one link/contact/media descriptor string.
+pub const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 
 /// Structural model validation error.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -23,6 +39,12 @@ pub enum ModelError {
     InvalidTextSpan,
     #[error("message metadata exceeds its structural limit")]
     MetadataTooLarge,
+    #[error("message idempotency key must contain 1..={MAX_IDEMPOTENCY_KEY_BYTES} bytes")]
+    InvalidIdempotencyKey,
+    #[error("{0} exceeds its structural item limit")]
+    CollectionTooLarge(&'static str),
+    #[error("{0} exceeds its structural byte limit")]
+    ValueTooLarge(&'static str),
 }
 
 /// Reference to one platform message.
@@ -153,7 +175,7 @@ pub enum MediaSource {
     /// Local path opened only by an adapter or media service.
     Path(Arc<PathBuf>),
     /// Shared in-memory bytes.
-    Bytes(Bytes),
+    Bytes(RetainedBytes),
 }
 
 impl MediaSource {
@@ -164,7 +186,7 @@ impl MediaSource {
             Self::PlatformId(value) => value.estimated_bytes(),
             Self::Url(value) => value.len(),
             Self::Path(value) => value.as_os_str().as_encoded_bytes().len(),
-            Self::Bytes(value) => value.len(),
+            Self::Bytes(value) => value.retained_bytes(),
         }
     }
 }
@@ -464,6 +486,14 @@ impl From<String> for OutgoingMessage {
     }
 }
 
+fn validate_descriptor(value: &str, label: &'static str) -> Result<(), ModelError> {
+    if value.len() > MAX_DESCRIPTOR_BYTES {
+        Err(ModelError::ValueTooLarge(label))
+    } else {
+        Ok(())
+    }
+}
+
 impl MessageRef {
     /// Validates ownership and external identifier limits.
     pub fn validate_for(&self, bot: BotSlot) -> Result<(), ModelError> {
@@ -483,6 +513,9 @@ impl MessageTarget {
             return Err(ModelError::WrongBot);
         }
         self.conversation.validate()?;
+        if self.recipients.len() > MAX_MESSAGE_RECIPIENTS {
+            return Err(ModelError::CollectionTooLarge("message recipients"));
+        }
         for recipient in &self.recipients {
             if recipient.bot != bot {
                 return Err(ModelError::WrongBot);
@@ -514,13 +547,13 @@ impl TextStyle {
                 user.validate()?;
             }
             Self::Native(native) => native.validate_for(platform)?,
+            Self::Link(value) => validate_descriptor(value, "rich-text link")?,
             Self::Bold
             | Self::Italic
             | Self::Underline
             | Self::Strikethrough
             | Self::Code
-            | Self::Spoiler
-            | Self::Link(_) => {}
+            | Self::Spoiler => {}
         }
         Ok(())
     }
@@ -529,7 +562,16 @@ impl TextStyle {
 impl RichText {
     /// Validates UTF-8 span boundaries and nested styles.
     pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        if self.text.len() > MAX_TEXT_BYTES {
+            return Err(ModelError::ValueTooLarge("rich text"));
+        }
+        if self.spans.len() > MAX_RICH_TEXT_SPANS {
+            return Err(ModelError::CollectionTooLarge("rich-text spans"));
+        }
         for span in &self.spans {
+            if span.styles.len() > MAX_STYLES_PER_SPAN {
+                return Err(ModelError::CollectionTooLarge("styles per rich-text span"));
+            }
             if span.range.start > span.range.end
                 || span.range.end > self.text.len()
                 || !self.text.is_char_boundary(span.range.start)
@@ -548,8 +590,21 @@ impl RichText {
 impl Media {
     /// Validates nested IDs and native data without performing I/O.
     pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
-        if let MediaSource::PlatformId(id) = &self.source {
-            id.validate()?;
+        match &self.source {
+            MediaSource::PlatformId(id) => id.validate()?,
+            MediaSource::Url(value) => validate_descriptor(value, "media URL")?,
+            MediaSource::Path(value) => {
+                if value.as_os_str().as_encoded_bytes().len() > MAX_DESCRIPTOR_BYTES {
+                    return Err(ModelError::ValueTooLarge("media path"));
+                }
+            }
+            MediaSource::Bytes(_) => {}
+        }
+        if let Some(name) = &self.name {
+            validate_descriptor(name, "media name")?;
+        }
+        if let Some(mime) = &self.mime {
+            validate_descriptor(mime, "media MIME type")?;
         }
         if let Some(caption) = &self.caption {
             caption.validate_for(bot, platform)?;
@@ -565,10 +620,32 @@ impl MessageContent {
     /// Validates nested portable and native content.
     pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
         match self {
+            Self::Text(text) => {
+                if text.len() > MAX_TEXT_BYTES {
+                    Err(ModelError::ValueTooLarge("plain text"))
+                } else {
+                    Ok(())
+                }
+            }
             Self::RichText(text) => text.validate_for(bot, platform),
             Self::Media(media) => media.validate_for(bot, platform),
             Self::Native(native) => native.validate_for(platform),
-            Self::Text(_) | Self::Location { .. } | Self::Contact { .. } => Ok(()),
+            Self::Location { label, .. } => {
+                if let Some(label) = label {
+                    validate_descriptor(label, "location label")?;
+                }
+                Ok(())
+            }
+            Self::Contact { name, phone, email } => {
+                validate_descriptor(name, "contact name")?;
+                if let Some(phone) = phone {
+                    validate_descriptor(phone, "contact phone")?;
+                }
+                if let Some(email) = email {
+                    validate_descriptor(email, "contact email")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -581,6 +658,13 @@ impl MessageOptions {
         }
         if let Some(native) = &self.native {
             native.validate_for(platform)?;
+        }
+        if self
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|key| key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_BYTES)
+        {
+            return Err(ModelError::InvalidIdempotencyKey);
         }
         if self.metadata.len() > MAX_METADATA_ENTRIES {
             return Err(ModelError::MetadataTooLarge);
@@ -600,6 +684,9 @@ impl MessageOptions {
 impl OutgoingMessage {
     /// Validates a command payload before it enters a bot queue.
     pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        if self.content.len() > MAX_MESSAGE_CONTENT_ITEMS {
+            return Err(ModelError::CollectionTooLarge("message content"));
+        }
         for content in &self.content {
             content.validate_for(bot, platform)?;
         }
@@ -629,5 +716,43 @@ impl RetainedSize for NativeData {
 impl RetainedSize for OutgoingMessage {
     fn retained_bytes(&self) -> usize {
         self.estimated_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn platform() -> PlatformId {
+        PlatformId::new("test").expect("static platform")
+    }
+
+    #[test]
+    fn empty_idempotency_keys_are_rejected() {
+        let message = OutgoingMessage::text("hello").options(MessageOptions {
+            idempotency_key: Some(Arc::from("")),
+            ..MessageOptions::default()
+        });
+        assert_eq!(
+            message.validate_for(BotSlot(0), &platform()),
+            Err(ModelError::InvalidIdempotencyKey)
+        );
+    }
+
+    #[test]
+    fn text_and_collection_limits_are_enforced() {
+        let too_large = MessageContent::Text(Arc::from("x".repeat(MAX_TEXT_BYTES + 1)));
+        assert_eq!(
+            too_large.validate_for(BotSlot(0), &platform()),
+            Err(ModelError::ValueTooLarge("plain text"))
+        );
+
+        let target = MessageTarget::new(ConversationKey::new(BotSlot(0), 1_u64)).recipients(
+            (0..=MAX_MESSAGE_RECIPIENTS).map(|value| UserKey::new(BotSlot(0), value as u64)),
+        );
+        assert_eq!(
+            target.validate_for(BotSlot(0)),
+            Err(ModelError::CollectionTooLarge("message recipients"))
+        );
     }
 }

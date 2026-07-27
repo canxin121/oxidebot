@@ -1,27 +1,33 @@
 use crate::{
-    adapter::{AdapterContext, AdapterMode, EventSink, IngressBatch},
-    bot::CommandWorker,
-    budget::QueueLimiter,
-    dedupe::DedupeCache,
+    adapter::{AdapterContext, AdapterLimits, AdapterMode, EventSink, IngressBatch},
+    bot::{CommandWorker, GlobalCommandCapacity},
+    budget::{HierarchicalLease, PriorityQueueLimiter},
+    dedupe::{DedupeCache, DedupeCommit},
     executor::{ExecutorHandle, ExecutorSubmit},
-    handler::{erase_handler, ErasedHandler, RouteSpec},
+    handler::{erase_handler, prepare_handler, ErasedHandler, PreparedHandler, RouteSpec},
     router::CompiledRouter,
     session::{SessionDelivery, SessionRegistry},
-    Adapter, BotDirectory, BuildError, Filter, Handler, MetricsHandle, Result, RuntimeConfig,
-    RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext, ShutdownSignal,
+    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, Filter, Handler, MetricsHandle,
+    Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
+    ShutdownSignal,
 };
-use oxidebot_core::{BotIdentity, BotSlot, MAX_ROUTE_KEY_BYTES};
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use oxidebot_core::{BotIdentity, BotSlot, EventEnvelope, EventId, MAX_ROUTE_KEY_BYTES};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     future::{pending, Future},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
     time::Instant,
 };
 use tokio::{
-    sync::{mpsc, Semaphore},
+    sync::mpsc,
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
+
+/// Safety bound for process-local adapter fan-out and per-bot runtime tables.
+const MAX_RUNTIME_BOTS: usize = 4_096;
 
 /// Chainable OxideBot application builder.
 pub struct OxideBot<S = ()>
@@ -127,13 +133,35 @@ where
     }
 
     pub fn build(self) -> std::result::Result<Application<S>, BuildError> {
-        self.config.validate()?;
-        validate_adapters(&self.adapters)?;
-        if self.handlers.len() > u32::MAX as usize {
+        let Self {
+            state,
+            config,
+            adapters,
+            handlers,
+            filters,
+            services,
+            metrics,
+        } = self;
+        config.validate()?;
+        if handlers.len() > u32::MAX as usize {
             return Err(BuildError::InvalidConfig("too many route handlers"));
         }
-        validate_routes(&self.handlers)?;
-        Ok(Application { inner: self })
+        let handlers = handlers
+            .into_iter()
+            .map(prepare_handler)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        validate_routes(&handlers)?;
+        let adapters = prepare_adapters(adapters)?;
+        validate_route_targets(&handlers, &adapters)?;
+        Ok(Application {
+            state,
+            config,
+            adapters,
+            handlers,
+            filters,
+            services,
+            metrics,
+        })
     }
 
     /// Runs until Ctrl-C (with the default `signal` feature), fatal failure, or
@@ -153,7 +181,13 @@ pub struct Application<S = ()>
 where
     S: Send + Sync + 'static,
 {
-    inner: OxideBot<S>,
+    state: Arc<S>,
+    config: RuntimeConfig,
+    adapters: Vec<PreparedAdapter>,
+    handlers: Vec<PreparedHandler<S>>,
+    filters: Vec<Arc<dyn Filter<S>>>,
+    services: Vec<Arc<dyn Service<S>>>,
+    metrics: MetricsHandle,
 }
 
 impl<S> Application<S>
@@ -162,7 +196,7 @@ where
 {
     #[must_use]
     pub fn metrics(&self) -> MetricsHandle {
-        Arc::clone(&self.inner.metrics)
+        Arc::clone(&self.metrics)
     }
 
     #[cfg(feature = "signal")]
@@ -185,10 +219,9 @@ where
 
     pub async fn run_to_completion(self) -> Result<()> {
         if self
-            .inner
             .adapters
             .iter()
-            .any(|adapter| adapter.mode() != AdapterMode::Finite)
+            .any(|adapter| adapter.mode != AdapterMode::Finite)
         {
             return Err(BuildError::PersistentAdapterInFiniteRun.into());
         }
@@ -206,7 +239,7 @@ where
     where
         F: Future<Output = ()>,
     {
-        run_application(self.inner, shutdown_signal, mode).await
+        run_application(self, shutdown_signal, mode).await
     }
 }
 
@@ -216,25 +249,46 @@ enum RunMode {
     Finite,
 }
 
-fn validate_routes<S>(handlers: &[Arc<dyn ErasedHandler<S>>]) -> std::result::Result<(), BuildError>
+fn validate_routes<S>(handlers: &[PreparedHandler<S>]) -> std::result::Result<(), BuildError>
 where
     S: Send + Sync + 'static,
 {
     for handler in handlers {
-        let spec = handler.route_spec();
-        let event_kind = handler.event_kind();
-        let expected_kind = match &spec {
+        let expected_kind = match &handler.spec {
             RouteSpec::Generic(kind) => *kind,
             RouteSpec::Command(_) => oxidebot_core::EventKind::MessageCreated,
             RouteSpec::Interaction(_) => oxidebot_core::EventKind::Interaction,
             RouteSpec::Native(_) => oxidebot_core::EventKind::Native,
         };
-        if event_kind != expected_kind {
+        if handler.event_kind != expected_kind {
             return Err(BuildError::InvalidRoute(
                 "matcher event view differs from its compiled route category".into(),
             ));
         }
-        let key = match &spec {
+        if let Some(platform) = &handler.scope.platform {
+            platform
+                .validate()
+                .map_err(|error| BuildError::InvalidRoute(error.to_string()))?;
+        }
+        if let Some(bot) = &handler.scope.bot {
+            bot.platform
+                .validate()
+                .map_err(|error| BuildError::InvalidRoute(error.to_string()))?;
+            bot.bot
+                .validate()
+                .map_err(|error| BuildError::InvalidRoute(error.to_string()))?;
+            if handler
+                .scope
+                .platform
+                .as_ref()
+                .is_some_and(|platform| platform != &bot.platform)
+            {
+                return Err(BuildError::InvalidRoute(
+                    "route bot identity disagrees with its platform scope".into(),
+                ));
+            }
+        }
+        let key = match &handler.spec {
             RouteSpec::Generic(_) => continue,
             RouteSpec::Command(value)
             | RouteSpec::Interaction(value)
@@ -249,13 +303,65 @@ where
     Ok(())
 }
 
-fn validate_adapters(adapters: &[Box<dyn Adapter>]) -> std::result::Result<(), BuildError> {
+fn validate_route_targets<S>(
+    handlers: &[PreparedHandler<S>],
+    adapters: &[PreparedAdapter],
+) -> std::result::Result<(), BuildError>
+where
+    S: Send + Sync + 'static,
+{
+    let identities = adapters
+        .iter()
+        .map(|adapter| adapter.identity.clone())
+        .collect::<HashSet<_>>();
+    let platforms = adapters
+        .iter()
+        .map(|adapter| adapter.identity.platform.clone())
+        .collect::<HashSet<_>>();
+
+    for handler in handlers {
+        if let Some(bot) = &handler.scope.bot {
+            if !identities.contains(bot) {
+                return Err(BuildError::InvalidRoute(format!(
+                    "route targets unregistered bot {}:{}",
+                    bot.platform, bot.bot
+                )));
+            }
+        } else if let Some(platform) = &handler.scope.platform {
+            if !platforms.contains(platform) {
+                return Err(BuildError::InvalidRoute(format!(
+                    "route targets unregistered platform {platform}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct PreparedAdapter {
+    identity: BotIdentity,
+    descriptor: BotDescriptor,
+    services: BotServices,
+    mode: AdapterMode,
+    adapter: Box<dyn Adapter>,
+}
+
+fn prepare_adapters(
+    adapters: Vec<Box<dyn Adapter>>,
+) -> std::result::Result<Vec<PreparedAdapter>, BuildError> {
     if adapters.is_empty() {
         return Err(BuildError::NoAdapters);
     }
+    if adapters.len() > MAX_RUNTIME_BOTS {
+        return Err(BuildError::TooManyBots);
+    }
     let mut identities = HashSet::<BotIdentity>::with_capacity(adapters.len());
+    let mut prepared = Vec::with_capacity(adapters.len());
     for adapter in adapters {
-        let descriptor = adapter.descriptor();
+        let (descriptor, mode, services) = catch_unwind(AssertUnwindSafe(|| {
+            (adapter.descriptor(), adapter.mode(), adapter.services())
+        }))
+        .map_err(|_| BuildError::InvalidBot("adapter metadata panicked".into()))?;
         descriptor
             .validate()
             .map_err(|error| BuildError::InvalidBot(error.to_string()))?;
@@ -275,43 +381,61 @@ fn validate_adapters(adapters: &[Box<dyn Adapter>]) -> std::result::Result<(), B
                 identity.platform, identity.bot
             )));
         }
+        prepared.push(PreparedAdapter {
+            identity,
+            descriptor,
+            services,
+            mode,
+            adapter,
+        });
     }
-    Ok(())
+    Ok(prepared)
 }
 
 struct RegisteredAdapter {
     slot: BotSlot,
+    identity: BotIdentity,
     platform: oxidebot_core::PlatformId,
     mode: AdapterMode,
     adapter: Box<dyn Adapter>,
 }
 
 fn register_bots(
-    adapters: Vec<Box<dyn Adapter>>,
+    adapters: Vec<PreparedAdapter>,
     config: &RuntimeConfig,
     metrics: MetricsHandle,
 ) -> std::result::Result<(Vec<RegisteredAdapter>, Vec<CommandWorker>, BotDirectory), BuildError> {
     let mut registered = Vec::with_capacity(adapters.len());
     let mut workers = Vec::with_capacity(adapters.len());
     let mut handles = Vec::with_capacity(adapters.len());
-    let global_command_limiter = QueueLimiter::new(config.global_command);
-    let global_command_in_flight = Arc::new(Semaphore::new(config.command_in_flight_global));
+    let global_command_limiter =
+        PriorityQueueLimiter::new(config.global_command, config.max_command_bytes);
+    let global_command_capacity = GlobalCommandCapacity::new(
+        config.command_in_flight_global,
+        config.command_in_flight_reserved_high_global,
+    );
 
-    for (index, adapter) in adapters.into_iter().enumerate() {
+    for (index, prepared) in adapters.into_iter().enumerate() {
         let slot = BotSlot(u32::try_from(index).map_err(|_| BuildError::TooManyBots)?);
-        let descriptor = adapter.descriptor();
+        let PreparedAdapter {
+            identity,
+            descriptor,
+            services,
+            mode,
+            adapter,
+        } = prepared;
         let platform = descriptor.platform.clone();
-        let mode = adapter.mode();
-        let services = adapter.services();
         let (handle, worker) = CommandWorker::build(
             slot,
             descriptor,
             services,
             global_command_limiter.clone(),
-            Arc::clone(&global_command_in_flight),
+            global_command_capacity.clone(),
             config.command,
+            config.max_command_bytes,
             config.command_overload,
             config.command_in_flight_per_bot,
+            config.command_in_flight_reserved_high_per_bot,
             config.command_high_priority_burst,
             config.command_attempt_timeout,
             config.command_total_timeout,
@@ -324,6 +448,7 @@ fn register_bots(
         workers.push(worker);
         registered.push(RegisteredAdapter {
             slot,
+            identity,
             platform,
             mode,
             adapter,
@@ -333,12 +458,12 @@ fn register_bots(
     Ok((registered, workers, BotDirectory::new(handles)))
 }
 
-async fn run_application<S, F>(app: OxideBot<S>, shutdown_signal: F, mode: RunMode) -> Result<()>
+async fn run_application<S, F>(app: Application<S>, shutdown_signal: F, mode: RunMode) -> Result<()>
 where
     S: Send + Sync + 'static,
     F: Future<Output = ()>,
 {
-    let OxideBot {
+    let Application {
         state,
         config,
         adapters,
@@ -364,12 +489,10 @@ where
         filters,
         Arc::clone(&state),
         sessions.clone(),
-        cancellation.child_token(),
+        ShutdownSignal::new(cancellation.child_token()),
         config.handler_timeout,
         Arc::clone(&metrics),
     ));
-    let interest = router.interest();
-
     let mut command_tasks = JoinSet::new();
     for worker in command_workers {
         command_tasks.spawn(worker.run());
@@ -396,14 +519,13 @@ where
     for worker in executor_workers {
         executor_tasks.spawn(worker.run());
     }
-    drop(router);
-
     let (event_sink, ingress_receiver) = EventSink::channel(config.ingress);
     let mut dispatcher = tokio::spawn(dispatch_loop(
         ingress_receiver,
         bot_directory.clone(),
         sessions.clone(),
         executor,
+        config.executor.max_items,
         config.dedupe_capacity,
         config.dedupe_max_bytes,
         config.dedupe_ttl,
@@ -423,21 +545,25 @@ where
     let mut adapter_tasks = JoinSet::new();
     for registered in registered {
         let adapter_mode = registered.mode;
+        let interest = router.interest_for(registered.identity);
         let context = AdapterContext::new(
             registered.slot,
             registered.platform,
             event_sink.clone(),
-            interest.clone(),
+            AdapterLimits {
+                ingress: config.ingress_per_bot,
+                max_frame_bytes: config.max_frame_bytes,
+                max_frame_events: config.max_frame_events,
+                max_event_bytes: config.max_event_bytes,
+            },
+            interest,
             cancellation.child_token(),
             Arc::clone(&metrics),
         );
         adapter_tasks.spawn(async move { (adapter_mode, registered.adapter.run(context).await) });
     }
-
-    // Keep one ingress sender under the supervisor's control. If adapters own
-    // every sender, a finite adapter can drop its context just before its task
-    // completion becomes visible to `JoinSet`; the dispatcher and executor
-    // then finish first and are incorrectly reported as early exits.
+    drop(router);
+    // The supervisor retains one ingress sender until every adapter has drained.
 
     tokio::pin!(shutdown_signal);
     let mut adapters_remaining = adapter_tasks.len();
@@ -575,12 +701,32 @@ where
     }
 }
 
+struct PendingDispatch {
+    slot: BotSlot,
+    event: Arc<EventEnvelope>,
+    bot: crate::BotHandle,
+    ingress_retention: Arc<HierarchicalLease>,
+}
+
+enum AdmissionOutcome {
+    SessionConsumed,
+    Executor(ExecutorSubmit),
+    SessionClosed,
+}
+
+struct AdmissionCompletion {
+    slot: BotSlot,
+    event_id: EventId,
+    outcome: AdmissionOutcome,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_loop(
     mut receiver: mpsc::Receiver<IngressBatch>,
     bots: BotDirectory,
     sessions: SessionRegistry,
     executor: ExecutorHandle,
+    max_admissions: usize,
     dedupe_capacity: usize,
     dedupe_max_bytes: usize,
     dedupe_ttl: std::time::Duration,
@@ -588,46 +734,189 @@ async fn dispatch_loop(
 ) -> Result<()> {
     let mut sequence = 0_u64;
     let mut dedupe = DedupeCache::new(dedupe_capacity, dedupe_max_bytes, dedupe_ttl, bots.len());
+    let mut inflight_ids = HashSet::<(BotSlot, EventId)>::new();
+    let mut pending = (0..bots.len())
+        .map(|_| VecDeque::<PendingDispatch>::new())
+        .collect::<Vec<_>>();
+    let mut ready_bots = VecDeque::<BotSlot>::new();
+    let mut ready_set = vec![false; bots.len()];
+    let mut admission_active = vec![false; bots.len()];
+    let mut admissions = FuturesUnordered::new();
+    let mut input_closed = false;
 
-    while let Some(ingress) = receiver.recv().await {
-        let received_at = Instant::now();
-        let retention = Arc::new(ingress.lease);
-        let raw = ingress.batch.raw;
-        for draft in ingress.batch.events {
-            let slot = draft.index.bot;
-            let bot = bots.get(slot).cloned().ok_or(RuntimeError::Channel(
-                "event references an unknown bot slot",
-            ))?;
-            if !dedupe.insert(slot, draft.id.clone(), received_at) {
-                metrics.duplicate_event();
+    loop {
+        let mut admission_attempts = ready_bots.len();
+        while admission_attempts > 0 && admissions.len() < max_admissions {
+            admission_attempts -= 1;
+            let Some(slot) = ready_bots.pop_front() else {
+                break;
+            };
+            let bot_index = slot.0 as usize;
+            let Some(ready) = ready_set.get_mut(bot_index) else {
+                continue;
+            };
+            *ready = false;
+            if admission_active.get(bot_index).copied().unwrap_or(true) {
                 continue;
             }
-            let event = Arc::new(draft.finalize(sequence, received_at, raw.clone()));
-            sequence = sequence
-                .checked_add(1)
-                .ok_or(RuntimeError::Channel("event sequence exhausted"))?;
+            let Some(item) = pending.get_mut(bot_index).and_then(VecDeque::pop_front) else {
+                continue;
+            };
+            admission_active[bot_index] = true;
+            admissions.push(admit_event(executor.clone(), sessions.clone(), item));
+        }
 
-            let delivery = sessions
-                .deliver(Arc::clone(&event), Arc::clone(&retention))
-                .await
-                .map_err(|_| RuntimeError::Channel("session registry is closed"))?;
-            match delivery {
-                SessionDelivery::Consumed => {
-                    metrics.session_consumed();
+        if input_closed && admissions.is_empty() && pending.iter().all(VecDeque::is_empty) {
+            break;
+        }
+
+        tokio::select! {
+            ingress = receiver.recv(), if !input_closed => {
+                let Some(ingress) = ingress else {
+                    input_closed = true;
                     continue;
-                }
-                SessionDelivery::Tap | SessionDelivery::None => {}
-            }
+                };
+                let received_at = Instant::now();
+                let retention = Arc::new(ingress.lease);
+                let raw = ingress.batch.raw;
+                for draft in ingress.batch.events {
+                    let slot = draft.index.bot;
+                    let bot = bots.get(slot).cloned().ok_or(RuntimeError::Channel(
+                        "event references an unknown bot slot",
+                    ))?;
+                    let inflight_key = (slot, draft.id.clone());
+                    if dedupe.contains(slot, &draft.id, received_at)
+                        || !inflight_ids.insert(inflight_key.clone())
+                    {
+                        metrics.duplicate_event();
+                        continue;
+                    }
 
-            match executor.submit(event, bot, Arc::clone(&retention)).await {
-                ExecutorSubmit::Accepted | ExecutorSubmit::Dropped => {}
-                ExecutorSubmit::Closed => {
-                    return Err(RuntimeError::Channel("executor is closed"));
+                    let event = Arc::new(draft.finalize(sequence, received_at, raw.clone()));
+                    sequence = sequence
+                        .checked_add(1)
+                        .ok_or(RuntimeError::Channel("event sequence exhausted"))?;
+                    let bot_index = slot.0 as usize;
+                    let Some(queue) = pending.get_mut(bot_index) else {
+                        inflight_ids.remove(&inflight_key);
+                        return Err(RuntimeError::Channel(
+                            "event references an unknown bot slot",
+                        ));
+                    };
+                    let was_empty = queue.is_empty();
+                    queue.push_back(PendingDispatch {
+                        slot,
+                        event,
+                        bot,
+                        ingress_retention: Arc::clone(&retention),
+                    });
+                    if was_empty && !admission_active[bot_index] && !ready_set[bot_index] {
+                        ready_set[bot_index] = true;
+                        ready_bots.push_back(slot);
+                    }
+                }
+            }
+            completion = admissions.next(), if !admissions.is_empty() => {
+                if let Some(completion) = completion {
+                    let bot_index = completion.slot.0 as usize;
+                    if let Some(active) = admission_active.get_mut(bot_index) {
+                        *active = false;
+                    }
+                    inflight_ids.remove(&(completion.slot, completion.event_id.clone()));
+                    match completion.outcome {
+                        AdmissionOutcome::SessionConsumed => {
+                            metrics.session_consumed();
+                            commit_dedupe(
+                                &mut dedupe,
+                                completion.slot,
+                                completion.event_id,
+                                Instant::now(),
+                                &metrics,
+                            );
+                        }
+                        AdmissionOutcome::Executor(
+                            ExecutorSubmit::Accepted | ExecutorSubmit::DroppedByPolicy,
+                        ) => {
+                            // DropNewest is explicitly drop-and-ack: once shed, a
+                            // redelivery is still considered a duplicate.
+                            commit_dedupe(
+                                &mut dedupe,
+                                completion.slot,
+                                completion.event_id,
+                                Instant::now(),
+                                &metrics,
+                            );
+                        }
+                        AdmissionOutcome::Executor(ExecutorSubmit::RejectedTooLarge) => {
+                            return Err(RuntimeError::EventTooLarge(
+                                completion.event_id.to_string(),
+                            ));
+                        }
+                        AdmissionOutcome::Executor(ExecutorSubmit::Closed) => {
+                            return Err(RuntimeError::Channel("executor is closed"));
+                        }
+                        AdmissionOutcome::SessionClosed => {
+                            return Err(RuntimeError::Channel("session registry is closed"));
+                        }
+                    }
+                    if pending
+                        .get(bot_index)
+                        .is_some_and(|queue| !queue.is_empty())
+                        && !ready_set[bot_index]
+                    {
+                        ready_set[bot_index] = true;
+                        ready_bots.push_back(completion.slot);
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+async fn admit_event(
+    executor: ExecutorHandle,
+    sessions: SessionRegistry,
+    pending: PendingDispatch,
+) -> AdmissionCompletion {
+    let event_id = pending.event.id.clone();
+    let delivery = sessions
+        .deliver(
+            Arc::clone(&pending.event),
+            Arc::clone(&pending.ingress_retention),
+        )
+        .await;
+    let outcome = match delivery {
+        Ok(SessionDelivery::Consumed) => AdmissionOutcome::SessionConsumed,
+        Ok(SessionDelivery::Tap | SessionDelivery::None) => AdmissionOutcome::Executor(
+            executor
+                .submit(pending.event, pending.bot, pending.ingress_retention)
+                .await,
+        ),
+        Err(_) => AdmissionOutcome::SessionClosed,
+    };
+    AdmissionCompletion {
+        slot: pending.slot,
+        event_id,
+        outcome,
+    }
+}
+
+fn commit_dedupe(
+    dedupe: &mut DedupeCache,
+    slot: BotSlot,
+    id: EventId,
+    now: Instant,
+    metrics: &MetricsHandle,
+) {
+    match dedupe.commit(slot, id.clone(), now) {
+        DedupeCommit::Inserted => {}
+        DedupeCommit::Duplicate => metrics.duplicate_event(),
+        DedupeCommit::Uncacheable => {
+            metrics.dedupe_uncacheable();
+            tracing::warn!(bot_slot = slot.0, event_id = %id, "event id cannot fit in dedupe byte budget");
+        }
+    }
 }
 
 fn remaining(deadline: Instant) -> std::time::Duration {

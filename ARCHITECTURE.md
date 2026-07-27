@@ -10,9 +10,11 @@ platform frame
   -> full canonical decode once
   -> structural validation
   -> uninterested sibling pruning
-  -> per-bot deduplication
+  -> dedupe precheck + in-flight duplicate guard
+  -> per-bot fair admission
   -> exact session fast path
   -> sharded virtual-actor executor
+  -> dedupe commit after consume/admit/intentional shed
   -> compiled route candidates
   -> handler Outcome
   -> bounded per-bot command scheduler
@@ -36,18 +38,28 @@ platform frame
 11. Handler and service panic isolation requires an unwind panic strategy.
 12. Shutdown uses one process-wide deadline rather than a fresh grace period for
     each subsystem.
+13. `Block` never converts an item that cannot fit an executor envelope into a
+    successful submission.
+14. Dedupe state is committed only after session consumption, executor admission,
+    or an explicit drop-and-ack overload policy.
+15. A per-bot semaphore release wakes executor shards that are waiting without
+    requiring unrelated input to arrive.
+16. Static route interest and candidate tables respect global, platform, and
+    exact-bot scopes.
 
 ## Resource ownership
 
 - `AdapterContext` owns no background task. It submits admitted frames into the
   runtime ingress channel.
-- `IngressBatch` retains its byte/item lease until every derived event has left
+- `IngressBatch` retains both global and per-bot byte/item leases until every derived event has left
   the session/executor paths.
 - `ExecutorHandle` holds global and per-bot queue limiters. Each shard owns only
-  virtual queues and a bounded set of running futures.
+  virtual queues, a bounded set of running futures, and a bounded set of real
+  semaphore waiters. A waiter does not consume a local running slot.
 - `SessionRegistry` owns exact scope interest and one timer queue per shard.
-- `BotHandle` owns a bounded command client. Each bot has one scheduler worker,
-  but all workers also share global queue and in-flight limits.
+- `BotHandle` is one clone-cheap `Arc` around immutable identity and a bounded
+  command client. Each bot has one scheduler worker, while all workers share
+  global queue and service-call limits with reserved high-priority capacity.
 - `Application` supervises every long-lived task and controls structured drain.
 
 ## Event partitioning
@@ -85,7 +97,8 @@ validated before reaching application code.
 
 `Block` is the reliable mode. Admission waits without allocating unbounded
 queues, allowing TCP, WebSocket, long polling, or webhook infrastructure to
-propagate pressure upstream.
+propagate pressure upstream. An item that exceeds a configured per-item limit is
+rejected; it is never reported as accepted and then silently discarded.
 
 `DropNewest` intentionally sheds the newest executor or command item and updates
 metrics. It should be used only when permanent loss is acceptable.
@@ -99,3 +112,29 @@ metrics. It should be used only when permanent loss is acceptable.
 - Current-thread Tokio runtimes are supported by default features.
 - Timers are centralized through Tokio's timer facilities and shard-local
   `DelayQueue`s.
+
+
+## Fairness and retry ownership
+
+The dispatcher keeps independent pending queues and at most one admission future
+per bot. Ready bots are scheduled round-robin, so a saturated bot cannot block
+another bot before the executor.
+
+Executor shards wait on shared per-bot concurrency semaphores through actual
+permit futures. Permit waiting is separate from local running capacity, which
+prevents both cross-shard lost wake-ups and a saturated bot occupying every local
+execution slot.
+
+Command queue admission and active service calls reserve capacity for interaction
+responses. A platform service permit covers only one network attempt; it is
+released before retry backoff or a bot-wide rate-limit cooldown. Command total
+deadlines start before queue admission and therefore include queueing, service
+capacity waits, attempts, and backoff.
+
+## Retained-memory charging
+
+`RetainedSize` is a conservative queue charge. `RetainedBytes` prevents a small
+`Bytes` slice from hiding a much larger backing allocation: arbitrary views are
+compacted by default, while zero-copy adapters must declare the backing charge.
+Shared frame raw data is charged once by the ingress lease, and executor leases
+charge only each event's incremental state.

@@ -100,12 +100,26 @@ impl InboundFrame for TestFrame {
     }
 
     fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<EventBatch, DecodeError> {
+        let index = FrameIndex::one(self.event_index(bot, platform), 0);
+        self.decode_indexed(bot, platform, &index)
+    }
+
+    fn decode_indexed(
+        self,
+        _bot: BotSlot,
+        _platform: &PlatformId,
+        indexed: &FrameIndex,
+    ) -> Result<EventBatch, DecodeError> {
         self.decodes.0.fetch_add(1, Ordering::Relaxed);
-        let index = self.event_index(bot, platform);
+        let index = indexed
+            .events
+            .first()
+            .cloned()
+            .ok_or_else(|| DecodeError::new("test frame index is empty"))?;
         let conversation = index
             .conversation
             .clone()
-            .expect("test message has a conversation");
+            .ok_or_else(|| DecodeError::new("test message has no conversation"))?;
         let body = MessageCreated {
             reference: MessageRef::new(conversation, self.message_id),
             sender: index.actor.clone(),

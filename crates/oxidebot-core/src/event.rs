@@ -1,8 +1,7 @@
 use crate::{
     BotSlot, CompactId, ConversationKey, EventId, ExecutionKey, Media, MessageContent, MessageRef,
-    ModelError, NativeData, PlatformId, RetainedSize, UserKey,
+    ModelError, NativeData, PlatformId, RetainedBytes, RetainedSize, UserKey,
 };
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{
@@ -17,6 +16,10 @@ pub const MAX_ROUTE_KEY_BYTES: usize = 512;
 pub const MAX_INTERACTION_VALUES: usize = 128;
 /// Maximum combined bytes of interaction values.
 pub const MAX_INTERACTION_VALUE_BYTES: usize = 256 * 1024;
+/// Maximum message references in one deletion event.
+pub const MAX_DELETED_MESSAGES: usize = 4_096;
+/// Maximum added and removed reactions in one update.
+pub const MAX_REACTION_CHANGES: usize = 4_096;
 
 /// Canonical event category. One semantic action has exactly one category.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -185,7 +188,7 @@ impl EventIndex {
 #[derive(Clone, Debug)]
 pub enum RawPayload {
     /// Original bytes.
-    Bytes(Bytes),
+    Bytes(RetainedBytes),
     /// Original JSON retained without conversion to a `Value` tree.
     Json(Arc<RawValue>),
 }
@@ -195,7 +198,7 @@ impl RawPayload {
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         match self {
-            Self::Bytes(bytes) => bytes.len(),
+            Self::Bytes(bytes) => bytes.retained_bytes(),
             Self::Json(json) => json.get().len(),
         }
     }
@@ -702,8 +705,12 @@ pub enum EventValidationError {
     IndexBodyMismatch,
     #[error("event command differs from the canonical message text")]
     CommandMismatch,
+    #[error("message plain-text view differs from its canonical content")]
+    MessageTextMismatch,
     #[error("interaction fields exceed their structural limits")]
     InteractionTooLarge,
+    #[error("event collection exceeds its structural item limit")]
+    CollectionTooLarge,
     #[error(transparent)]
     Model(#[from] ModelError),
     #[error(transparent)]
@@ -771,6 +778,45 @@ fn validate_conversation(
     Ok(())
 }
 
+fn validate_message_text(message: &MessageCreated) -> Result<(), EventValidationError> {
+    let mut offset = 0_usize;
+    let mut found = false;
+    let expected = message.text.as_deref();
+    if expected.is_some_and(|text| text.len() > crate::MAX_TEXT_BYTES) {
+        return Err(ModelError::ValueTooLarge("message plain-text view").into());
+    }
+
+    for item in &message.content {
+        let fragment = match item {
+            MessageContent::Text(value) => Some(value.as_ref()),
+            MessageContent::RichText(value) => Some(value.text.as_ref()),
+            MessageContent::Media(media) => {
+                media.caption.as_ref().map(|caption| caption.text.as_ref())
+            }
+            MessageContent::Location { .. }
+            | MessageContent::Contact { .. }
+            | MessageContent::Native(_) => None,
+        };
+        let Some(fragment) = fragment else {
+            continue;
+        };
+        found = true;
+        let Some(remaining) = expected.and_then(|text| text.get(offset..)) else {
+            return Err(EventValidationError::MessageTextMismatch);
+        };
+        if !remaining.starts_with(fragment) {
+            return Err(EventValidationError::MessageTextMismatch);
+        }
+        offset = offset.saturating_add(fragment.len());
+    }
+
+    match (found, expected) {
+        (false, None) => Ok(()),
+        (true, Some(text)) if offset == text.len() => Ok(()),
+        _ => Err(EventValidationError::MessageTextMismatch),
+    }
+}
+
 fn normalized_command(text: Option<&str>) -> Option<&str> {
     text?
         .strip_prefix('/')?
@@ -799,11 +845,15 @@ impl EventBody {
                 {
                     return Err(EventValidationError::IndexBodyMismatch);
                 }
+                validate_message_text(message)?;
                 if normalized_command(message.text.as_deref()) != index.command.as_deref() {
                     return Err(EventValidationError::CommandMismatch);
                 }
                 if let Some(sender) = &message.sender {
                     validate_user(sender, bot)?;
+                }
+                if message.content.len() > crate::MAX_MESSAGE_CONTENT_ITEMS {
+                    return Err(EventValidationError::CollectionTooLarge);
                 }
                 for content in &message.content {
                     content.validate_for(bot, platform)?;
@@ -816,16 +866,23 @@ impl EventBody {
                 {
                     return Err(EventValidationError::IndexBodyMismatch);
                 }
+                validate_message_text(&event.message)?;
                 if normalized_command(event.message.text.as_deref()) != index.command.as_deref() {
                     return Err(EventValidationError::CommandMismatch);
                 }
                 if let Some(sender) = &event.message.sender {
                     validate_user(sender, bot)?;
                 }
+                if event.message.content.len() > crate::MAX_MESSAGE_CONTENT_ITEMS {
+                    return Err(EventValidationError::CollectionTooLarge);
+                }
                 for content in &event.message.content {
                     content.validate_for(bot, platform)?;
                 }
                 if let Some(previous) = &event.previous_content {
+                    if previous.len() > crate::MAX_MESSAGE_CONTENT_ITEMS {
+                        return Err(EventValidationError::CollectionTooLarge);
+                    }
                     for content in previous {
                         content.validate_for(bot, platform)?;
                     }
@@ -834,6 +891,7 @@ impl EventBody {
             Self::MessagesDeleted(event) => {
                 let conversation = event.messages.first().map(|message| &message.conversation);
                 if event.messages.is_empty()
+                    || event.messages.len() > MAX_DELETED_MESSAGES
                     || index.conversation.as_ref() != conversation
                     || index.actor.as_ref() != event.actor.as_ref()
                 {
@@ -881,6 +939,9 @@ impl EventBody {
                 }
                 if let Some(actor) = &event.actor {
                     validate_user(actor, bot)?;
+                }
+                if event.added.len().saturating_add(event.removed.len()) > MAX_REACTION_CHANGES {
+                    return Err(EventValidationError::CollectionTooLarge);
                 }
                 for reaction in event.added.iter().chain(&event.removed) {
                     if let Reaction::Custom(id) = reaction {
@@ -968,5 +1029,25 @@ impl EventDraft {
         self.id.validate()?;
         self.index.validate_for(bot, platform)?;
         self.body.validate_for(&self.index, bot, platform)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_plain_text_must_match_canonical_content() {
+        let message = MessageCreated {
+            reference: MessageRef::new(ConversationKey::new(BotSlot(0), 1_u64), 1_u64),
+            sender: Some(UserKey::new(BotSlot(0), 2_u64)),
+            content: vec![MessageContent::Text(Arc::from("visible"))],
+            text: Some(Arc::from("/admin")),
+            mentioned_bot: false,
+        };
+        assert_eq!(
+            validate_message_text(&message),
+            Err(EventValidationError::MessageTextMismatch)
+        );
     }
 }

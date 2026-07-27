@@ -114,6 +114,12 @@ pub enum CommandError {
     Full,
     #[error("bot command payload exceeds its byte budget")]
     PayloadTooLarge,
+    #[error("bot command exceeded its total deadline")]
+    DeadlineExceeded,
+    #[error("bot command sequence space is exhausted")]
+    SequenceExhausted,
+    #[error("bot command caller was cancelled")]
+    Cancelled,
     #[error("adapter returned an unexpected command result")]
     UnexpectedResult,
     #[error("interaction service is unsupported")]
@@ -156,6 +162,8 @@ pub enum SessionError {
     Cancelled,
     #[error("session timeout must be non-zero and fit the monotonic clock")]
     InvalidTimeout,
+    #[error("session registration sequence space is exhausted")]
+    SequenceExhausted,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -211,6 +219,8 @@ pub enum RuntimeError {
     Service(#[from] ServiceError),
     #[error("runtime channel failure: {0}")]
     Channel(&'static str),
+    #[error("canonical event exceeds the configured executor envelope: {0}")]
+    EventTooLarge(String),
     #[error("runtime task failed: {0}")]
     Join(String),
     #[error("shutdown timed out while draining {0}")]

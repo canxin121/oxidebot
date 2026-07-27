@@ -23,18 +23,27 @@ struct Node {
     bot_next: Option<usize>,
 }
 
+/// Result of committing an accepted event ID to the dedupe history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DedupeCommit {
+    Inserted,
+    Duplicate,
+    /// The ID itself cannot fit in the configured global byte envelope.
+    Uncacheable,
+}
+
 /// TTL-, item-, and byte-bounded dedupe history.
 ///
-/// Entries are kept in an indexed intrusive list rather than an ordered map:
-/// duplicate lookup, insertion, expiry, per-bot eviction, and global eviction
-/// are all average O(1). The only heap allocations after warm-up are HashMap
-/// growths; removed node slots are reused through `free`.
+/// Entries are kept in indexed intrusive lists. Duplicate lookup, insertion,
+/// expiry, per-bot pressure eviction, and global eviction are average O(1).
+/// Per-bot limits are soft: an active bot may borrow unused capacity until the
+/// global cache reaches pressure, while the global item/byte limits remain hard.
 pub(crate) struct DedupeCache {
     ttl: Duration,
     max_entries: usize,
     max_bytes: usize,
-    per_bot_max_entries: usize,
-    per_bot_max_bytes: usize,
+    per_bot_soft_entries: usize,
+    per_bot_soft_bytes: usize,
     active_entries: usize,
     retained_bytes: usize,
     bots: Vec<BotList>,
@@ -55,37 +64,58 @@ impl DedupeCache {
         let total_capacity = total_capacity.max(1);
         let total_max_bytes = total_max_bytes.max(1);
         let bot_count = bot_count.max(1);
+
+        // Do not trust a huge item count to justify a huge eager allocation when
+        // the byte budget is tiny. Grow lazily after a small bounded warm-up.
+        let estimated_entry_bytes = std::mem::size_of::<Node>()
+            .saturating_add(std::mem::size_of::<((BotSlot, EventId), usize)>())
+            .saturating_add(64);
+        let initial_capacity = total_capacity
+            .min(total_max_bytes / estimated_entry_bytes.max(1))
+            .min(4_096);
+
         Self {
             ttl,
             max_entries: total_capacity,
             max_bytes: total_max_bytes,
-            per_bot_max_entries: total_capacity.div_ceil(bot_count).max(1),
-            per_bot_max_bytes: total_max_bytes.div_ceil(bot_count).max(1),
+            per_bot_soft_entries: total_capacity.div_ceil(bot_count).max(1),
+            per_bot_soft_bytes: total_max_bytes.div_ceil(bot_count).max(1),
             active_entries: 0,
             retained_bytes: 0,
             bots: (0..bot_count).map(|_| BotList::default()).collect(),
-            lookup: HashMap::with_capacity(total_capacity),
-            nodes: Vec::with_capacity(total_capacity),
+            lookup: HashMap::with_capacity(initial_capacity),
+            nodes: Vec::with_capacity(initial_capacity),
             free: Vec::new(),
             global_head: None,
             global_tail: None,
         }
     }
 
-    /// Inserts one delivery ID and returns `false` while the same ID is still
-    /// active for the same bot. Unknown bot slots are rejected as duplicates;
-    /// validated runtimes never emit them.
-    pub(crate) fn insert(&mut self, bot: BotSlot, id: EventId, now: Instant) -> bool {
+    /// Returns whether the same bot/event ID is currently remembered.
+    pub(crate) fn contains(&mut self, bot: BotSlot, id: &EventId, now: Instant) -> bool {
+        self.prune_expired(now);
+        self.lookup.contains_key(&(bot, id.clone()))
+    }
+
+    /// Commits one successfully consumed, admitted, or intentionally shed event.
+    pub(crate) fn commit(&mut self, bot: BotSlot, id: EventId, now: Instant) -> DedupeCommit {
         self.prune_expired(now);
         let bot_index = bot.0 as usize;
         if bot_index >= self.bots.len() {
-            return false;
+            return DedupeCommit::Uncacheable;
         }
         if self.lookup.contains_key(&(bot, id.clone())) {
-            return false;
+            return DedupeCommit::Duplicate;
         }
 
-        let bytes = id.estimated_bytes().saturating_add(192);
+        let bytes = id
+            .estimated_bytes()
+            .saturating_add(std::mem::size_of::<Node>())
+            .saturating_add(128);
+        if bytes > self.max_bytes {
+            return DedupeCommit::Uncacheable;
+        }
+
         let global_previous = self.global_tail;
         let bot_previous = self.bots[bot_index].tail;
         let index = self.allocate(Node {
@@ -122,9 +152,9 @@ impl DedupeCache {
         self.active_entries = self.active_entries.saturating_add(1);
         self.retained_bytes = self.retained_bytes.saturating_add(bytes);
 
-        self.enforce_bot_bounds(bot_index);
+        self.enforce_bot_soft_bounds(bot_index);
         self.enforce_global_bounds();
-        true
+        DedupeCommit::Inserted
     }
 
     fn allocate(&mut self, node: Node) -> usize {
@@ -161,9 +191,18 @@ impl DedupeCache {
         }
     }
 
-    fn enforce_bot_bounds(&mut self, bot_index: usize) {
-        while self.bots[bot_index].entries > self.per_bot_max_entries
-            || self.bots[bot_index].retained_bytes > self.per_bot_max_bytes
+    fn under_pressure(&self) -> bool {
+        self.active_entries.saturating_mul(4) >= self.max_entries.saturating_mul(3)
+            || self.retained_bytes.saturating_mul(4) >= self.max_bytes.saturating_mul(3)
+    }
+
+    fn enforce_bot_soft_bounds(&mut self, bot_index: usize) {
+        if !self.under_pressure() {
+            return;
+        }
+        while self.bots[bot_index].entries > 1
+            && (self.bots[bot_index].entries > self.per_bot_soft_entries
+                || self.bots[bot_index].retained_bytes > self.per_bot_soft_bytes)
         {
             let Some(index) = self.bots[bot_index].head else {
                 break;
@@ -215,10 +254,54 @@ impl DedupeCache {
             bot.retained_bytes = bot.retained_bytes.saturating_sub(node.bytes);
         }
 
-        let lookup_key = (node.bot, node.id.clone());
-        self.lookup.remove(&lookup_key);
+        self.lookup.remove(&(node.bot, node.id.clone()));
         self.active_entries = self.active_entries.saturating_sub(1);
         self.retained_bytes = self.retained_bytes.saturating_sub(node.bytes);
         self.free.push(index);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxidebot_core::{EventId, MAX_SEMANTIC_ID_BYTES};
+
+    fn id(value: &str) -> EventId {
+        EventId::new(value).expect("valid test id")
+    }
+
+    #[test]
+    fn tiny_byte_budget_does_not_eagerly_allocate_from_item_capacity() {
+        let cache = DedupeCache::new(usize::MAX / 4, 512, Duration::from_secs(1), 1);
+        assert!(cache.nodes.capacity() <= 4_096);
+        assert!(cache.lookup.capacity() < 16_384);
+    }
+
+    #[test]
+    fn uncacheable_entries_are_reported_explicitly() {
+        let mut cache = DedupeCache::new(8, 1, Duration::from_secs(60), 1);
+        assert_eq!(
+            cache.commit(BotSlot(0), id("event"), Instant::now()),
+            DedupeCommit::Uncacheable
+        );
+        assert!(!cache.contains(BotSlot(0), &id("event"), Instant::now()));
+    }
+
+    #[test]
+    fn active_bot_can_borrow_unused_soft_quota() {
+        let mut cache = DedupeCache::new(
+            16,
+            16 * (MAX_SEMANTIC_ID_BYTES + 256),
+            Duration::from_secs(60),
+            8,
+        );
+        let now = Instant::now();
+        for index in 0..8 {
+            assert_eq!(
+                cache.commit(BotSlot(0), id(&format!("event-{index}")), now),
+                DedupeCommit::Inserted
+            );
+        }
+        assert!(cache.bots[0].entries > cache.per_bot_soft_entries);
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    budget::{HierarchicalLease, QueueAcquireError, QueueLimiter},
+    budget::{HierarchicalLease, PriorityQueueLimiter, QueueAcquireError},
     CommandError, MetricsHandle, OverloadPolicy, PlatformError, PlatformErrorKind, QueueBudget,
 };
 use async_trait::async_trait;
@@ -179,7 +179,7 @@ impl BotServices {
     }
 
     #[must_use]
-    pub const fn capabilities(&self) -> BotCapabilities {
+    pub fn capabilities(&self) -> BotCapabilities {
         self.capabilities
     }
 }
@@ -193,14 +193,18 @@ impl fmt::Debug for BotServices {
     }
 }
 
-/// Clone-cheap runtime handle for one bot connection.
-#[derive(Clone)]
-pub struct BotHandle {
+struct BotHandleInner {
     slot: BotSlot,
-    descriptor: Arc<BotDescriptor>,
+    identity: BotIdentity,
+    descriptor: BotDescriptor,
     capabilities: BotCapabilities,
     client: CommandClient,
 }
+
+/// Clone-cheap runtime handle for one bot connection. Cloning a context or
+/// dispatch job increments one `Arc` rather than cloning every scheduler handle.
+#[derive(Clone)]
+pub struct BotHandle(Arc<BotHandleInner>);
 
 impl BotHandle {
     fn new(
@@ -209,27 +213,34 @@ impl BotHandle {
         capabilities: BotCapabilities,
         client: CommandClient,
     ) -> Self {
-        Self {
+        let identity = descriptor.identity();
+        Self(Arc::new(BotHandleInner {
             slot,
-            descriptor: Arc::new(descriptor),
+            identity,
+            descriptor,
             capabilities,
             client,
-        }
+        }))
     }
 
     #[must_use]
-    pub const fn slot(&self) -> BotSlot {
-        self.slot
+    pub fn slot(&self) -> BotSlot {
+        self.0.slot
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &BotIdentity {
+        &self.0.identity
     }
 
     #[must_use]
     pub fn descriptor(&self) -> &BotDescriptor {
-        self.descriptor.as_ref()
+        &self.0.descriptor
     }
 
     #[must_use]
-    pub const fn capabilities(&self) -> BotCapabilities {
-        self.capabilities
+    pub fn capabilities(&self) -> BotCapabilities {
+        self.0.capabilities
     }
 
     pub async fn send(
@@ -238,9 +249,10 @@ impl BotHandle {
         message: impl Into<OutgoingMessage>,
     ) -> std::result::Result<MessageReceipt, CommandError> {
         let message = message.into();
-        target.validate_for(self.slot)?;
-        message.validate_for(self.slot, &self.descriptor.platform)?;
+        target.validate_for(self.0.slot)?;
+        message.validate_for(self.0.slot, &self.0.descriptor.platform)?;
         match self
+            .0
             .client
             .call(CommandOperation::Send { target, message })
             .await?
@@ -256,9 +268,10 @@ impl BotHandle {
         replacement: impl Into<OutgoingMessage>,
     ) -> std::result::Result<(), CommandError> {
         let replacement = replacement.into();
-        message.validate_for(self.slot)?;
-        replacement.validate_for(self.slot, &self.descriptor.platform)?;
+        message.validate_for(self.0.slot)?;
+        replacement.validate_for(self.0.slot, &self.0.descriptor.platform)?;
         match self
+            .0
             .client
             .call(CommandOperation::Edit {
                 message,
@@ -274,8 +287,9 @@ impl BotHandle {
     }
 
     pub async fn delete(&self, message: MessageRef) -> std::result::Result<(), CommandError> {
-        message.validate_for(self.slot)?;
+        message.validate_for(self.0.slot)?;
         match self
+            .0
             .client
             .call(CommandOperation::Delete { message })
             .await?
@@ -292,13 +306,14 @@ impl BotHandle {
         interaction_id: impl Into<Arc<str>>,
         response: NativeData,
     ) -> std::result::Result<(), CommandError> {
-        if !self.capabilities.interactions {
+        if !self.0.capabilities.interactions {
             return Err(CommandError::InteractionsUnsupported);
         }
         let interaction_id = interaction_id.into();
         validate_command_key(&interaction_id, "interaction id")?;
-        response.validate_for(&self.descriptor.platform)?;
+        response.validate_for(&self.0.descriptor.platform)?;
         match self
+            .0
             .client
             .call(CommandOperation::RespondInteraction {
                 interaction_id,
@@ -318,13 +333,14 @@ impl BotHandle {
         method: impl Into<Arc<str>>,
         request: NativeData,
     ) -> std::result::Result<NativeData, CommandError> {
-        if !self.capabilities.native_api {
+        if !self.0.capabilities.native_api {
             return Err(CommandError::NativeUnsupported);
         }
         let method = method.into();
         validate_command_key(&method, "native method")?;
-        request.validate_for(&self.descriptor.platform)?;
+        request.validate_for(&self.0.descriptor.platform)?;
         match self
+            .0
             .client
             .call(CommandOperation::NativeCall { method, request })
             .await?
@@ -339,9 +355,10 @@ impl BotHandle {
         target: MessageTarget,
         message: OutgoingMessage,
     ) -> std::result::Result<(), CommandError> {
-        target.validate_for(self.slot)?;
-        message.validate_for(self.slot, &self.descriptor.platform)?;
-        self.client
+        target.validate_for(self.0.slot)?;
+        message.validate_for(self.0.slot, &self.0.descriptor.platform)?;
+        self.0
+            .client
             .enqueue(CommandOperation::Send { target, message })
             .await
     }
@@ -361,9 +378,9 @@ impl fmt::Debug for BotHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BotHandle")
-            .field("slot", &self.slot)
-            .field("descriptor", &self.descriptor)
-            .field("capabilities", &self.capabilities)
+            .field("slot", &self.0.slot)
+            .field("descriptor", &self.0.descriptor)
+            .field("capabilities", &self.0.capabilities)
             .finish_non_exhaustive()
     }
 }
@@ -400,9 +417,11 @@ impl BotDirectory {
 #[derive(Clone)]
 struct CommandClient {
     sender: mpsc::Sender<CommandEnvelope>,
-    local_limiter: QueueLimiter,
-    global_limiter: QueueLimiter,
+    local_limiter: PriorityQueueLimiter,
+    global_limiter: PriorityQueueLimiter,
     overload: OverloadPolicy,
+    max_command_bytes: usize,
+    total_timeout: Option<Duration>,
     sequence: Arc<AtomicU64>,
 }
 
@@ -412,53 +431,119 @@ impl CommandClient {
         operation: CommandOperation,
     ) -> std::result::Result<CommandResult, CommandError> {
         let (sender, receiver) = oneshot::channel();
-        self.submit(operation, Some(sender)).await?;
-        receiver.await.map_err(|_| CommandError::Closed)?
+        let deadline = self.submit(operation, Some(sender)).await?;
+        await_before(deadline, receiver)
+            .await?
+            .map_err(|_| CommandError::Closed)?
     }
 
     async fn enqueue(&self, operation: CommandOperation) -> std::result::Result<(), CommandError> {
-        self.submit(operation, None).await
+        self.submit(operation, None).await.map(|_| ())
     }
 
     async fn submit(
         &self,
         operation: CommandOperation,
-        reply: Option<oneshot::Sender<std::result::Result<CommandResult, CommandError>>>,
-    ) -> std::result::Result<(), CommandError> {
+        reply: Option<CommandReply>,
+    ) -> std::result::Result<Option<Instant>, CommandError> {
+        let deadline = self
+            .total_timeout
+            .and_then(|timeout| Instant::now().checked_add(timeout));
+        if self.total_timeout.is_some() && deadline.is_none() {
+            return Err(CommandError::InvalidModel(
+                "command total timeout exceeds the platform clock range".into(),
+            ));
+        }
+
         let bytes = operation.retained_bytes();
-        // Local first: a noisy bot cannot reserve all global permits while
-        // waiting for its own queue capacity.
-        let local = match self.overload {
-            OverloadPolicy::Block => self.local_limiter.acquire(bytes).await,
-            OverloadPolicy::DropNewest => self.local_limiter.try_acquire(bytes),
+        if bytes > self.max_command_bytes {
+            return Err(CommandError::PayloadTooLarge);
         }
-        .map_err(map_command_admission)?;
-        let global = match self.overload {
-            OverloadPolicy::Block => self.global_limiter.acquire(bytes).await,
-            OverloadPolicy::DropNewest => self.global_limiter.try_acquire(bytes),
-        }
-        .map_err(map_command_admission)?;
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let priority = operation.priority();
+        let local = acquire_queue(
+            &self.local_limiter,
+            priority,
+            self.overload,
+            bytes,
+            deadline,
+        )
+        .await?;
+        let global = acquire_queue(
+            &self.global_limiter,
+            priority,
+            self.overload,
+            bytes,
+            deadline,
+        )
+        .await?;
+        let sequence = self
+            .sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| CommandError::SequenceExhausted)?;
         let envelope = CommandEnvelope {
             key: operation.key(sequence),
             sequence,
+            deadline,
+            priority,
             operation,
             reply,
             _leases: HierarchicalLease::new(local, global),
         };
         match self.overload {
-            OverloadPolicy::Block => self
-                .sender
-                .send(envelope)
-                .await
-                .map_err(|_| CommandError::Closed),
+            OverloadPolicy::Block => await_before(deadline, self.sender.send(envelope))
+                .await?
+                .map_err(|_| CommandError::Closed)?,
             OverloadPolicy::DropNewest => {
-                self.sender.try_send(envelope).map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(_) => CommandError::Full,
-                    mpsc::error::TrySendError::Closed(_) => CommandError::Closed,
-                })
+                self.sender
+                    .try_send(envelope)
+                    .map_err(|error| match error {
+                        mpsc::error::TrySendError::Full(_) => CommandError::Full,
+                        mpsc::error::TrySendError::Closed(_) => CommandError::Closed,
+                    })?;
             }
         }
+        Ok(deadline)
+    }
+}
+
+async fn acquire_queue(
+    limiter: &PriorityQueueLimiter,
+    priority: CommandPriority,
+    overload: OverloadPolicy,
+    bytes: usize,
+    deadline: Option<Instant>,
+) -> Result<crate::budget::QueueLease, CommandError> {
+    match (priority, overload) {
+        (CommandPriority::High, OverloadPolicy::Block) => {
+            await_before(deadline, limiter.acquire_high(bytes))
+                .await?
+                .map_err(map_command_admission)
+        }
+        (CommandPriority::High, OverloadPolicy::DropNewest) => limiter
+            .try_acquire_high(bytes)
+            .map_err(map_command_admission),
+        (CommandPriority::Normal, OverloadPolicy::Block) => {
+            await_before(deadline, limiter.acquire_normal(bytes))
+                .await?
+                .map_err(map_command_admission)
+        }
+        (CommandPriority::Normal, OverloadPolicy::DropNewest) => limiter
+            .try_acquire_normal(bytes)
+            .map_err(map_command_admission),
+    }
+}
+
+async fn await_before<T>(
+    deadline: Option<Instant>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, CommandError> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| CommandError::DeadlineExceeded),
+        None => Ok(future.await),
     }
 }
 
@@ -563,7 +648,7 @@ impl CommandOperation {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommandPriority {
     High,
     Normal,
@@ -587,11 +672,15 @@ enum CommandResult {
     Native(NativeData),
 }
 
+type CommandReply = oneshot::Sender<std::result::Result<CommandResult, CommandError>>;
+
 struct CommandEnvelope {
     key: CommandKey,
     sequence: u64,
+    deadline: Option<Instant>,
+    priority: CommandPriority,
     operation: CommandOperation,
-    reply: Option<oneshot::Sender<std::result::Result<CommandResult, CommandError>>>,
+    reply: Option<CommandReply>,
     _leases: HierarchicalLease,
 }
 
@@ -603,20 +692,136 @@ impl CommandEnvelope {
 
 struct CommandCompletion {
     key: CommandKey,
+    priority: CommandPriority,
+}
+
+#[derive(Clone)]
+pub(crate) struct GlobalCommandCapacity {
+    normal: Arc<Semaphore>,
+    reserved_high: Arc<Semaphore>,
+}
+
+enum GlobalCommandPermit {
+    Normal(OwnedSemaphorePermit),
+    ReservedHigh(OwnedSemaphorePermit),
+}
+
+impl GlobalCommandCapacity {
+    pub(crate) fn new(total: usize, reserved_high: usize) -> Self {
+        Self {
+            normal: Arc::new(Semaphore::new(total - reserved_high)),
+            reserved_high: Arc::new(Semaphore::new(reserved_high)),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        priority: CommandPriority,
+        deadline: Option<Instant>,
+    ) -> Result<GlobalCommandPermit, CommandError> {
+        let acquire = async {
+            match priority {
+                CommandPriority::Normal => Arc::clone(&self.normal)
+                    .acquire_owned()
+                    .await
+                    .map(GlobalCommandPermit::Normal)
+                    .map_err(|_| CommandError::Closed),
+                CommandPriority::High => {
+                    // Prefer ordinary global capacity and preserve the high
+                    // reserve for acknowledgements arriving under saturation.
+                    match Arc::clone(&self.normal).try_acquire_owned() {
+                        Ok(permit) => return Ok(GlobalCommandPermit::Normal(permit)),
+                        Err(tokio::sync::TryAcquireError::Closed) => {
+                            return Err(CommandError::Closed)
+                        }
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {}
+                    }
+                    match Arc::clone(&self.reserved_high).try_acquire_owned() {
+                        Ok(permit) => return Ok(GlobalCommandPermit::ReservedHigh(permit)),
+                        Err(tokio::sync::TryAcquireError::Closed) => {
+                            return Err(CommandError::Closed)
+                        }
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {}
+                    }
+                    tokio::select! {
+                        permit = Arc::clone(&self.normal).acquire_owned() => permit
+                            .map(GlobalCommandPermit::Normal)
+                            .map_err(|_| CommandError::Closed),
+                        permit = Arc::clone(&self.reserved_high).acquire_owned() => permit
+                            .map(GlobalCommandPermit::ReservedHigh)
+                            .map_err(|_| CommandError::Closed),
+                    }
+                }
+            }
+        };
+        await_before(deadline, acquire).await?
+    }
+}
+
+impl GlobalCommandPermit {
+    fn touch(&self) {
+        match self {
+            Self::Normal(permit) | Self::ReservedHigh(permit) => {
+                let _ = permit;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct BotCooldown(Arc<std::sync::Mutex<Option<Instant>>>);
+
+impl BotCooldown {
+    async fn wait(&self, deadline: Option<Instant>) -> Result<(), CommandError> {
+        loop {
+            let until = {
+                let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+                match *state {
+                    Some(until) if until > Instant::now() => Some(until),
+                    Some(_) => {
+                        *state = None;
+                        None
+                    }
+                    None => None,
+                }
+            };
+            let Some(until) = until else {
+                return Ok(());
+            };
+            if deadline.is_some_and(|deadline| until >= deadline) {
+                return Err(CommandError::DeadlineExceeded);
+            }
+            await_before(deadline, tokio::time::sleep_until(until)).await?;
+        }
+    }
+
+    fn extend(&self, delay: Duration) -> Result<(), CommandError> {
+        let until = Instant::now().checked_add(delay).ok_or_else(|| {
+            CommandError::InvalidModel(
+                "platform retry delay exceeds the monotonic clock range".into(),
+            )
+        })?;
+        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if state.as_ref().is_none_or(|current| *current < until) {
+            *state = Some(until);
+        }
+        Ok(())
+    }
 }
 
 /// Fixed per-bot worker combining bounded admission, key ordering, weighted
-/// priority, panic isolation, and limited concurrency.
+/// priority, panic isolation, reserved interaction capacity, and limited concurrency.
 pub(crate) struct CommandWorker {
     receiver: mpsc::Receiver<CommandEnvelope>,
     slot: BotSlot,
     platform: PlatformId,
     services: BotServices,
     max_in_flight: usize,
-    global_in_flight: Arc<Semaphore>,
+    reserved_high: usize,
+    global_capacity: GlobalCommandCapacity,
+    cooldown: BotCooldown,
     high_priority_burst: usize,
     attempt_timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
     max_retries: u8,
     retry_base: Duration,
     retry_max: Duration,
@@ -629,11 +834,13 @@ impl CommandWorker {
         slot: BotSlot,
         descriptor: BotDescriptor,
         services: BotServices,
-        global_limiter: QueueLimiter,
-        global_in_flight: Arc<Semaphore>,
+        global_limiter: PriorityQueueLimiter,
+        global_capacity: GlobalCommandCapacity,
         local_budget: QueueBudget,
+        max_command_bytes: usize,
         overload: OverloadPolicy,
         max_in_flight: usize,
+        reserved_high: usize,
         high_priority_burst: usize,
         attempt_timeout: Option<Duration>,
         total_timeout: Option<Duration>,
@@ -645,9 +852,11 @@ impl CommandWorker {
         let (sender, receiver) = mpsc::channel(local_budget.max_items);
         let client = CommandClient {
             sender,
-            local_limiter: QueueLimiter::new(local_budget),
+            local_limiter: PriorityQueueLimiter::new(local_budget, max_command_bytes),
             global_limiter,
             overload,
+            max_command_bytes,
+            total_timeout,
             sequence: Arc::new(AtomicU64::new(0)),
         };
         let capabilities = services.capabilities();
@@ -661,10 +870,11 @@ impl CommandWorker {
                 platform,
                 services,
                 max_in_flight,
-                global_in_flight,
+                reserved_high,
+                global_capacity,
+                cooldown: BotCooldown::default(),
                 high_priority_burst,
                 attempt_timeout,
-                total_timeout,
                 max_retries,
                 retry_base,
                 retry_max,
@@ -682,17 +892,26 @@ impl CommandWorker {
         let mut running = FuturesUnordered::new();
         let mut input_closed = false;
         let mut consecutive_high = 0_usize;
+        let mut running_normal = 0_usize;
+        let normal_limit = self.max_in_flight - self.reserved_high;
 
         loop {
             while running.len() < self.max_in_flight {
-                let key = if !high_ready.is_empty()
-                    && (normal_ready.is_empty() || consecutive_high < self.high_priority_burst)
+                let high_available = !high_ready.is_empty();
+                let normal_available = running_normal < normal_limit && !normal_ready.is_empty();
+                let key = if high_available
+                    && (!normal_available || consecutive_high < self.high_priority_burst)
                 {
                     consecutive_high = consecutive_high.saturating_add(1);
                     high_ready.pop_front()
-                } else {
+                } else if normal_available {
                     consecutive_high = 0;
-                    normal_ready.pop_front().or_else(|| high_ready.pop_front())
+                    normal_ready.pop_front()
+                } else if high_available {
+                    consecutive_high = consecutive_high.saturating_add(1);
+                    high_ready.pop_front()
+                } else {
+                    None
                 };
                 let Some(key) = key else {
                     break;
@@ -710,18 +929,18 @@ impl CommandWorker {
                 };
                 if envelope.is_abandoned() {
                     self.metrics.cancelled_command();
-                    if let Some(priority) = queues
-                        .get(&key)
-                        .and_then(|queue| queue.front())
-                        .map(|next| next.operation.priority())
-                    {
-                        if ready_set.insert(key.clone()) {
-                            push_ready(priority, key, &mut high_ready, &mut normal_ready);
-                        }
-                    } else {
-                        queues.remove(&key);
-                    }
+                    requeue_command_key(
+                        key,
+                        &mut queues,
+                        &active,
+                        &mut ready_set,
+                        &mut high_ready,
+                        &mut normal_ready,
+                    );
                     continue;
+                }
+                if envelope.priority == CommandPriority::Normal {
+                    running_normal = running_normal.saturating_add(1);
                 }
                 active.insert(key.clone());
                 running.push(execute_command(
@@ -730,9 +949,9 @@ impl CommandWorker {
                     self.slot,
                     self.platform.clone(),
                     self.services.clone(),
-                    Arc::clone(&self.global_in_flight),
+                    self.global_capacity.clone(),
+                    self.cooldown.clone(),
                     self.attempt_timeout,
-                    self.total_timeout,
                     self.max_retries,
                     self.retry_base,
                     self.retry_max,
@@ -749,7 +968,7 @@ impl CommandWorker {
                     match received {
                         Some(envelope) => {
                             let key = envelope.key.clone();
-                            let priority = envelope.operation.priority();
+                            let priority = envelope.priority;
                             let queue = queues.entry(key.clone()).or_default();
                             let was_empty = queue.is_empty();
                             queue.push_back(envelope);
@@ -763,26 +982,42 @@ impl CommandWorker {
                 completed = running.next(), if !running.is_empty() => {
                     if let Some(completed) = completed {
                         active.remove(&completed.key);
-                        if let Some(priority) = queues
-                            .get(&completed.key)
-                            .and_then(|queue| queue.front())
-                            .map(|envelope| envelope.operation.priority())
-                        {
-                            if ready_set.insert(completed.key.clone()) {
-                                push_ready(
-                                    priority,
-                                    completed.key,
-                                    &mut high_ready,
-                                    &mut normal_ready,
-                                );
-                            }
-                        } else {
-                            queues.remove(&completed.key);
+                        if completed.priority == CommandPriority::Normal {
+                            running_normal = running_normal.saturating_sub(1);
                         }
+                        requeue_command_key(
+                            completed.key,
+                            &mut queues,
+                            &active,
+                            &mut ready_set,
+                            &mut high_ready,
+                            &mut normal_ready,
+                        );
                     }
                 }
             }
         }
+    }
+}
+
+fn requeue_command_key(
+    key: CommandKey,
+    queues: &mut HashMap<CommandKey, VecDeque<CommandEnvelope>>,
+    active: &HashSet<CommandKey>,
+    ready_set: &mut HashSet<CommandKey>,
+    high_ready: &mut VecDeque<CommandKey>,
+    normal_ready: &mut VecDeque<CommandKey>,
+) {
+    if let Some(priority) = queues
+        .get(&key)
+        .and_then(|queue| queue.front())
+        .map(|envelope| envelope.priority)
+    {
+        if !active.contains(&key) && ready_set.insert(key.clone()) {
+            push_ready(priority, key, high_ready, normal_ready);
+        }
+    } else {
+        queues.remove(&key);
     }
 }
 
@@ -793,44 +1028,43 @@ async fn execute_command(
     slot: BotSlot,
     platform: PlatformId,
     services: BotServices,
-    global_in_flight: Arc<Semaphore>,
+    global_capacity: GlobalCommandCapacity,
+    cooldown: BotCooldown,
     attempt_timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
     max_retries: u8,
     retry_base: Duration,
     retry_max: Duration,
     metrics: MetricsHandle,
 ) -> CommandCompletion {
+    let priority = envelope.priority;
     if envelope.is_abandoned() {
         metrics.cancelled_command();
-        return CommandCompletion { key };
-    }
-    let _global_permit: OwnedSemaphorePermit = global_in_flight
-        .acquire_owned()
-        .await
-        .expect("global command semaphore is never closed");
-    if envelope.is_abandoned() {
-        metrics.cancelled_command();
-        return CommandCompletion { key };
+        return CommandCompletion { key, priority };
     }
     metrics.command();
     let result = AssertUnwindSafe(execute_with_retry(
         &envelope.operation,
         envelope.sequence,
+        envelope.deadline,
+        priority,
         slot,
         &platform,
         &services,
+        &global_capacity,
+        &cooldown,
         attempt_timeout,
-        total_timeout,
         max_retries,
         retry_base,
         retry_max,
+        envelope.reply.as_ref(),
     ))
     .catch_unwind()
     .await
     .unwrap_or(Err(CommandError::ServicePanicked));
-    if result.is_err() {
-        metrics.command_error();
+    match &result {
+        Err(CommandError::Cancelled) => metrics.cancelled_command(),
+        Err(_) => metrics.command_error(),
+        Ok(_) => {}
     }
     if let Some(reply) = envelope.reply {
         let _ = reply.send(result);
@@ -838,46 +1072,49 @@ async fn execute_command(
         tracing::warn!(%error, "deferred bot command failed");
     }
     drop(envelope._leases);
-    CommandCompletion { key }
+    CommandCompletion { key, priority }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_with_retry(
     operation: &CommandOperation,
     jitter_seed: u64,
+    deadline: Option<Instant>,
+    priority: CommandPriority,
     slot: BotSlot,
     platform: &PlatformId,
     services: &BotServices,
+    global_capacity: &GlobalCommandCapacity,
+    cooldown: &BotCooldown,
     attempt_timeout: Option<Duration>,
-    total_timeout: Option<Duration>,
     max_retries: u8,
     retry_base: Duration,
     retry_max: Duration,
+    reply: Option<&CommandReply>,
 ) -> std::result::Result<CommandResult, CommandError> {
     let idempotent = operation.idempotent(services.capabilities());
-    let deadline = match total_timeout {
-        Some(timeout) => Some(Instant::now().checked_add(timeout).ok_or_else(|| {
-            CommandError::InvalidModel(
-                "command total timeout exceeds the platform clock range".into(),
-            )
-        })?),
-        None => None,
-    };
     let mut attempt = 0_u8;
     loop {
+        if reply.is_some_and(|reply| reply.is_closed()) {
+            return Err(CommandError::Cancelled);
+        }
+        cooldown.wait(deadline).await?;
+        if reply.is_some_and(|reply| reply.is_closed()) {
+            return Err(CommandError::Cancelled);
+        }
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         if remaining.is_some_and(|remaining| remaining.is_zero()) {
-            return Err(CommandError::Platform(PlatformError::new(
-                PlatformErrorKind::Timeout,
-                "platform command exceeded its total deadline",
-            )));
+            return Err(CommandError::DeadlineExceeded);
         }
         let timeout = match (attempt_timeout, remaining) {
-            (Some(attempt), Some(remaining)) => Some(attempt.min(remaining)),
-            (Some(attempt), None) => Some(attempt),
+            (Some(attempt_timeout), Some(remaining)) => Some(attempt_timeout.min(remaining)),
+            (Some(attempt_timeout), None) => Some(attempt_timeout),
             (None, Some(remaining)) => Some(remaining),
             (None, None) => None,
         };
+
+        let permit = global_capacity.acquire(priority, deadline).await?;
+        permit.touch();
         let result = if let Some(timeout) = timeout {
             match tokio::time::timeout(timeout, execute_once(operation, slot, platform, services))
                 .await
@@ -891,6 +1128,12 @@ async fn execute_with_retry(
         } else {
             execute_once(operation, slot, platform, services).await
         };
+        drop(permit);
+
+        if reply.is_some_and(|reply| reply.is_closed()) {
+            return Err(CommandError::Cancelled);
+        }
+
         match result {
             Ok(value) => return Ok(value),
             Err(CommandError::Platform(error))
@@ -898,8 +1141,6 @@ async fn execute_with_retry(
             {
                 let exponential = 1_u32.checked_shl(attempt.into()).unwrap_or(u32::MAX);
                 let delay = if let Some(retry_after) = error.retry_after {
-                    // A server-provided Retry-After is a lower bound. Never cap it
-                    // to the locally generated backoff ceiling and retry too early.
                     retry_after
                 } else {
                     let base = retry_base.saturating_mul(exponential).min(retry_max);
@@ -913,8 +1154,20 @@ async fn execute_with_retry(
                 }) {
                     return Err(CommandError::Platform(error));
                 }
-                tokio::time::sleep(delay).await;
+                if error.kind == PlatformErrorKind::RateLimited {
+                    cooldown.extend(delay)?;
+                } else {
+                    await_before(deadline, tokio::time::sleep(delay)).await?;
+                }
                 attempt = attempt.saturating_add(1);
+            }
+            Err(CommandError::Platform(error)) => {
+                if error.kind == PlatformErrorKind::RateLimited {
+                    if let Some(retry_after) = error.retry_after {
+                        let _ = cooldown.extend(retry_after);
+                    }
+                }
+                return Err(CommandError::Platform(error));
             }
             Err(error) => return Err(error),
         }

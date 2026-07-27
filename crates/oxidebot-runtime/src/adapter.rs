@@ -1,14 +1,17 @@
 use crate::{
-    budget::{QueueAcquireError, QueueLease, QueueLimiter},
-    handler::RouteSpec,
+    budget::{HierarchicalLease, QueueAcquireError, QueueLease, QueueLimiter},
+    handler::{RouteScope, RouteSpec},
     AdapterError, BotDescriptor, BotServices, DecodeError, MetricsHandle, QueueBudget,
     ShutdownSignal,
 };
 use async_trait::async_trait;
 use oxidebot_core::{
-    BotSlot, EventBatch, EventIndex, EventKind, EventKindSet, PlatformId, RetainedSize,
+    BotIdentity, BotSlot, EventBatch, EventIndex, EventKind, EventKindSet, PlatformId, RetainedSize,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -45,30 +48,37 @@ pub trait InboundFrame: Send + 'static {
         bot: BotSlot,
         platform: &PlatformId,
     ) -> std::result::Result<EventBatch, DecodeError>;
+
+    /// Decodes while receiving the already validated routing index.
+    ///
+    /// The default preserves the simple adapter API. High-throughput adapters
+    /// can override this method to reuse command IDs, conversation keys, JSON
+    /// offsets, or other work produced during [`Self::index`] instead of
+    /// parsing the raw frame twice.
+    fn decode_indexed(
+        self,
+        bot: BotSlot,
+        platform: &PlatformId,
+        _index: &FrameIndex,
+    ) -> std::result::Result<EventBatch, DecodeError>
+    where
+        Self: Sized,
+    {
+        self.decode(bot, platform)
+    }
 }
 
-/// Immutable route interest compiled before adapters start.
 #[derive(Clone, Debug, Default)]
-pub struct InterestPlan {
+struct InterestSet {
     generic_kinds: EventKindSet,
     commands: HashSet<Arc<str>>,
     interactions: HashSet<Arc<str>>,
     native_types: HashSet<Arc<str>>,
-    session_interest: Option<crate::session::SessionInterest>,
 }
 
-impl InterestPlan {
-    /// Returns whether an index can reach a route or exact active session.
-    #[must_use]
-    pub fn accepts(&self, index: &EventIndex) -> bool {
+impl InterestSet {
+    fn accepts(&self, index: &EventIndex) -> bool {
         if self.generic_kinds.contains(index.kind) {
-            return true;
-        }
-        if self
-            .session_interest
-            .as_ref()
-            .is_some_and(|interest| interest.accepts(index))
-        {
             return true;
         }
         match index.kind {
@@ -94,7 +104,7 @@ impl InterestPlan {
         }
     }
 
-    pub(crate) fn add_route(&mut self, route: &RouteSpec) {
+    fn add_route(&mut self, route: &RouteSpec) {
         match route {
             RouteSpec::Generic(kind) => self.generic_kinds.insert(*kind),
             RouteSpec::Command(value) => {
@@ -106,6 +116,80 @@ impl InterestPlan {
             RouteSpec::Native(value) => {
                 self.native_types.insert(value.clone());
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct StaticInterestPlan {
+    global: InterestSet,
+    platforms: HashMap<PlatformId, InterestSet>,
+    bots: HashMap<BotIdentity, InterestSet>,
+}
+
+/// Immutable route interest compiled before adapters start.
+///
+/// Static route sets are shared by `Arc`. Each adapter binds only its identity,
+/// so platform- or bot-scoped routes do not cause unrelated transports to fully
+/// decode matching traffic.
+#[derive(Clone, Debug, Default)]
+pub struct InterestPlan {
+    static_plan: Arc<StaticInterestPlan>,
+    identity: Option<BotIdentity>,
+    session_interest: Option<crate::session::SessionInterest>,
+}
+
+impl InterestPlan {
+    /// Returns whether an index can reach a route or exact active session.
+    #[must_use]
+    pub fn accepts(&self, index: &EventIndex) -> bool {
+        if self.static_plan.global.accepts(index) {
+            return true;
+        }
+        if let Some(identity) = &self.identity {
+            if self
+                .static_plan
+                .platforms
+                .get(&identity.platform)
+                .is_some_and(|interest| interest.accepts(index))
+                || self
+                    .static_plan
+                    .bots
+                    .get(identity)
+                    .is_some_and(|interest| interest.accepts(index))
+            {
+                return true;
+            }
+        }
+        self.session_interest
+            .as_ref()
+            .is_some_and(|interest| interest.accepts(index))
+    }
+
+    pub(crate) fn add_route(&mut self, route: &RouteSpec, scope: &RouteScope) {
+        let static_plan = Arc::make_mut(&mut self.static_plan);
+        if let Some(bot) = &scope.bot {
+            static_plan
+                .bots
+                .entry(bot.clone())
+                .or_default()
+                .add_route(route);
+        } else if let Some(platform) = &scope.platform {
+            static_plan
+                .platforms
+                .entry(platform.clone())
+                .or_default()
+                .add_route(route);
+        } else {
+            static_plan.global.add_route(route);
+        }
+    }
+
+    pub(crate) fn bind(&self, identity: BotIdentity) -> Self {
+        Self {
+            static_plan: Arc::clone(&self.static_plan),
+            identity: Some(identity),
+            session_interest: self.session_interest.clone(),
         }
     }
 
@@ -123,7 +207,7 @@ pub enum Submission {
 
 pub(crate) struct IngressBatch {
     pub(crate) batch: EventBatch,
-    pub(crate) lease: QueueLease,
+    pub(crate) lease: HierarchicalLease,
 }
 
 #[derive(Clone)]
@@ -171,16 +255,28 @@ fn map_ingress_error(error: QueueAcquireError) -> AdapterError {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AdapterLimits {
+    pub(crate) ingress: QueueBudget,
+    pub(crate) max_frame_bytes: usize,
+    pub(crate) max_frame_events: usize,
+    pub(crate) max_event_bytes: usize,
+}
+
 /// Runtime facilities provided to one adapter runner.
 #[derive(Clone)]
 pub struct AdapterContext {
     slot: BotSlot,
     platform: PlatformId,
     sink: EventSink,
+    ingress_limiter: QueueLimiter,
     interest: InterestPlan,
     cancellation: CancellationToken,
     shutdown: ShutdownSignal,
     metrics: MetricsHandle,
+    max_frame_bytes: usize,
+    max_frame_events: usize,
+    max_event_bytes: usize,
 }
 
 impl AdapterContext {
@@ -188,6 +284,7 @@ impl AdapterContext {
         slot: BotSlot,
         platform: PlatformId,
         sink: EventSink,
+        limits: AdapterLimits,
         interest: InterestPlan,
         cancellation: CancellationToken,
         metrics: MetricsHandle,
@@ -197,10 +294,14 @@ impl AdapterContext {
             slot,
             platform,
             sink,
+            ingress_limiter: QueueLimiter::new(limits.ingress),
             interest,
             cancellation,
             shutdown,
             metrics,
+            max_frame_bytes: limits.max_frame_bytes,
+            max_frame_events: limits.max_frame_events,
+            max_event_bytes: limits.max_event_bytes,
         }
     }
 
@@ -224,6 +325,22 @@ impl AdapterContext {
         self.cancellation.is_cancelled()
     }
 
+    async fn reserve_ingress(
+        &self,
+        estimated_bytes: usize,
+    ) -> std::result::Result<(mpsc::OwnedPermit<IngressBatch>, HierarchicalLease), AdapterError>
+    {
+        // Local-first ordering prevents one bot from reserving global ingress
+        // while it is already above its own item/byte share.
+        let local = self
+            .ingress_limiter
+            .acquire(estimated_bytes)
+            .await
+            .map_err(map_ingress_error)?;
+        let (permit, global) = self.sink.reserve(estimated_bytes).await?;
+        Ok((permit, HierarchicalLease::new(local, global)))
+    }
+
     /// Applies interest gating, bounded admission, one full decode, and strict
     /// body/index validation before publishing the batch.
     pub async fn submit<F>(&self, frame: F) -> std::result::Result<Submission, AdapterError>
@@ -235,6 +352,16 @@ impl AdapterContext {
         if index.events.is_empty() {
             return Err(AdapterError::new(
                 "platform frame produced an empty pre-decode index",
+            ));
+        }
+        if index.events.len() > self.max_frame_events {
+            return Err(AdapterError::new(
+                "platform frame index exceeds the configured event-count limit",
+            ));
+        }
+        if index.estimated_bytes > self.max_frame_bytes {
+            return Err(AdapterError::new(
+                "platform frame exceeds the configured per-frame byte limit",
             ));
         }
         if let Err(error) = validate_indexes(&index.events, self.slot, &self.platform) {
@@ -254,7 +381,7 @@ impl AdapterContext {
             _ = self.cancellation.cancelled() => {
                 return Err(AdapterError::cancelled("adapter submission was cancelled"));
             }
-            admission = self.sink.reserve(index.estimated_bytes) => {
+            admission = self.reserve_ingress(index.estimated_bytes) => {
                 match admission {
                     Ok(value) => value,
                     Err(_) if self.cancellation.is_cancelled() => {
@@ -264,14 +391,26 @@ impl AdapterContext {
                 }
             },
         };
-        let mut batch = frame.decode(self.slot, &self.platform)?;
+        let mut batch = frame.decode_indexed(self.slot, &self.platform, &index)?;
+        if batch.events.len() > self.max_frame_events {
+            self.metrics.validation_error();
+            return Err(AdapterError::new(
+                "decoded frame exceeds the configured canonical-event count limit",
+            ));
+        }
         if let Err(error) = validate_batch(&batch, &index.events, self.slot, &self.platform) {
             self.metrics.validation_error();
             return Err(error);
         }
-        if batch.retained_bytes() > index.estimated_bytes {
+        let retained_bytes = batch.retained_bytes();
+        if retained_bytes > index.estimated_bytes {
             return Err(AdapterError::new(
                 "decoded frame exceeds its pre-decode retained-byte estimate",
+            ));
+        }
+        if retained_bytes > self.max_frame_bytes {
+            return Err(AdapterError::new(
+                "decoded frame exceeds the configured per-frame byte limit",
             ));
         }
         let decoded_events = batch.events.len();
@@ -286,6 +425,16 @@ impl AdapterContext {
         if batch.events.is_empty() {
             self.metrics.ignored_frame();
             return Ok(Submission::Ignored);
+        }
+        if batch
+            .events
+            .iter()
+            .any(|event| event.estimated_bytes() > self.max_event_bytes)
+        {
+            self.metrics.validation_error();
+            return Err(AdapterError::new(
+                "interested event exceeds the configured per-event byte limit",
+            ));
         }
         if self.cancellation.is_cancelled() {
             return Err(AdapterError::cancelled("adapter submission was cancelled"));

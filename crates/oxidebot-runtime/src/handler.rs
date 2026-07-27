@@ -1,13 +1,20 @@
 use crate::{
-    session::SessionRegistry, BotHandle, HandlerError, HandlerResult, SessionKey, ShutdownSignal,
+    session::SessionRegistry, BotHandle, BuildError, HandlerError, HandlerResult, SessionKey,
+    ShutdownSignal,
 };
 use futures_util::future::BoxFuture;
 use oxidebot_core::{
-    ConversationChanged, EventBody, EventEnvelope, EventKind, FileChanged, Interaction,
-    MemberChanged, MessageCreated, MessageTarget, MessageUpdated, MessagesDeleted, NativeEvent,
-    OutgoingMessage, PaymentChanged, ReactionChanged,
+    BotIdentity, ConversationChanged, EventBody, EventEnvelope, EventKind, FileChanged,
+    Interaction, MemberChanged, MessageCreated, MessageTarget, MessageUpdated, MessagesDeleted,
+    NativeEvent, OutgoingMessage, PaymentChanged, PlatformId, ReactionChanged,
 };
-use std::{future::Future, marker::PhantomData, str::FromStr, sync::Arc};
+use std::{
+    future::Future,
+    marker::PhantomData,
+    panic::{catch_unwind, AssertUnwindSafe},
+    str::FromStr,
+    sync::Arc,
+};
 
 /// Result of a route, including deferred platform actions.
 #[derive(Clone, Debug, Default)]
@@ -198,6 +205,49 @@ pub enum RouteSpec {
     Native(Arc<str>),
 }
 
+/// Optional adapter scope attached to one compiled route.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct RouteScope {
+    pub(crate) platform: Option<PlatformId>,
+    pub(crate) bot: Option<BotIdentity>,
+}
+
+impl RouteScope {
+    /// Creates an unrestricted route scope.
+    #[must_use]
+    pub const fn global() -> Self {
+        Self {
+            platform: None,
+            bot: None,
+        }
+    }
+
+    /// Restricts a route to one platform.
+    #[must_use]
+    pub fn for_platform(platform: PlatformId) -> Self {
+        Self {
+            platform: Some(platform),
+            bot: None,
+        }
+    }
+
+    /// Restricts a route to one exact bot identity.
+    #[must_use]
+    pub fn for_bot(bot: BotIdentity) -> Self {
+        Self {
+            platform: Some(bot.platform.clone()),
+            bot: Some(bot),
+        }
+    }
+
+    pub(crate) fn matches(&self, identity: &BotIdentity) -> bool {
+        self.platform
+            .as_ref()
+            .is_none_or(|platform| platform == &identity.platform)
+            && self.bot.as_ref().is_none_or(|bot| bot == identity)
+    }
+}
+
 /// A typed route matcher. Matching is compiled once; it is not invoked by every
 /// event at runtime.
 pub trait Matcher: Send + Sync + 'static {
@@ -361,6 +411,7 @@ impl Matcher for NativeMatcher {
 pub struct On<M, F, S> {
     matcher: M,
     function: F,
+    scope: RouteScope,
     _state: PhantomData<fn(S)>,
 }
 
@@ -376,7 +427,24 @@ where
     On {
         matcher,
         function,
+        scope: RouteScope::default(),
         _state: PhantomData,
+    }
+}
+
+impl<M, F, S> On<M, F, S> {
+    /// Restricts this route to one platform.
+    #[must_use]
+    pub fn platform(mut self, platform: PlatformId) -> Self {
+        self.scope = RouteScope::for_platform(platform);
+        self
+    }
+
+    /// Restricts this route to one exact bot identity.
+    #[must_use]
+    pub fn bot(mut self, bot: BotIdentity) -> Self {
+        self.scope = RouteScope::for_bot(bot);
+        self
     }
 }
 
@@ -386,6 +454,7 @@ where
     S: Send + Sync + 'static,
 {
     fn route_spec(&self) -> RouteSpec;
+    fn route_scope(&self) -> RouteScope;
     fn event_kind(&self) -> EventKind;
     fn call(
         &self,
@@ -421,6 +490,10 @@ where
         self.matcher.route_spec()
     }
 
+    fn route_scope(&self) -> RouteScope {
+        self.scope.clone()
+    }
+
     fn event_kind(&self) -> EventKind {
         M::Event::KIND
     }
@@ -452,4 +525,37 @@ where
     H: Handler<S>,
 {
     Arc::new(handler)
+}
+
+/// Build-time snapshot of a dynamic handler's immutable routing metadata.
+pub(crate) struct PreparedHandler<S>
+where
+    S: Send + Sync + 'static,
+{
+    pub(crate) spec: RouteSpec,
+    pub(crate) scope: RouteScope,
+    pub(crate) event_kind: EventKind,
+    pub(crate) handler: Arc<dyn ErasedHandler<S>>,
+}
+
+pub(crate) fn prepare_handler<S>(
+    handler: Arc<dyn ErasedHandler<S>>,
+) -> Result<PreparedHandler<S>, BuildError>
+where
+    S: Send + Sync + 'static,
+{
+    let (spec, scope, event_kind) = catch_unwind(AssertUnwindSafe(|| {
+        (
+            handler.route_spec(),
+            handler.route_scope(),
+            handler.event_kind(),
+        )
+    }))
+    .map_err(|_| BuildError::InvalidRoute("handler routing metadata panicked".into()))?;
+    Ok(PreparedHandler {
+        spec,
+        scope,
+        event_kind,
+        handler,
+    })
 }

@@ -31,8 +31,10 @@ pub struct RuntimeMetrics {
     decoded_events: Counter,
     validation_errors: Counter,
     duplicate_events: Counter,
+    dedupe_uncacheable: Counter,
     dispatched_events: Counter,
     dropped_events: Counter,
+    rejected_events: Counter,
     session_fast_misses: Counter,
     session_consumed: Counter,
     route_candidates: Counter,
@@ -52,8 +54,10 @@ pub struct RuntimeMetricsSnapshot {
     pub decoded_events: u64,
     pub validation_errors: u64,
     pub duplicate_events: u64,
+    pub dedupe_uncacheable: u64,
     pub dispatched_events: u64,
     pub dropped_events: u64,
+    pub rejected_events: u64,
     pub session_fast_misses: u64,
     pub session_consumed: u64,
     pub route_candidates: u64,
@@ -87,12 +91,20 @@ impl RuntimeMetrics {
         self.duplicate_events.add(1);
     }
 
+    pub(crate) fn dedupe_uncacheable(&self) {
+        self.dedupe_uncacheable.add(1);
+    }
+
     pub(crate) fn dispatched_event(&self) {
         self.dispatched_events.add(1);
     }
 
     pub(crate) fn dropped_event(&self) {
         self.dropped_events.add(1);
+    }
+
+    pub(crate) fn rejected_event(&self) {
+        self.rejected_events.add(1);
     }
 
     pub(crate) fn session_fast_miss(&self) {
@@ -143,8 +155,10 @@ impl RuntimeMetrics {
             decoded_events: self.decoded_events.load(),
             validation_errors: self.validation_errors.load(),
             duplicate_events: self.duplicate_events.load(),
+            dedupe_uncacheable: self.dedupe_uncacheable.load(),
             dispatched_events: self.dispatched_events.load(),
             dropped_events: self.dropped_events.load(),
+            rejected_events: self.rejected_events.load(),
             session_fast_misses: self.session_fast_misses.load(),
             session_consumed: self.session_consumed.load(),
             route_candidates: self.route_candidates.load(),

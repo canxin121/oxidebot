@@ -6,12 +6,12 @@ OxideBot is a platform-neutral asynchronous chatbot runtime for Rust. The 1.0 re
 
 ## Design goals
 
-- **Decode only interested traffic.** Adapters extract a small `EventIndex` before full decoding. Frames that cannot reach a route or an active session are discarded early.
+- **Decode only interested traffic.** Adapters extract a small `EventIndex` before full decoding. Frames that cannot reach a global, platform-scoped, bot-scoped route or an active session are discarded early.
 - **Do not scan every handler.** Routes are compiled into dense event-kind tables and exact command, interaction, and native-event indexes.
 - **Keep memory bounded.** Ingress, executor, command, session, and dedupe state all have explicit item and retained-byte ceilings.
 - **Keep task counts bounded.** Fixed executor shards drive virtual conversation actors. Events do not create detached Tokio tasks.
 - **Preserve useful ordering.** A conversation or `(conversation, actor)` key is serialized while unrelated keys execute concurrently.
-- **Prevent noisy neighbours.** Executor and command paths enforce process-wide and per-bot budgets and concurrency limits.
+- **Prevent noisy neighbours.** Dispatcher, executor, and command paths enforce per-bot fairness together with process-wide and per-bot budgets and concurrency limits.
 - **Make shutdown structural.** Adapters, services, sessions, executor shards, command schedulers, and the dispatcher are supervised and drained against one shutdown deadline.
 - **Keep the model free of I/O.** Core message and media values describe data; adapters or services perform network and filesystem work.
 
@@ -66,6 +66,25 @@ OxideBot::new()
 ```
 
 Internally, however, an exact `/ping` route is reached through the command index. Unrelated handlers are neither scanned nor instantiated as futures.
+
+Routes may also be restricted to one platform or one exact bot. The scope is compiled into both the adapter interest plan and the runtime route table, so an unrelated adapter does not fully decode a command merely because another bot registered the same command:
+
+```rust,ignore
+use oxidebot::{BotIdentity, BotId, PlatformId};
+
+let telegram = PlatformId::new("telegram")?;
+let production = BotIdentity::new(
+    telegram.clone(),
+    BotId::new("production-bot")?,
+);
+
+OxideBot::new()
+    .bot(adapter)
+    .handler(on(message().command("admin"), admin).platform(telegram))
+    .handler(on(message().command("status"), status).bot(production));
+```
+
+Build validation rejects a route scoped to a platform or bot that is not registered in the application.
 
 ## Typed context without event cloning
 
@@ -148,11 +167,13 @@ impl Adapter for MyAdapter {
 Each frame has two stages:
 
 1. `InboundFrame::index` extracts only fields needed by interest routing and provides a conservative decoded-byte upper bound.
-2. `InboundFrame::decode` creates one canonical `EventBatch` after admission.
+2. `InboundFrame::decode_indexed` creates one canonical `EventBatch` after admission and can reuse the validated index-stage work; the simpler `decode` method remains the default fallback.
 
 The runtime validates the complete decoded body against the pre-decode index, including bot ownership, platform ownership, conversation, actor, command, interaction ID, native event type, nested message references, mentions, rich-text ranges, metadata bounds, and native data.
 
-One raw payload belongs to the frame and is retained once even when the frame expands into several canonical events.
+One raw payload belongs to the frame and is retained once even when the frame expands into several canonical events. `RuntimeConfig::max_frame_bytes`, `max_frame_events`, and `max_event_bytes` reject pathological frame size, expansion, and per-event retained state before it reaches the executor.
+
+Arbitrary `bytes::Bytes` views are represented by `RetainedBytes`. The default constructor compacts a slice to its visible range; adapters that intentionally preserve a larger shared backing allocation must provide an explicit retained-memory charge with `RetainedBytes::with_charge`.
 
 ## Outbound services and command scheduling
 
@@ -169,10 +190,12 @@ Each bot gets a keyed command scheduler with:
 - per-conversation message ordering;
 - per-interaction response ordering;
 - weighted high-priority scheduling for interaction acknowledgements;
+- queue and service-capacity reservations that normal traffic cannot consume;
 - per-bot and process-wide queue budgets;
 - per-bot and process-wide in-flight limits;
 - attempt and total deadlines;
 - bounded exponential backoff with deterministic jitter;
+- per-bot rate-limit cooldowns, while global service permits are released between retry attempts;
 - panic isolation;
 - early removal of abandoned request/response commands.
 
@@ -182,9 +205,10 @@ Automatic send retries occur only when an idempotency key is present **and** the
 
 `RuntimeProfile::{Eco, Balanced, Throughput}` supplies complete starting envelopes. Every field remains adjustable through `RuntimeConfig`, including:
 
-- ingress item and byte budgets;
+- global and per-bot ingress item/byte budgets plus a maximum frame size;
+- maximum events per frame and maximum incremental bytes per event;
 - global and per-bot executor budgets;
-- global and per-bot command budgets;
+- global and per-bot command budgets plus a maximum command size;
 - global and per-bot in-flight limits;
 - executor and command overload policies;
 - message ordering partition;
@@ -195,7 +219,9 @@ Automatic send retries occur only when an idempotency key is present **and** the
 - retry count, base delay, maximum delay, and high-priority burst;
 - one absolute shutdown grace period.
 
-`OverloadPolicy::Block` preserves accepted work with backpressure. `DropNewest` performs an explicit, observable shed; it never silently converts a full queue into unbounded memory growth.
+`OverloadPolicy::Block` waits for ordinary capacity and never reports an event as accepted when it cannot fit the configured executor envelope. `DropNewest` performs an explicit drop-and-ack shed and records it in metrics. Oversized frames, events, and commands are rejected as errors rather than being silently converted into loss.
+
+The dispatcher keeps one admission future per bot and advances ready bots round-robin. A bot blocked on its local executor budget or an active session cannot head-of-line block unrelated bots. Event IDs enter the dedupe history only after a session consumes the event, the executor accepts it, or `DropNewest` intentionally sheds it.
 
 ## Low-power deployment
 
@@ -223,7 +249,7 @@ cargo build --profile release-small
 
 ## Observability
 
-`RuntimeMetrics` reports ingress, ignored frames, decoded and duplicate events, validation failures, dispatched and dropped events, session fast misses and consumption, route candidate and handler counts, panics, timeouts, commands, abandoned commands, and command errors.
+`RuntimeMetrics` reports ingress, ignored frames, decoded and duplicate events, uncacheable dedupe IDs, validation failures, dispatched, dropped, and rejected events, session fast misses and consumption, route candidate and handler counts, panics, timeouts, commands, abandoned commands, and command errors.
 
 Counters are cache-line isolated to avoid false sharing between ingress, executor, and command workers.
 

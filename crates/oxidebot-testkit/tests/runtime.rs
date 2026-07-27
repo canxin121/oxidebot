@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use oxidebot_core::{
-    BotId, BotSlot, ConversationKey, EventBatch, EventBody, EventDraft, EventId, EventIndex,
-    EventKind, MessageContent, MessageCreated, MessageOptions, MessageRef, MessageTarget,
-    OutgoingMessage, PlatformId, UserKey,
+    BotId, BotIdentity, BotSlot, ConversationKey, EventBatch, EventBody, EventDraft, EventId,
+    EventIndex, EventKind, MessageContent, MessageCreated, MessageOptions, MessageRef,
+    MessageTarget, OutgoingMessage, PlatformId, UserKey,
 };
 use oxidebot_runtime::{
     message, on, Adapter, AdapterContext, AdapterError, AskOptions, BotDescriptor, BotServices,
-    CommandError, Context, DecodeError, FrameIndex, InboundFrame, Outcome, OverloadPolicy,
-    OxideBot, QueueBudget, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service,
-    ServiceContext, ServiceError,
+    BuildError, CommandError, Context, DecodeError, FrameIndex, InboundFrame, Outcome,
+    OverloadPolicy, OxideBot, QueueBudget, RuntimeConfig, RuntimeError, RuntimeMetrics,
+    RuntimeProfile, Service, ServiceContext, ServiceError,
 };
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};
 use std::{
@@ -62,6 +62,102 @@ async fn interest_gate_skips_full_decode_for_unrelated_commands() {
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.ignored_frames, 1);
     assert_eq!(snapshot.decoded_events, 1);
+}
+
+#[tokio::test]
+async fn bot_scoped_route_does_not_decode_matching_traffic_for_another_bot() {
+    let platform = platform();
+    let bot_a = BotId::new("bot-a").expect("static bot id");
+    let bot_b = BotId::new("bot-b").expect("static bot id");
+    let frame_a = TestFrame::message(event_id("scoped-a"), "room-a", "user", 1_u64, "/scoped");
+    let frame_b = TestFrame::message(event_id("scoped-b"), "room-b", "user", 1_u64, "/scoped");
+    let decodes_a = frame_a.decode_counter();
+    let decodes_b = frame_b.decode_counter();
+    let (adapter_a, service_a) = ScriptedAdapter::new(
+        platform.clone(),
+        bot_a.clone(),
+        [ScriptStep::Frame(frame_a)],
+    );
+    let (adapter_b, service_b) =
+        ScriptedAdapter::new(platform.clone(), bot_b, [ScriptStep::Frame(frame_b)]);
+
+    OxideBot::new()
+        .bot(adapter_a)
+        .bot(adapter_b)
+        .handler(
+            on(
+                message().command("scoped"),
+                |_context: Context<MessageCreated>| async move {
+                    Ok(Outcome::stop().reply("matched"))
+                },
+            )
+            .bot(BotIdentity::new(platform, bot_a)),
+        )
+        .run_to_completion()
+        .await
+        .expect("runtime succeeds");
+
+    assert_eq!(decodes_a.get(), 1);
+    assert_eq!(decodes_b.get(), 0);
+    assert_eq!(service_a.sent().len(), 1);
+    assert!(service_b.sent().is_empty());
+}
+
+#[test]
+fn scoped_routes_must_target_a_registered_adapter() {
+    let (adapter, _) = ScriptedAdapter::new(platform(), bot_id(), []);
+    let missing = BotIdentity::new(platform(), BotId::new("missing").expect("static bot id"));
+    let result = OxideBot::new()
+        .bot(adapter)
+        .handler(
+            on(message(), |_context: Context<MessageCreated>| async {
+                Ok(Outcome::continue_())
+            })
+            .bot(missing),
+        )
+        .build();
+    assert!(matches!(result, Err(BuildError::InvalidRoute(_))));
+}
+
+#[tokio::test]
+async fn outbound_commands_are_rejected_before_queue_admission_when_too_large() {
+    let (adapter, service) = ScriptedAdapter::new(
+        platform(),
+        bot_id(),
+        [ScriptStep::Frame(TestFrame::message(
+            event_id("command-too-large"),
+            "room",
+            "user",
+            1_u64,
+            "trigger",
+        ))],
+    );
+    let rejected = Arc::new(AtomicBool::new(false));
+    let rejected_route = Arc::clone(&rejected);
+    let mut config = RuntimeConfig::for_profile(RuntimeProfile::Eco);
+    config.command = QueueBudget::new(8, 8 * 1024);
+    config.max_command_bytes = 512;
+
+    OxideBot::new()
+        .config(config)
+        .bot(adapter)
+        .handler(on(message(), move |context: Context<MessageCreated>| {
+            let rejected = Arc::clone(&rejected_route);
+            async move {
+                let result = context.reply("x".repeat(2_048)).await;
+                rejected.store(
+                    matches!(result, Err(CommandError::PayloadTooLarge)),
+                    Ordering::Release,
+                );
+                Ok(Outcome::continue_())
+            }
+        }))
+        .run_to_completion()
+        .await
+        .expect("runtime succeeds");
+
+    assert!(rejected.load(Ordering::Acquire));
+    assert!(service.sent().is_empty());
 }
 
 #[tokio::test]
@@ -498,9 +594,13 @@ async fn tiny_blocking_budgets_backpressure_without_losing_events() {
     let route_calls = calls.clone();
     let mut config = RuntimeConfig::for_profile(RuntimeProfile::Eco);
     config.ingress = QueueBudget::new(2, 8 * 1024);
+    config.ingress_per_bot = QueueBudget::new(2, 8 * 1024);
+    config.max_frame_bytes = 4 * 1024;
     config.executor = QueueBudget::new(2, 8 * 1024);
     config.executor_per_bot = QueueBudget::new(2, 8 * 1024);
+    config.max_event_bytes = 4 * 1024;
     config.command = QueueBudget::new(2, 8 * 1024);
+    config.max_command_bytes = 4 * 1024;
 
     OxideBot::new()
         .config(config)
@@ -538,6 +638,7 @@ async fn drop_newest_is_explicit_and_observable() {
     let mut config = RuntimeConfig::for_profile(RuntimeProfile::Eco);
     config.executor = QueueBudget::new(1, 8 * 1024);
     config.executor_per_bot = QueueBudget::new(1, 8 * 1024);
+    config.max_event_bytes = 4 * 1024;
     config.executor_overload = OverloadPolicy::DropNewest;
 
     OxideBot::new()
@@ -652,4 +753,109 @@ async fn persistent_adapter_normal_exit_is_fatal() {
         .run_until(pending())
         .await;
     assert!(matches!(result, Err(RuntimeError::Channel(_))));
+}
+
+#[tokio::test]
+async fn blocked_bot_does_not_head_of_line_block_another_bot() {
+    let platform = platform();
+    let (adapter_a, _) = ScriptedAdapter::new(
+        platform.clone(),
+        BotId::new("bot-a").expect("static bot id"),
+        (0_u64..3).map(|value| {
+            ScriptStep::Frame(TestFrame::message(
+                event_id(format!("bot-a:{value}")),
+                "room-a",
+                "user-a",
+                value,
+                value.to_string(),
+            ))
+        }),
+    );
+    let (adapter_b, _) = ScriptedAdapter::new(
+        platform,
+        BotId::new("bot-b").expect("static bot id"),
+        [
+            ScriptStep::Pause(Duration::from_millis(20)),
+            ScriptStep::Frame(TestFrame::message(
+                event_id("bot-b:release"),
+                "room-b",
+                "user-b",
+                1_u64,
+                "release",
+            )),
+        ],
+    );
+
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let bot_b_ran = Arc::new(AtomicBool::new(false));
+    let gate_for_route = Arc::clone(&gate);
+    let bot_b_for_route = Arc::clone(&bot_b_ran);
+    let mut config = RuntimeConfig::for_profile(RuntimeProfile::Eco);
+    config.executor = QueueBudget::new(2, 64 * 1024);
+    config.executor_per_bot = QueueBudget::new(1, 32 * 1024);
+    config.max_event_bytes = 16 * 1024;
+    config.executor_shards = 1;
+    config.executor_in_flight_per_shard = 2;
+    config.executor_in_flight_per_bot = 1;
+
+    let run = OxideBot::new()
+        .config(config)
+        .bot(adapter_a)
+        .bot(adapter_b)
+        .handler(on(message(), move |context: Context<MessageCreated>| {
+            let gate = Arc::clone(&gate_for_route);
+            let bot_b_ran = Arc::clone(&bot_b_for_route);
+            async move {
+                if context.bot().slot() == BotSlot(0) {
+                    let permit = gate.acquire().await.expect("test semaphore open");
+                    permit.forget();
+                } else {
+                    bot_b_ran.store(true, Ordering::Release);
+                    gate.add_permits(3);
+                }
+                Ok(Outcome::continue_())
+            }
+        }))
+        .run_to_completion();
+
+    tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("a saturated bot must not block another bot")
+        .expect("runtime succeeds");
+    assert!(bot_b_ran.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn block_mode_rejects_an_event_that_cannot_fit_in_the_event_envelope() {
+    let (adapter, _) = ScriptedAdapter::new(
+        platform(),
+        bot_id(),
+        [ScriptStep::Frame(TestFrame::message(
+            event_id("oversized"),
+            "room",
+            "user",
+            1_u64,
+            "x".repeat(1_000),
+        ))],
+    );
+    let mut config = RuntimeConfig::for_profile(RuntimeProfile::Eco);
+    config.ingress = QueueBudget::new(8, 16 * 1024);
+    config.ingress_per_bot = QueueBudget::new(4, 8 * 1024);
+    config.max_frame_bytes = 8 * 1024;
+    config.max_event_bytes = 512;
+    config.executor = QueueBudget::new(8, 16 * 1024);
+    config.executor_per_bot = QueueBudget::new(4, 2 * 1024);
+    config.executor_in_flight_per_shard = 2;
+    config.executor_in_flight_per_bot = 1;
+
+    let result = OxideBot::new()
+        .config(config)
+        .bot(adapter)
+        .handler(on(message(), |_context: Context<MessageCreated>| async {
+            Ok(Outcome::continue_())
+        }))
+        .run_to_completion()
+        .await;
+
+    assert!(matches!(result, Err(RuntimeError::Adapter(_))));
 }

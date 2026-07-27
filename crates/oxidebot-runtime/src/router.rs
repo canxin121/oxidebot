@@ -1,24 +1,56 @@
 use crate::{
-    adapter::InterestPlan, handler::RouteSpec, session::SessionRegistry, BotHandle, ErasedHandler,
-    Filter, MetricsHandle, ShutdownSignal,
+    adapter::InterestPlan,
+    handler::{PreparedHandler, RouteSpec},
+    session::SessionRegistry,
+    BotHandle, Filter, MetricsHandle, ShutdownSignal,
 };
 use futures_util::FutureExt;
-use oxidebot_core::{EventEnvelope, EventKind, MessageTarget};
+use oxidebot_core::{BotIdentity, EventEnvelope, EventKind, MessageTarget, PlatformId};
 use std::{
     collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
     time::Duration,
 };
-use tokio_util::sync::CancellationToken;
 
 type RouteId = u32;
 
+enum RouteList {
+    One(RouteId),
+    Many(Vec<RouteId>),
+}
+
+impl RouteList {
+    fn push(&mut self, id: RouteId) {
+        match self {
+            Self::One(first) => *self = Self::Many(vec![*first, id]),
+            Self::Many(values) => values.push(id),
+        }
+    }
+
+    fn as_slice(&self) -> &[RouteId] {
+        match self {
+            Self::One(id) => std::slice::from_ref(id),
+            Self::Many(values) => values.as_slice(),
+        }
+    }
+}
+
 struct RouteTables {
     generic: Vec<Vec<RouteId>>,
-    commands: HashMap<Arc<str>, Vec<RouteId>>,
-    interactions: HashMap<Arc<str>, Vec<RouteId>>,
-    native: HashMap<Arc<str>, Vec<RouteId>>,
+    commands: HashMap<Arc<str>, RouteList>,
+    interactions: HashMap<Arc<str>, RouteList>,
+    native: HashMap<Arc<str>, RouteList>,
+}
+
+fn insert_exact(table: &mut HashMap<Arc<str>, RouteList>, key: &Arc<str>, id: RouteId) {
+    use std::collections::hash_map::Entry;
+    match table.entry(key.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(RouteList::One(id));
+        }
+        Entry::Occupied(mut entry) => entry.get_mut().push(id),
+    }
 }
 
 impl RouteTables {
@@ -34,18 +66,11 @@ impl RouteTables {
     fn insert(&mut self, id: RouteId, spec: &RouteSpec) {
         match spec {
             RouteSpec::Generic(kind) => self.generic[*kind as usize].push(id),
-            RouteSpec::Command(command) => {
-                self.commands.entry(command.clone()).or_default().push(id);
-            }
+            RouteSpec::Command(command) => insert_exact(&mut self.commands, command, id),
             RouteSpec::Interaction(custom_id) => {
-                self.interactions
-                    .entry(custom_id.clone())
-                    .or_default()
-                    .push(id);
+                insert_exact(&mut self.interactions, custom_id, id)
             }
-            RouteSpec::Native(kind) => {
-                self.native.entry(kind.clone()).or_default().push(id);
-            }
+            RouteSpec::Native(kind) => insert_exact(&mut self.native, kind, id),
         }
     }
 
@@ -56,19 +81,19 @@ impl RouteTables {
                 .command
                 .as_ref()
                 .and_then(|value| self.commands.get(value))
-                .map_or(&[], Vec::as_slice),
+                .map_or(&[], RouteList::as_slice),
             EventKind::Interaction => event
                 .index
                 .interaction
                 .as_ref()
                 .and_then(|value| self.interactions.get(value))
-                .map_or(&[], Vec::as_slice),
+                .map_or(&[], RouteList::as_slice),
             EventKind::Native => event
                 .index
                 .native_type
                 .as_ref()
                 .and_then(|value| self.native.get(value))
-                .map_or(&[], Vec::as_slice),
+                .map_or(&[], RouteList::as_slice),
             EventKind::MessageUpdated
             | EventKind::MessagesDeleted
             | EventKind::ReactionChanged
@@ -80,17 +105,86 @@ impl RouteTables {
     }
 }
 
+struct ScopedRouteTables {
+    global: RouteTables,
+    platforms: HashMap<PlatformId, RouteTables>,
+    bots: HashMap<BotIdentity, RouteTables>,
+}
+
+impl ScopedRouteTables {
+    fn new() -> Self {
+        Self {
+            global: RouteTables::new(),
+            platforms: HashMap::new(),
+            bots: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, id: RouteId, spec: &RouteSpec, scope: &crate::handler::RouteScope) {
+        if let Some(bot) = &scope.bot {
+            self.bots
+                .entry(bot.clone())
+                .or_insert_with(RouteTables::new)
+                .insert(id, spec);
+        } else if let Some(platform) = &scope.platform {
+            self.platforms
+                .entry(platform.clone())
+                .or_insert_with(RouteTables::new)
+                .insert(id, spec);
+        } else {
+            self.global.insert(id, spec);
+        }
+    }
+
+    fn candidates<'a>(
+        &'a self,
+        event: &EventEnvelope,
+        identity: &BotIdentity,
+    ) -> [&'a [RouteId]; 6] {
+        let empty: &'a [RouteId] = &[];
+        let platform = self.platforms.get(&identity.platform);
+        let bot = self.bots.get(identity);
+        [
+            &self.global.generic[event.index.kind as usize],
+            self.global.exact(event),
+            platform.map_or(empty, |routes| {
+                routes.generic[event.index.kind as usize].as_slice()
+            }),
+            platform.map_or(empty, |routes| routes.exact(event)),
+            bot.map_or(empty, |routes| {
+                routes.generic[event.index.kind as usize].as_slice()
+            }),
+            bot.map_or(empty, |routes| routes.exact(event)),
+        ]
+    }
+}
+
+fn next_route_id(lists: &[&[RouteId]; 6], positions: &mut [usize; 6]) -> Option<RouteId> {
+    let mut selected: Option<(usize, RouteId)> = None;
+    for (index, list) in lists.iter().enumerate() {
+        let Some(&route_id) = list.get(positions[index]) else {
+            continue;
+        };
+        if selected.is_none_or(|(_, current)| route_id < current) {
+            selected = Some((index, route_id));
+        }
+    }
+    let (index, route_id) = selected?;
+    positions[index] = positions[index].saturating_add(1);
+    Some(route_id)
+}
+
 /// Immutable router compiled into candidate indexes before adapters start.
 pub(crate) struct CompiledRouter<S>
 where
     S: Send + Sync + 'static,
 {
-    handlers: Box<[Arc<dyn ErasedHandler<S>>]>,
-    routes: RouteTables,
+    handlers: Box<[PreparedHandler<S>]>,
+    routes: ScopedRouteTables,
     filters: Box<[Arc<dyn Filter<S>>]>,
     state: Arc<S>,
     sessions: SessionRegistry,
-    cancellation: CancellationToken,
+    shutdown: ShutdownSignal,
     handler_timeout: Option<Duration>,
     metrics: MetricsHandle,
     interest: InterestPlan,
@@ -101,21 +195,20 @@ where
     S: Send + Sync + 'static,
 {
     pub(crate) fn compile(
-        handlers: Vec<Arc<dyn ErasedHandler<S>>>,
+        handlers: Vec<PreparedHandler<S>>,
         filters: Vec<Arc<dyn Filter<S>>>,
         state: Arc<S>,
         sessions: SessionRegistry,
-        cancellation: CancellationToken,
+        shutdown: ShutdownSignal,
         handler_timeout: Option<Duration>,
         metrics: MetricsHandle,
     ) -> Self {
-        let mut routes = RouteTables::new();
+        let mut routes = ScopedRouteTables::new();
         let mut interest = InterestPlan::default();
         for (index, handler) in handlers.iter().enumerate() {
             let id = u32::try_from(index).expect("handler count must fit in u32");
-            let spec = handler.route_spec();
-            routes.insert(id, &spec);
-            interest.add_route(&spec);
+            routes.insert(id, &handler.spec, &handler.scope);
+            interest.add_route(&handler.spec, &handler.scope);
         }
         interest.set_session_interest(sessions.interest());
         Self {
@@ -124,24 +217,24 @@ where
             filters: filters.into_boxed_slice(),
             state,
             sessions,
-            cancellation,
+            shutdown,
             handler_timeout,
             metrics,
             interest,
         }
     }
 
-    pub(crate) fn interest(&self) -> InterestPlan {
-        self.interest.clone()
+    pub(crate) fn interest_for(&self, identity: BotIdentity) -> InterestPlan {
+        self.interest.bind(identity)
     }
 
     /// Dispatches only the pre-indexed candidates. Generic and exact lists are
     /// merged by RouteId so registration order and `Outcome::stop()` semantics
     /// remain deterministic without allocating a temporary candidate vector.
     pub(crate) async fn dispatch(&self, event: Arc<EventEnvelope>, bot: BotHandle) {
-        let generic = &self.routes.generic[event.index.kind as usize];
-        let exact = self.routes.exact(&event);
-        let candidate_count = generic.len().saturating_add(exact.len());
+        let identity = bot.identity();
+        let candidates = self.routes.candidates(&event, identity);
+        let candidate_count = candidates.iter().map(|routes| routes.len()).sum::<usize>();
         self.metrics.route_candidates(candidate_count);
         if candidate_count == 0 {
             return;
@@ -159,30 +252,11 @@ where
             }
         }
 
-        let mut generic_index = 0;
-        let mut exact_index = 0;
-        while generic_index < generic.len() || exact_index < exact.len() {
-            let route_id = match (generic.get(generic_index), exact.get(exact_index)) {
-                (Some(left), Some(right)) if left <= right => {
-                    generic_index += 1;
-                    *left
-                }
-                (Some(_), Some(right)) => {
-                    exact_index += 1;
-                    *right
-                }
-                (Some(left), None) => {
-                    generic_index += 1;
-                    *left
-                }
-                (None, Some(right)) => {
-                    exact_index += 1;
-                    *right
-                }
-                (None, None) => break,
-            };
-
-            let handler = &self.handlers[route_id as usize];
+        let mut positions = [0_usize; 6];
+        while let Some(route_id) = next_route_id(&candidates, &mut positions) {
+            let prepared = &self.handlers[route_id as usize];
+            debug_assert!(prepared.scope.matches(identity));
+            let handler = &prepared.handler;
             self.metrics.handler_call();
             let future = match catch_unwind(AssertUnwindSafe(|| {
                 handler.call(
@@ -190,7 +264,7 @@ where
                     Arc::clone(&self.state),
                     bot.clone(),
                     self.sessions.clone(),
-                    ShutdownSignal::new(self.cancellation.child_token()),
+                    self.shutdown.clone(),
                 )
             })) {
                 Ok(future) => future,

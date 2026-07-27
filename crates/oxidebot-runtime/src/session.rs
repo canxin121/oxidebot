@@ -1,12 +1,12 @@
-use crate::{budget::QueueLease, MetricsHandle, SessionError};
+use crate::{budget::HierarchicalLease, MetricsHandle, SessionError};
 use futures_util::StreamExt;
 use oxidebot_core::{
     ConversationKey, EventEnvelope, EventIndex, EventKind, SessionNamespace, UserKey,
 };
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    collections::{hash_map::RandomState, HashMap, HashSet},
     fmt,
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
@@ -106,7 +106,7 @@ impl AskOptions {
 #[derive(Debug)]
 pub struct SessionEvent {
     event: Arc<EventEnvelope>,
-    _ingress_retention: Arc<QueueLease>,
+    _ingress_retention: Arc<HierarchicalLease>,
 }
 
 impl SessionEvent {
@@ -122,6 +122,7 @@ impl SessionEvent {
 pub(crate) struct SessionInterest {
     shards: Arc<[RwLock<HashSet<ScopeKey>>]>,
     active: Arc<AtomicUsize>,
+    hash_builder: Arc<RandomState>,
 }
 
 impl fmt::Debug for SessionInterest {
@@ -141,7 +142,12 @@ impl SessionInterest {
                 .collect::<Vec<_>>()
                 .into(),
             active: Arc::new(AtomicUsize::new(0)),
+            hash_builder: Arc::new(RandomState::new()),
         }
+    }
+
+    fn shard_for(&self, scope: &ScopeKey) -> usize {
+        shard_for(scope, self.shards.len(), &self.hash_builder)
     }
 
     pub(crate) fn accepts(&self, index: &EventIndex) -> bool {
@@ -151,7 +157,7 @@ impl SessionInterest {
         let Some(scope) = ScopeKey::from_index(index) else {
             return false;
         };
-        let shard = shard_for(&scope, self.shards.len());
+        let shard = self.shard_for(&scope);
         self.shards[shard]
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -159,7 +165,7 @@ impl SessionInterest {
     }
 
     fn insert(&self, scope: ScopeKey) {
-        let shard = shard_for(&scope, self.shards.len());
+        let shard = self.shard_for(&scope);
         let inserted = self.shards[shard]
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -170,7 +176,7 @@ impl SessionInterest {
     }
 
     fn remove(&self, scope: &ScopeKey) {
-        let shard = shard_for(scope, self.shards.len());
+        let shard = self.shard_for(scope);
         let removed = self.shards[shard]
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -249,8 +255,13 @@ impl SessionRegistry {
                     TryAcquireError::NoPermits => SessionError::Full,
                     TryAcquireError::Closed => SessionError::Closed,
                 })?;
-        let registration_id = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let shard = shard_for(&scope, self.senders.len());
+        let registration_id = self
+            .sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| SessionError::SequenceExhausted)?;
+        let shard = self.interest.shard_for(&scope);
         let cancellation = CancellationToken::new();
         let (event_sender, event_receiver) = oneshot::channel();
         let (reply_sender, reply_receiver) = oneshot::channel();
@@ -281,7 +292,7 @@ impl SessionRegistry {
     pub(crate) async fn deliver(
         &self,
         event: Arc<EventEnvelope>,
-        ingress_retention: Arc<QueueLease>,
+        ingress_retention: Arc<HierarchicalLease>,
     ) -> Result<SessionDelivery, SessionError> {
         // Critical hot-path fast miss: no channel send, oneshot allocation, or
         // session-worker wakeup when no exact scope is active.
@@ -292,7 +303,7 @@ impl SessionRegistry {
         let Some(scope) = ScopeKey::from_index(&event.index) else {
             return Ok(SessionDelivery::None);
         };
-        let shard = shard_for(&scope, self.senders.len());
+        let shard = self.interest.shard_for(&scope);
         let (reply, receiver) = oneshot::channel();
         self.senders[shard]
             .send(SessionCommand::Deliver {
@@ -353,7 +364,7 @@ enum SessionCommand {
     Deliver {
         scope: ScopeKey,
         event: Arc<EventEnvelope>,
-        ingress_retention: Arc<QueueLease>,
+        ingress_retention: Arc<HierarchicalLease>,
         reply: oneshot::Sender<SessionDelivery>,
     },
     Cancel {
@@ -542,8 +553,6 @@ fn close_all(entries: &mut HashMap<ScopeKey, SessionEntry>, interest: &SessionIn
     }
 }
 
-fn shard_for<T: Hash>(value: &T, shards: usize) -> usize {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    (hasher.finish() as usize) % shards
+fn shard_for<T: Hash>(value: &T, shards: usize, hash_builder: &RandomState) -> usize {
+    (hash_builder.hash_one(value) as usize) % shards
 }
