@@ -1,0 +1,19 @@
+[package]
+name = "oxidebot-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic adapter and service fixtures for OxideBot"
+
+[dependencies]
+async-trait.workspace = true
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

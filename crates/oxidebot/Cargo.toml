@@ -1,0 +1,17 @@
+[package]
+name = "oxidebot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A high-performance, platform-neutral chatbot framework"
+readme = "../../Readme.md"
+keywords = ["bot", "chatbot", "async", "framework"]
+categories = ["asynchronous", "api-bindings"]
+
+[dependencies]
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }

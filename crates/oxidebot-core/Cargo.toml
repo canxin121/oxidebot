@@ -1,0 +1,16 @@
+[package]
+name = "oxidebot-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Canonical events, identifiers, and messages for OxideBot"
+
+[dependencies]
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
