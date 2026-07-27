@@ -9,6 +9,8 @@ use thiserror::Error;
 
 /// Maximum number of metadata entries accepted on one message.
 pub const MAX_METADATA_ENTRIES: usize = 64;
+/// Maximum bytes accepted for one metadata key.
+pub const MAX_METADATA_KEY_BYTES: usize = 1_024;
 /// Maximum combined metadata key and raw JSON bytes.
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum bytes accepted for a message idempotency key.
@@ -39,6 +41,10 @@ pub enum ModelError {
     InvalidTextSpan,
     #[error("message metadata exceeds its structural limit")]
     MetadataTooLarge,
+    #[error("message metadata keys must contain 1..={MAX_METADATA_KEY_BYTES} bytes")]
+    InvalidMetadataKey,
+    #[error("location coordinates must be finite and within latitude/longitude bounds")]
+    InvalidLocation,
     #[error("message idempotency key must contain 1..={MAX_IDEMPOTENCY_KEY_BYTES} bytes")]
     InvalidIdempotencyKey,
     #[error("{0} exceeds its structural item limit")]
@@ -529,6 +535,7 @@ impl MessageTarget {
 impl NativeData {
     /// Verifies that platform-specific data is used by its owning adapter.
     pub fn validate_for(&self, platform: &PlatformId) -> Result<(), ModelError> {
+        self.platform.validate()?;
         if &self.platform == platform {
             Ok(())
         } else {
@@ -630,7 +637,18 @@ impl MessageContent {
             Self::RichText(text) => text.validate_for(bot, platform),
             Self::Media(media) => media.validate_for(bot, platform),
             Self::Native(native) => native.validate_for(platform),
-            Self::Location { label, .. } => {
+            Self::Location {
+                latitude,
+                longitude,
+                label,
+            } => {
+                if !latitude.is_finite()
+                    || !longitude.is_finite()
+                    || !(-90.0..=90.0).contains(latitude)
+                    || !(-180.0..=180.0).contains(longitude)
+                {
+                    return Err(ModelError::InvalidLocation);
+                }
                 if let Some(label) = label {
                     validate_descriptor(label, "location label")?;
                 }
@@ -668,6 +686,13 @@ impl MessageOptions {
         }
         if self.metadata.len() > MAX_METADATA_ENTRIES {
             return Err(ModelError::MetadataTooLarge);
+        }
+        if self
+            .metadata
+            .keys()
+            .any(|key| key.is_empty() || key.len() > MAX_METADATA_KEY_BYTES)
+        {
+            return Err(ModelError::InvalidMetadataKey);
         }
         let metadata_bytes = self
             .metadata
@@ -736,6 +761,29 @@ mod tests {
         assert_eq!(
             message.validate_for(BotSlot(0), &platform()),
             Err(ModelError::InvalidIdempotencyKey)
+        );
+    }
+
+    #[test]
+    fn invalid_locations_and_metadata_keys_are_rejected() {
+        let location = MessageContent::Location {
+            latitude: f64::NAN,
+            longitude: 0.0,
+            label: None,
+        };
+        assert_eq!(
+            location.validate_for(BotSlot(0), &platform()),
+            Err(ModelError::InvalidLocation)
+        );
+
+        let mut options = MessageOptions::default();
+        options.metadata.insert(
+            Arc::from(""),
+            Arc::from(serde_json::value::to_raw_value(&true).expect("raw JSON")),
+        );
+        assert_eq!(
+            options.validate_for(BotSlot(0), &platform()),
+            Err(ModelError::InvalidMetadataKey)
         );
     }
 

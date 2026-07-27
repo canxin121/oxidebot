@@ -1,4 +1,7 @@
 use oxidebot_core::{BotSlot, EventId};
+/// Conservative charge for the longest valid event ID plus cache-node overhead.
+pub(crate) const MIN_DEDUPE_BYTES_FOR_MAX_ID: usize = oxidebot_core::MAX_SEMANTIC_ID_BYTES + 512;
+
 use std::{
     collections::HashMap,
     time::{Duration, Instant},

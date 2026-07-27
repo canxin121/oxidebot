@@ -550,6 +550,7 @@ impl EventDraft {
         received_at: Instant,
         raw: Option<Arc<RawPayload>>,
     ) -> EventEnvelope {
+        let incremental_bytes = self.estimated_bytes();
         EventEnvelope {
             id: self.id,
             sequence,
@@ -559,6 +560,7 @@ impl EventDraft {
             delivery_attempt: self.delivery_attempt,
             body: self.body,
             raw,
+            incremental_bytes,
         }
     }
 
@@ -641,6 +643,8 @@ pub struct EventEnvelope {
     pub body: EventBody,
     /// Optional shared raw payload.
     pub raw: Option<Arc<RawPayload>>,
+    /// Cached charge unique to this event, excluding the frame-owned raw payload.
+    incremental_bytes: usize,
 }
 
 impl EventEnvelope {
@@ -674,12 +678,8 @@ impl EventEnvelope {
     /// Bytes unique to this queued event. Shared frame raw payload is already
     /// covered by the ingress retention lease and is deliberately excluded.
     #[must_use]
-    pub fn incremental_estimated_bytes(&self) -> usize {
-        self.id
-            .estimated_bytes()
-            .saturating_add(self.index.estimated_bytes())
-            .saturating_add(self.body.estimated_bytes())
-            .saturating_add(192)
+    pub const fn incremental_estimated_bytes(&self) -> usize {
+        self.incremental_bytes
     }
 
     /// Alias used by runtime budget accounting.

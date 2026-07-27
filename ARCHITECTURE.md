@@ -46,17 +46,27 @@ platform frame
     requiring unrelated input to arrive.
 16. Static route interest and candidate tables respect global, platform, and
     exact-bot scopes.
+17. Every valid event ID can fit at least one dedupe entry under a validated
+    configuration, and each registered bot receives at least one dedupe slot.
+18. Command attempt deadlines are recomputed after queue, cooldown, and global
+    service-capacity waits.
+19. Handler deferred effects, route population, metadata keys, and geographic
+    coordinates are structurally bounded before entering downstream queues.
 
 ## Resource ownership
 
 - `AdapterContext` owns no background task. It submits admitted frames into the
   runtime ingress channel.
-- `IngressBatch` retains both global and per-bot byte/item leases until every derived event has left
-  the session/executor paths.
+- `IngressBatch` retains both global and per-bot byte/item leases until every
+  derived event has left the session/executor paths.
+- Finalizing an event caches its incremental retained-size charge. Executor
+  admission therefore does not repeatedly traverse message content trees.
 - `ExecutorHandle` holds global and per-bot queue limiters. Each shard owns only
   virtual queues, a bounded set of running futures, and a bounded set of real
   semaphore waiters. A waiter does not consume a local running slot.
 - `SessionRegistry` owns exact scope interest and one timer queue per shard.
+- A handler outcome has a configured deferred-reply ceiling; an oversized
+  effect batch is rejected atomically rather than partially enqueued.
 - `BotHandle` is one clone-cheap `Arc` around immutable identity and a bounded
   command client. Each bot has one scheduler worker, while all workers share
   global queue and service-call limits with reserved high-priority capacity.

@@ -772,19 +772,21 @@ impl GlobalCommandPermit {
 struct BotCooldown(Arc<std::sync::Mutex<Option<Instant>>>);
 
 impl BotCooldown {
+    fn active_until(&self) -> Option<Instant> {
+        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        match *state {
+            Some(until) if until > Instant::now() => Some(until),
+            Some(_) => {
+                *state = None;
+                None
+            }
+            None => None,
+        }
+    }
+
     async fn wait(&self, deadline: Option<Instant>) -> Result<(), CommandError> {
         loop {
-            let until = {
-                let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
-                match *state {
-                    Some(until) if until > Instant::now() => Some(until),
-                    Some(_) => {
-                        *state = None;
-                        None
-                    }
-                    None => None,
-                }
-            };
+            let until = self.active_until();
             let Some(until) = until else {
                 return Ok(());
             };
@@ -1102,8 +1104,29 @@ async fn execute_with_retry(
         if reply.is_some_and(|reply| reply.is_closed()) {
             return Err(CommandError::Cancelled);
         }
+        let permit = global_capacity.acquire(priority, deadline).await?;
+        permit.touch();
+
+        // Another in-flight command may have published a Retry-After while this
+        // command was waiting for global capacity. Do not bypass that cooldown.
+        if let Some(until) = cooldown.active_until() {
+            drop(permit);
+            if deadline.is_some_and(|deadline| until >= deadline) {
+                return Err(CommandError::DeadlineExceeded);
+            }
+            await_before(deadline, tokio::time::sleep_until(until)).await?;
+            continue;
+        }
+        if reply.is_some_and(|reply| reply.is_closed()) {
+            drop(permit);
+            return Err(CommandError::Cancelled);
+        }
+
+        // Calculate the attempt timeout after queue, cooldown, and global-capacity
+        // waits, so a stale duration can never extend beyond the total deadline.
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         if remaining.is_some_and(|remaining| remaining.is_zero()) {
+            drop(permit);
             return Err(CommandError::DeadlineExceeded);
         }
         let timeout = match (attempt_timeout, remaining) {
@@ -1113,8 +1136,6 @@ async fn execute_with_retry(
             (None, None) => None,
         };
 
-        let permit = global_capacity.acquire(priority, deadline).await?;
-        permit.touch();
         let result = if let Some(timeout) = timeout {
             match tokio::time::timeout(timeout, execute_once(operation, slot, platform, services))
                 .await

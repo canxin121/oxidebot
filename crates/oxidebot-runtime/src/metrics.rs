@@ -42,6 +42,7 @@ pub struct RuntimeMetrics {
     handler_calls: Counter,
     handler_panics: Counter,
     handler_timeouts: Counter,
+    handler_effect_rejections: Counter,
     commands: Counter,
     cancelled_commands: Counter,
     command_errors: Counter,
@@ -65,6 +66,7 @@ pub struct RuntimeMetricsSnapshot {
     pub handler_calls: u64,
     pub handler_panics: u64,
     pub handler_timeouts: u64,
+    pub handler_effect_rejections: u64,
     pub commands: u64,
     pub cancelled_commands: u64,
     pub command_errors: u64,
@@ -135,6 +137,10 @@ impl RuntimeMetrics {
         self.handler_timeouts.add(1);
     }
 
+    pub(crate) fn handler_effect_rejection(&self) {
+        self.handler_effect_rejections.add(1);
+    }
+
     pub(crate) fn command(&self) {
         self.commands.add(1);
     }
@@ -166,6 +172,7 @@ impl RuntimeMetrics {
             handler_calls: self.handler_calls.load(),
             handler_panics: self.handler_panics.load(),
             handler_timeouts: self.handler_timeouts.load(),
+            handler_effect_rejections: self.handler_effect_rejections.load(),
             commands: self.commands.load(),
             cancelled_commands: self.cancelled_commands.load(),
             command_errors: self.command_errors.load(),

@@ -1,4 +1,4 @@
-use crate::{BuildError, OverloadPolicy, QueueBudget};
+use crate::{dedupe::MIN_DEDUPE_BYTES_FOR_MAX_ID, BuildError, OverloadPolicy, QueueBudget};
 use oxidebot_core::MessageExecutionPartition;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -7,6 +7,8 @@ use tokio::sync::Semaphore;
 const MAX_RUNTIME_SHARDS: usize = 1_024;
 /// Upper bound on aggregate session-command channel slots.
 const MAX_SESSION_COMMAND_SLOTS: usize = 1_048_576;
+/// A single handler outcome cannot fan out an unbounded number of commands.
+const MAX_HANDLER_REPLIES_HARD_LIMIT: usize = 4_096;
 
 /// Predefined resource envelopes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -61,6 +63,8 @@ pub struct RuntimeConfig {
     pub dedupe_max_bytes: usize,
     pub dedupe_ttl: Duration,
     pub message_execution_partition: MessageExecutionPartition,
+    /// Maximum deferred replies accepted from one handler outcome.
+    pub max_handler_replies: usize,
     pub handler_timeout: Option<Duration>,
     /// Timeout for one platform command attempt.
     pub command_attempt_timeout: Option<Duration>,
@@ -75,7 +79,8 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     #[must_use]
     pub fn for_profile(profile: RuntimeProfile) -> Self {
-        let (items, bytes, shards, in_flight, frame_events, handler_timeout): (
+        let (items, bytes, shards, in_flight, frame_events, handler_replies, handler_timeout): (
+            usize,
             usize,
             usize,
             usize,
@@ -83,16 +88,23 @@ impl RuntimeConfig {
             usize,
             Duration,
         ) = match profile {
-            RuntimeProfile::Eco => (64, 2 * 1024 * 1024, 1, 8, 32, Duration::from_secs(30)),
-            RuntimeProfile::Balanced => {
-                (512, 16 * 1024 * 1024, 4, 32, 128, Duration::from_secs(60))
-            }
+            RuntimeProfile::Eco => (64, 2 * 1024 * 1024, 1, 8, 32, 8, Duration::from_secs(30)),
+            RuntimeProfile::Balanced => (
+                512,
+                16 * 1024 * 1024,
+                4,
+                32,
+                128,
+                32,
+                Duration::from_secs(60),
+            ),
             RuntimeProfile::Throughput => (
                 4096,
                 128 * 1024 * 1024,
                 16,
                 128,
                 512,
+                64,
                 Duration::from_secs(30),
             ),
         };
@@ -129,6 +141,7 @@ impl RuntimeConfig {
             dedupe_max_bytes: bytes,
             dedupe_ttl: Duration::from_secs(15 * 60),
             message_execution_partition: MessageExecutionPartition::Conversation,
+            max_handler_replies: handler_replies,
             handler_timeout: Some(handler_timeout),
             command_attempt_timeout: Some(Duration::from_secs(15)),
             command_total_timeout: Some(Duration::from_secs(30)),
@@ -169,8 +182,10 @@ impl RuntimeConfig {
             || self.session_commands_per_shard == 0
             || self.max_sessions == 0
             || self.dedupe_capacity == 0
-            || self.dedupe_max_bytes == 0
+            || self.dedupe_max_bytes < MIN_DEDUPE_BYTES_FOR_MAX_ID
             || self.dedupe_ttl.is_zero()
+            || self.max_handler_replies == 0
+            || self.max_handler_replies > MAX_HANDLER_REPLIES_HARD_LIMIT
             || self.shutdown_grace.is_zero()
         {
             return Err(BuildError::InvalidConfig(
@@ -195,6 +210,7 @@ impl RuntimeConfig {
             || self.max_command_bytes > self.global_command.max_bytes
             || self.command.max_bytes < self.max_command_bytes.saturating_mul(2)
             || self.global_command.max_bytes < self.max_command_bytes.saturating_mul(2)
+            || self.max_handler_replies > self.command.max_items
         {
             return Err(BuildError::InvalidConfig(
                 "per-bot, per-item, and global resource limits are inconsistent",

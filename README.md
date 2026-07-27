@@ -215,11 +215,14 @@ Automatic send retries occur only when an idempotency key is present **and** the
 - session capacity and shard command capacity;
 - dedupe item, byte, and TTL bounds;
 - handler timeout;
+- per-handler deferred-reply fan-out;
 - command attempt timeout and total deadline;
 - retry count, base delay, maximum delay, and high-priority burst;
 - one absolute shutdown grace period.
 
 `OverloadPolicy::Block` waits for ordinary capacity and never reports an event as accepted when it cannot fit the configured executor envelope. `DropNewest` performs an explicit drop-and-ack shed and records it in metrics. Oversized frames, events, and commands are rejected as errors rather than being silently converted into loss.
+
+A handler returning more than `RuntimeConfig::max_handler_replies` deferred replies has its entire reply batch rejected, preserving deterministic command-queue bounds and avoiding partial side effects. Direct `Context::reply` calls remain explicit synchronous command operations.
 
 The dispatcher keeps one admission future per bot and advances ready bots round-robin. A bot blocked on its local executor budget or an active session cannot head-of-line block unrelated bots. Event IDs enter the dedupe history only after a session consumes the event, the executor accepts it, or `DropNewest` intentionally sheds it.
 
@@ -249,7 +252,7 @@ cargo build --profile release-small
 
 ## Observability
 
-`RuntimeMetrics` reports ingress, ignored frames, decoded and duplicate events, uncacheable dedupe IDs, validation failures, dispatched, dropped, and rejected events, session fast misses and consumption, route candidate and handler counts, panics, timeouts, commands, abandoned commands, and command errors.
+`RuntimeMetrics` reports ingress, ignored frames, decoded and duplicate events, uncacheable dedupe IDs, validation failures, dispatched, dropped, and rejected events, session fast misses and consumption, route candidate and handler counts, panics, timeouts, rejected handler-effect batches, commands, abandoned commands, and command errors.
 
 Counters are cache-line isolated to avoid false sharing between ingress, executor, and command workers.
 

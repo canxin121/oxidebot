@@ -15,6 +15,12 @@ use std::{
 
 type RouteId = u32;
 
+#[derive(Clone, Copy)]
+pub(crate) struct RouterLimits {
+    pub(crate) handler_timeout: Option<Duration>,
+    pub(crate) max_handler_replies: usize,
+}
+
 enum RouteList {
     One(RouteId),
     Many(Vec<RouteId>),
@@ -186,6 +192,7 @@ where
     sessions: SessionRegistry,
     shutdown: ShutdownSignal,
     handler_timeout: Option<Duration>,
+    max_handler_replies: usize,
     metrics: MetricsHandle,
     interest: InterestPlan,
 }
@@ -200,7 +207,7 @@ where
         state: Arc<S>,
         sessions: SessionRegistry,
         shutdown: ShutdownSignal,
-        handler_timeout: Option<Duration>,
+        limits: RouterLimits,
         metrics: MetricsHandle,
     ) -> Self {
         let mut routes = ScopedRouteTables::new();
@@ -218,7 +225,8 @@ where
             state,
             sessions,
             shutdown,
-            handler_timeout,
+            handler_timeout: limits.handler_timeout,
+            max_handler_replies: limits.max_handler_replies,
             metrics,
             interest,
         }
@@ -298,7 +306,16 @@ where
                     continue;
                 }
             };
-            if let Some(conversation) = event.index.conversation.clone() {
+            let stop = outcome.stop;
+            if outcome.replies.len() > self.max_handler_replies {
+                self.metrics.handler_effect_rejection();
+                tracing::error!(
+                    event_id = %event.id,
+                    replies = outcome.replies.len(),
+                    limit = self.max_handler_replies,
+                    "handler outcome exceeded the deferred-reply limit"
+                );
+            } else if let Some(conversation) = event.index.conversation.clone() {
                 let target = MessageTarget::new(conversation);
                 for reply in outcome.replies {
                     if let Err(error) = bot.enqueue_send(target.clone(), reply).await {
@@ -306,7 +323,7 @@ where
                     }
                 }
             }
-            if outcome.stop {
+            if stop {
                 break;
             }
         }

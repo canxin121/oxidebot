@@ -601,6 +601,7 @@ async fn tiny_blocking_budgets_backpressure_without_losing_events() {
     config.max_event_bytes = 4 * 1024;
     config.command = QueueBudget::new(2, 8 * 1024);
     config.max_command_bytes = 4 * 1024;
+    config.max_handler_replies = 2;
 
     OxideBot::new()
         .config(config)

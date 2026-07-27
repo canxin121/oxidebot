@@ -402,7 +402,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use oxidebot_core::{
-        BotId, CompactId, ConversationKey, EventBody, EventId, EventIndex, EventKind,
+        BotId, CompactId, ConversationKey, EventBody, EventDraft, EventId, EventIndex, EventKind,
         MessageContent, MessageCreated, MessageReceipt, MessageRef, MessageTarget, OutgoingMessage,
         PlatformId, UserKey,
     };
@@ -432,22 +432,22 @@ mod tests {
         let mut index = EventIndex::new(bot, platform.clone(), EventKind::MessageCreated);
         index.conversation = Some(conversation.clone());
         index.actor = Some(actor.clone());
-        Arc::new(EventEnvelope {
-            id: EventId::new("wake-up").expect("static event ID"),
-            sequence: 0,
-            index,
-            occurred_at: None,
-            received_at: Instant::now(),
-            delivery_attempt: 0,
-            body: EventBody::MessageCreated(Box::new(MessageCreated {
-                reference: MessageRef::new(conversation, 1_u64),
-                sender: Some(actor),
-                content: vec![MessageContent::Text(Arc::from("hello"))],
-                text: Some(Arc::from("hello")),
-                mentioned_bot: false,
-            })),
-            raw: None,
-        })
+        Arc::new(
+            EventDraft {
+                id: EventId::new("wake-up").expect("static event ID"),
+                index,
+                occurred_at: None,
+                delivery_attempt: 0,
+                body: EventBody::MessageCreated(Box::new(MessageCreated {
+                    reference: MessageRef::new(conversation, 1_u64),
+                    sender: Some(actor),
+                    content: vec![MessageContent::Text(Arc::from("hello"))],
+                    text: Some(Arc::from("hello")),
+                    mentioned_bot: false,
+                })),
+            }
+            .finalize(0, Instant::now(), None),
+        )
     }
 
     #[tokio::test]
@@ -460,7 +460,10 @@ mod tests {
             Arc::new(()),
             sessions,
             ShutdownSignal::new(CancellationToken::new()),
-            None,
+            crate::router::RouterLimits {
+                handler_timeout: None,
+                max_handler_replies: 8,
+            },
             Arc::clone(&metrics),
         ));
 

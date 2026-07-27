@@ -5,7 +5,7 @@ use crate::{
     dedupe::{DedupeCache, DedupeCommit},
     executor::{ExecutorHandle, ExecutorSubmit},
     handler::{erase_handler, prepare_handler, ErasedHandler, PreparedHandler, RouteSpec},
-    router::CompiledRouter,
+    router::{CompiledRouter, RouterLimits},
     session::{SessionDelivery, SessionRegistry},
     Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, Filter, Handler, MetricsHandle,
     Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
@@ -28,6 +28,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Safety bound for process-local adapter fan-out and per-bot runtime tables.
 const MAX_RUNTIME_BOTS: usize = 4_096;
+/// Prevent pathological build-time route tables and RouteId exhaustion.
+const MAX_RUNTIME_HANDLERS: usize = 1_000_000;
 
 /// Chainable OxideBot application builder.
 pub struct OxideBot<S = ()>
@@ -143,8 +145,10 @@ where
             metrics,
         } = self;
         config.validate()?;
-        if handlers.len() > u32::MAX as usize {
-            return Err(BuildError::InvalidConfig("too many route handlers"));
+        if handlers.len() > MAX_RUNTIME_HANDLERS {
+            return Err(BuildError::InvalidConfig(
+                "route handler count exceeds the runtime safety limit",
+            ));
         }
         let handlers = handlers
             .into_iter()
@@ -152,6 +156,11 @@ where
             .collect::<std::result::Result<Vec<_>, _>>()?;
         validate_routes(&handlers)?;
         let adapters = prepare_adapters(adapters)?;
+        if config.dedupe_capacity < adapters.len() {
+            return Err(BuildError::InvalidConfig(
+                "dedupe capacity must provide at least one slot per registered bot",
+            ));
+        }
         validate_route_targets(&handlers, &adapters)?;
         Ok(Application {
             state,
@@ -490,7 +499,10 @@ where
         Arc::clone(&state),
         sessions.clone(),
         ShutdownSignal::new(cancellation.child_token()),
-        config.handler_timeout,
+        RouterLimits {
+            handler_timeout: config.handler_timeout,
+            max_handler_replies: config.max_handler_replies,
+        },
         Arc::clone(&metrics),
     ));
     let mut command_tasks = JoinSet::new();
