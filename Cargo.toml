@@ -33,6 +33,10 @@ tracing = "0.1.44"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "unwind"
+
+[profile.release-small]
+inherits = "release"
 panic = "abort"
 
 [profile.bench]

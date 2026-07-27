@@ -1,15 +1,16 @@
 use crate::{
-    adapter::{AdapterContext, EventSink, IngressBatch},
+    adapter::{AdapterContext, AdapterMode, EventSink, IngressBatch},
     bot::CommandWorker,
+    budget::QueueLimiter,
     dedupe::DedupeCache,
     executor::{ExecutorHandle, ExecutorSubmit},
-    handler::{erase_handler, ErasedHandler},
+    handler::{erase_handler, ErasedHandler, RouteSpec},
     router::CompiledRouter,
     session::{SessionDelivery, SessionRegistry},
     Adapter, BotDirectory, BuildError, Filter, Handler, MetricsHandle, Result, RuntimeConfig,
-    RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
+    RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext, ShutdownSignal,
 };
-use oxidebot_core::BotSlot;
+use oxidebot_core::{BotIdentity, BotSlot, MAX_ROUTE_KEY_BYTES};
 use std::{
     collections::HashSet,
     future::{pending, Future},
@@ -17,7 +18,7 @@ use std::{
     time::Instant,
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, Semaphore},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -37,7 +38,6 @@ where
 }
 
 impl OxideBot<()> {
-    /// Creates an application with unit state.
     #[must_use]
     pub fn new() -> Self {
         Self::with_state(())
@@ -54,7 +54,6 @@ impl<S> OxideBot<S>
 where
     S: Send + Sync + 'static,
 {
-    /// Creates an application with typed shared state.
     #[must_use]
     pub fn with_state(state: S) -> Self {
         Self {
@@ -68,34 +67,29 @@ where
         }
     }
 
-    /// Applies a predefined resource profile.
     #[must_use]
     pub fn profile(mut self, profile: RuntimeProfile) -> Self {
         self.config = RuntimeConfig::for_profile(profile);
         self
     }
 
-    /// Replaces the complete runtime configuration.
     #[must_use]
     pub fn config(mut self, config: RuntimeConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Uses an externally owned metrics handle.
     #[must_use]
     pub fn metrics(mut self, metrics: MetricsHandle) -> Self {
         self.metrics = metrics;
         self
     }
 
-    /// Returns the current metrics handle.
     #[must_use]
     pub fn metrics_handle(&self) -> MetricsHandle {
         Arc::clone(&self.metrics)
     }
 
-    /// Registers one platform adapter.
     #[must_use]
     pub fn bot<A>(mut self, adapter: A) -> Self
     where
@@ -105,7 +99,6 @@ where
         self
     }
 
-    /// Registers one typed route handler.
     #[must_use]
     pub fn handler<H>(mut self, handler: H) -> Self
     where
@@ -115,7 +108,6 @@ where
         self
     }
 
-    /// Registers one global synchronous admission filter.
     #[must_use]
     pub fn filter<F>(mut self, filter: F) -> Self
     where
@@ -125,7 +117,6 @@ where
         self
     }
 
-    /// Registers one supervised long-lived service.
     #[must_use]
     pub fn service<T>(mut self, service: T) -> Self
     where
@@ -135,19 +126,23 @@ where
         self
     }
 
-    /// Validates the application without starting transports.
     pub fn build(self) -> std::result::Result<Application<S>, BuildError> {
         self.config.validate()?;
         validate_adapters(&self.adapters)?;
+        if self.handlers.len() > u32::MAX as usize {
+            return Err(BuildError::InvalidConfig("too many route handlers"));
+        }
+        validate_routes(&self.handlers)?;
         Ok(Application { inner: self })
     }
 
-    /// Runs until Ctrl-C, adapter failure, service failure, or all finite adapters complete.
+    /// Runs until Ctrl-C (with the default `signal` feature), fatal failure, or
+    /// natural completion of every finite adapter.
     pub async fn run(self) -> Result<()> {
         self.build()?.run().await
     }
 
-    /// Runs finite adapters to completion. Intended for replay jobs and tests.
+    /// Runs a finite replay/import application to completion.
     pub async fn run_to_completion(self) -> Result<()> {
         self.build()?.run_to_completion().await
     }
@@ -165,46 +160,120 @@ impl<S> Application<S>
 where
     S: Send + Sync + 'static,
 {
-    /// Returns the shared metrics handle.
     #[must_use]
     pub fn metrics(&self) -> MetricsHandle {
         Arc::clone(&self.inner.metrics)
     }
 
-    /// Runs until Ctrl-C or natural/fatal completion.
+    #[cfg(feature = "signal")]
     pub async fn run(self) -> Result<()> {
-        self.run_until(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::error!(%error, "failed to listen for Ctrl-C");
-            }
-        })
+        self.run_internal(
+            async {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    tracing::error!(%error, "failed to listen for Ctrl-C");
+                }
+            },
+            RunMode::Normal,
+        )
         .await
     }
 
-    /// Runs finite adapters to completion.
-    pub async fn run_to_completion(self) -> Result<()> {
-        self.run_until(pending()).await
+    #[cfg(not(feature = "signal"))]
+    pub async fn run(self) -> Result<()> {
+        self.run_internal(pending(), RunMode::Normal).await
     }
 
-    /// Runs until the supplied shutdown future completes or the runtime terminates.
+    pub async fn run_to_completion(self) -> Result<()> {
+        if self
+            .inner
+            .adapters
+            .iter()
+            .any(|adapter| adapter.mode() != AdapterMode::Finite)
+        {
+            return Err(BuildError::PersistentAdapterInFiniteRun.into());
+        }
+        self.run_internal(pending(), RunMode::Finite).await
+    }
+
     pub async fn run_until<F>(self, shutdown_signal: F) -> Result<()>
     where
         F: Future<Output = ()>,
     {
-        run_application(self.inner, shutdown_signal).await
+        self.run_internal(shutdown_signal, RunMode::Normal).await
     }
+
+    async fn run_internal<F>(self, shutdown_signal: F, mode: RunMode) -> Result<()>
+    where
+        F: Future<Output = ()>,
+    {
+        run_application(self.inner, shutdown_signal, mode).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RunMode {
+    Normal,
+    Finite,
+}
+
+fn validate_routes<S>(handlers: &[Arc<dyn ErasedHandler<S>>]) -> std::result::Result<(), BuildError>
+where
+    S: Send + Sync + 'static,
+{
+    for handler in handlers {
+        let spec = handler.route_spec();
+        let event_kind = handler.event_kind();
+        let expected_kind = match &spec {
+            RouteSpec::Generic(kind) => *kind,
+            RouteSpec::Command(_) => oxidebot_core::EventKind::MessageCreated,
+            RouteSpec::Interaction(_) => oxidebot_core::EventKind::Interaction,
+            RouteSpec::Native(_) => oxidebot_core::EventKind::Native,
+        };
+        if event_kind != expected_kind {
+            return Err(BuildError::InvalidRoute(
+                "matcher event view differs from its compiled route category".into(),
+            ));
+        }
+        let key = match &spec {
+            RouteSpec::Generic(_) => continue,
+            RouteSpec::Command(value)
+            | RouteSpec::Interaction(value)
+            | RouteSpec::Native(value) => value,
+        };
+        if key.is_empty() || key.len() > MAX_ROUTE_KEY_BYTES {
+            return Err(BuildError::InvalidRoute(format!(
+                "route key must contain 1..={MAX_ROUTE_KEY_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_adapters(adapters: &[Box<dyn Adapter>]) -> std::result::Result<(), BuildError> {
     if adapters.is_empty() {
         return Err(BuildError::NoAdapters);
     }
-    let mut identities = HashSet::with_capacity(adapters.len());
+    let mut identities = HashSet::<BotIdentity>::with_capacity(adapters.len());
     for adapter in adapters {
         let descriptor = adapter.descriptor();
+        descriptor
+            .validate()
+            .map_err(|error| BuildError::InvalidBot(error.to_string()))?;
+        if descriptor
+            .display_name
+            .as_ref()
+            .is_some_and(|value| value.len() > 4 * 1024)
+        {
+            return Err(BuildError::InvalidBot(
+                "display name exceeds 4096 bytes".into(),
+            ));
+        }
         let identity = descriptor.identity();
         if !identities.insert(identity.clone()) {
-            return Err(BuildError::DuplicateBot(identity));
+            return Err(BuildError::DuplicateBot(format!(
+                "{}:{}",
+                identity.platform, identity.bot
+            )));
         }
     }
     Ok(())
@@ -213,6 +282,7 @@ fn validate_adapters(adapters: &[Box<dyn Adapter>]) -> std::result::Result<(), B
 struct RegisteredAdapter {
     slot: BotSlot,
     platform: oxidebot_core::PlatformId,
+    mode: AdapterMode,
     adapter: Box<dyn Adapter>,
 }
 
@@ -224,22 +294,30 @@ fn register_bots(
     let mut registered = Vec::with_capacity(adapters.len());
     let mut workers = Vec::with_capacity(adapters.len());
     let mut handles = Vec::with_capacity(adapters.len());
+    let global_command_limiter = QueueLimiter::new(config.global_command);
+    let global_command_in_flight = Arc::new(Semaphore::new(config.command_in_flight_global));
 
     for (index, adapter) in adapters.into_iter().enumerate() {
         let slot = BotSlot(u32::try_from(index).map_err(|_| BuildError::TooManyBots)?);
         let descriptor = adapter.descriptor();
         let platform = descriptor.platform.clone();
+        let mode = adapter.mode();
         let services = adapter.services();
         let (handle, worker) = CommandWorker::build(
             slot,
             descriptor,
             services,
+            global_command_limiter.clone(),
+            Arc::clone(&global_command_in_flight),
             config.command,
             config.command_overload,
             config.command_in_flight_per_bot,
-            config.command_timeout,
+            config.command_high_priority_burst,
+            config.command_attempt_timeout,
+            config.command_total_timeout,
             config.command_max_retries,
             config.command_retry_base,
+            config.command_retry_max,
             Arc::clone(&metrics),
         );
         handles.push(handle);
@@ -247,6 +325,7 @@ fn register_bots(
         registered.push(RegisteredAdapter {
             slot,
             platform,
+            mode,
             adapter,
         });
     }
@@ -254,7 +333,7 @@ fn register_bots(
     Ok((registered, workers, BotDirectory::new(handles)))
 }
 
-async fn run_application<S, F>(app: OxideBot<S>, shutdown_signal: F) -> Result<()>
+async fn run_application<S, F>(app: OxideBot<S>, shutdown_signal: F, mode: RunMode) -> Result<()>
 where
     S: Send + Sync + 'static,
     F: Future<Output = ()>,
@@ -271,12 +350,14 @@ where
 
     let (registered, command_workers, bot_directory) =
         register_bots(adapters, &config, Arc::clone(&metrics))?;
+    let bot_count = bot_directory.len();
     let cancellation = CancellationToken::new();
 
     let (sessions, session_workers) = SessionRegistry::new(
         config.session_shards,
         config.session_commands_per_shard,
         config.max_sessions,
+        Arc::clone(&metrics),
     );
     let router = Arc::new(CompiledRouter::compile(
         handlers,
@@ -301,9 +382,13 @@ where
 
     let (executor, executor_workers) = ExecutorHandle::new(
         config.executor_shards,
+        bot_count,
         config.executor,
+        config.executor_per_bot,
         config.executor_in_flight_per_shard,
+        config.executor_in_flight_per_bot,
         config.executor_overload,
+        config.message_execution_partition,
         Arc::clone(&router),
         Arc::clone(&metrics),
     );
@@ -320,6 +405,8 @@ where
         sessions.clone(),
         executor,
         config.dedupe_capacity,
+        config.dedupe_max_bytes,
+        config.dedupe_ttl,
         Arc::clone(&metrics),
     ));
 
@@ -328,13 +415,14 @@ where
         let context = ServiceContext::new(
             Arc::clone(&state),
             bot_directory.clone(),
-            cancellation.child_token(),
+            ShutdownSignal::new(cancellation.child_token()),
         );
         service_tasks.spawn(async move { service.run(context).await });
     }
 
     let mut adapter_tasks = JoinSet::new();
     for registered in registered {
+        let adapter_mode = registered.mode;
         let context = AdapterContext::new(
             registered.slot,
             registered.platform,
@@ -343,9 +431,13 @@ where
             cancellation.child_token(),
             Arc::clone(&metrics),
         );
-        adapter_tasks.spawn(async move { registered.adapter.run(context).await });
+        adapter_tasks.spawn(async move { (adapter_mode, registered.adapter.run(context).await) });
     }
-    drop(event_sink);
+
+    // Keep one ingress sender under the supervisor's control. If adapters own
+    // every sender, a finite adapter can drop its context just before its task
+    // completion becomes visible to `JoinSet`; the dispatcher and executor
+    // then finish first and are incorrectly reported as early exits.
 
     tokio::pin!(shutdown_signal);
     let mut adapters_remaining = adapter_tasks.len();
@@ -358,8 +450,14 @@ where
             completed = adapter_tasks.join_next(), if !adapter_tasks.is_empty() => {
                 adapters_remaining = adapters_remaining.saturating_sub(1);
                 match completed {
-                    Some(Ok(Ok(()))) => {}
-                    Some(Ok(Err(error))) => fatal_error = Some(RuntimeError::Adapter(error)),
+                    Some(Ok((adapter_mode, Ok(())))) => {
+                        if adapter_mode == AdapterMode::Persistent && !cancellation.is_cancelled() {
+                            fatal_error = Some(RuntimeError::Channel(
+                                "a persistent adapter exited without cancellation",
+                            ));
+                        }
+                    }
+                    Some(Ok((_, Err(error)))) => fatal_error = Some(RuntimeError::Adapter(error)),
                     Some(Err(error)) => fatal_error = Some(RuntimeError::Join(error.to_string())),
                     None => adapters_remaining = 0,
                 }
@@ -377,10 +475,13 @@ where
                     Ok(result) => result,
                     Err(error) => Err(RuntimeError::Join(error.to_string())),
                 };
-                if let Err(error) = result {
+                if adapters_remaining > 0 && fatal_error.is_none() {
+                    fatal_error = Some(RuntimeError::Channel(
+                        "event dispatcher exited while adapters are still running",
+                    ));
+                } else if let Err(error) = result {
                     fatal_error = Some(error);
                 }
-                // The JoinHandle was consumed by this select branch.
                 dispatcher_result = Some(Ok(()));
                 break;
             }
@@ -408,18 +509,29 @@ where
         }
     }
 
+    if matches!(mode, RunMode::Finite) && adapters_remaining > 0 && fatal_error.is_none() {
+        fatal_error = Some(RuntimeError::Channel(
+            "finite run stopped before adapters completed",
+        ));
+    }
+
     cancellation.cancel();
+    let shutdown_deadline = Instant::now()
+        .checked_add(config.shutdown_grace)
+        .expect("runtime configuration validated the shutdown deadline");
     record_first(
         &mut fatal_error,
-        drain_adapters(&mut adapter_tasks, config.shutdown_grace).await,
+        drain_adapters(&mut adapter_tasks, remaining(shutdown_deadline)).await,
     );
+    drop(event_sink);
     record_first(
         &mut fatal_error,
-        drain_services(&mut service_tasks, config.shutdown_grace).await,
+        drain_services(&mut service_tasks, remaining(shutdown_deadline)).await,
     );
 
     if dispatcher_result.is_none() {
-        dispatcher_result = Some(wait_dispatcher(&mut dispatcher, config.shutdown_grace).await);
+        dispatcher_result =
+            Some(wait_dispatcher(&mut dispatcher, remaining(shutdown_deadline)).await);
     }
     if let Some(result) = dispatcher_result {
         record_first(&mut fatal_error, result.err());
@@ -429,7 +541,7 @@ where
         &mut fatal_error,
         drain_unit_tasks(
             &mut executor_tasks,
-            config.shutdown_grace,
+            remaining(shutdown_deadline),
             "executor shards",
         )
         .await,
@@ -438,7 +550,12 @@ where
     drop(sessions);
     record_first(
         &mut fatal_error,
-        drain_unit_tasks(&mut session_tasks, config.shutdown_grace, "session shards").await,
+        drain_unit_tasks(
+            &mut session_tasks,
+            remaining(shutdown_deadline),
+            "session shards",
+        )
+        .await,
     );
 
     drop(bot_directory);
@@ -446,7 +563,7 @@ where
         &mut fatal_error,
         drain_unit_tasks(
             &mut command_tasks,
-            config.shutdown_grace,
+            remaining(shutdown_deadline),
             "bot command schedulers",
         )
         .await,
@@ -458,31 +575,37 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_loop(
     mut receiver: mpsc::Receiver<IngressBatch>,
     bots: BotDirectory,
     sessions: SessionRegistry,
     executor: ExecutorHandle,
     dedupe_capacity: usize,
+    dedupe_max_bytes: usize,
+    dedupe_ttl: std::time::Duration,
     metrics: MetricsHandle,
 ) -> Result<()> {
     let mut sequence = 0_u64;
-    let mut dedupe = DedupeCache::new(dedupe_capacity);
+    let mut dedupe = DedupeCache::new(dedupe_capacity, dedupe_max_bytes, dedupe_ttl, bots.len());
 
     while let Some(ingress) = receiver.recv().await {
         let received_at = Instant::now();
         let retention = Arc::new(ingress.lease);
+        let raw = ingress.batch.raw;
         for draft in ingress.batch.events {
             let slot = draft.index.bot;
-            if !dedupe.insert(slot, draft.id.clone()) {
-                metrics.duplicate_event();
-                continue;
-            }
             let bot = bots.get(slot).cloned().ok_or(RuntimeError::Channel(
                 "event references an unknown bot slot",
             ))?;
-            let event = Arc::new(draft.finalize(sequence, received_at));
-            sequence = sequence.wrapping_add(1);
+            if !dedupe.insert(slot, draft.id.clone(), received_at) {
+                metrics.duplicate_event();
+                continue;
+            }
+            let event = Arc::new(draft.finalize(sequence, received_at, raw.clone()));
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(RuntimeError::Channel("event sequence exhausted"))?;
 
             let delivery = sessions
                 .deliver(Arc::clone(&event), Arc::clone(&retention))
@@ -507,10 +630,19 @@ async fn dispatch_loop(
     Ok(())
 }
 
+fn remaining(deadline: Instant) -> std::time::Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
 async fn wait_dispatcher(
     dispatcher: &mut JoinHandle<Result<()>>,
     grace: std::time::Duration,
 ) -> Result<()> {
+    if grace.is_zero() {
+        dispatcher.abort();
+        let _ = dispatcher.await;
+        return Err(RuntimeError::ShutdownTimeout("event dispatcher"));
+    }
     match tokio::time::timeout(grace, &mut *dispatcher).await {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => Err(RuntimeError::Join(error.to_string())),
@@ -523,53 +655,28 @@ async fn wait_dispatcher(
 }
 
 async fn drain_adapters(
-    tasks: &mut JoinSet<std::result::Result<(), crate::AdapterError>>,
+    tasks: &mut JoinSet<(AdapterMode, std::result::Result<(), crate::AdapterError>)>,
     grace: std::time::Duration,
 ) -> Option<RuntimeError> {
-    let drain = async {
-        let mut first = None;
-        while let Some(completed) = tasks.join_next().await {
-            match completed {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => record_first(&mut first, Some(RuntimeError::Adapter(error))),
-                Err(error) => record_first(&mut first, Some(RuntimeError::Join(error.to_string()))),
-            }
-        }
-        first
-    };
-    match tokio::time::timeout(grace, drain).await {
-        Ok(error) => error,
-        Err(_) => {
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            Some(RuntimeError::ShutdownTimeout("adapters"))
-        }
-    }
+    drain_join_set(tasks, grace, "adapters", |completed| match completed {
+        Ok((_, Ok(()))) => None,
+        Ok((_, Err(error))) if error.is_cancelled() => None,
+        Ok((_, Err(error))) => Some(RuntimeError::Adapter(error)),
+        Err(error) => Some(RuntimeError::Join(error.to_string())),
+    })
+    .await
 }
 
 async fn drain_services(
     tasks: &mut JoinSet<std::result::Result<(), crate::ServiceError>>,
     grace: std::time::Duration,
 ) -> Option<RuntimeError> {
-    let drain = async {
-        let mut first = None;
-        while let Some(completed) = tasks.join_next().await {
-            match completed {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => record_first(&mut first, Some(RuntimeError::Service(error))),
-                Err(error) => record_first(&mut first, Some(RuntimeError::Join(error.to_string()))),
-            }
-        }
-        first
-    };
-    match tokio::time::timeout(grace, drain).await {
-        Ok(error) => error,
-        Err(_) => {
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            Some(RuntimeError::ShutdownTimeout("services"))
-        }
-    }
+    drain_join_set(tasks, grace, "services", |completed| match completed {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(RuntimeError::Service(error)),
+        Err(error) => Some(RuntimeError::Join(error.to_string())),
+    })
+    .await
 }
 
 async fn drain_unit_tasks(
@@ -577,12 +684,33 @@ async fn drain_unit_tasks(
     grace: std::time::Duration,
     phase: &'static str,
 ) -> Option<RuntimeError> {
+    drain_join_set(tasks, grace, phase, |completed| {
+        completed
+            .err()
+            .map(|error| RuntimeError::Join(error.to_string()))
+    })
+    .await
+}
+
+async fn drain_join_set<T, F>(
+    tasks: &mut JoinSet<T>,
+    grace: std::time::Duration,
+    phase: &'static str,
+    mut map: F,
+) -> Option<RuntimeError>
+where
+    T: 'static,
+    F: FnMut(std::result::Result<T, tokio::task::JoinError>) -> Option<RuntimeError>,
+{
+    if grace.is_zero() {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        return Some(RuntimeError::ShutdownTimeout(phase));
+    }
     let drain = async {
         let mut first = None;
         while let Some(completed) = tasks.join_next().await {
-            if let Err(error) = completed {
-                record_first(&mut first, Some(RuntimeError::Join(error.to_string())));
-            }
+            record_first(&mut first, map(completed));
         }
         first
     };

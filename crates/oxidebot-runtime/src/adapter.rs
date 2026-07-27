@@ -1,9 +1,13 @@
 use crate::{
     budget::{QueueAcquireError, QueueLease, QueueLimiter},
+    handler::RouteSpec,
     AdapterError, BotDescriptor, BotServices, DecodeError, MetricsHandle, QueueBudget,
+    ShutdownSignal,
 };
 use async_trait::async_trait;
-use oxidebot_core::{BotSlot, EventBatch, EventIndex, EventKind, EventKindSet, PlatformId};
+use oxidebot_core::{
+    BotSlot, EventBatch, EventIndex, EventKind, EventKindSet, PlatformId, RetainedSize,
+};
 use std::{collections::HashSet, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -11,14 +15,12 @@ use tokio_util::sync::CancellationToken;
 /// Routing metadata extracted before a platform frame is fully decoded.
 #[derive(Clone, Debug, Default)]
 pub struct FrameIndex {
-    /// Canonical events the frame may produce.
     pub events: Vec<EventIndex>,
-    /// Conservative retained-byte estimate used for admission before decode.
+    /// Conservative retained-byte upper bound for the fully decoded batch.
     pub estimated_bytes: usize,
 }
 
 impl FrameIndex {
-    /// Creates an index for a single canonical event.
     #[must_use]
     pub fn one(event: EventIndex, estimated_bytes: usize) -> Self {
         Self {
@@ -92,20 +94,19 @@ impl InterestPlan {
         }
     }
 
-    pub(crate) fn add_generic(&mut self, kind: EventKind) {
-        self.generic_kinds.insert(kind);
-    }
-
-    pub(crate) fn add_command(&mut self, value: Arc<str>) {
-        self.commands.insert(value);
-    }
-
-    pub(crate) fn add_interaction(&mut self, value: Arc<str>) {
-        self.interactions.insert(value);
-    }
-
-    pub(crate) fn add_native_type(&mut self, value: Arc<str>) {
-        self.native_types.insert(value);
+    pub(crate) fn add_route(&mut self, route: &RouteSpec) {
+        match route {
+            RouteSpec::Generic(kind) => self.generic_kinds.insert(*kind),
+            RouteSpec::Command(value) => {
+                self.commands.insert(value.clone());
+            }
+            RouteSpec::Interaction(value) => {
+                self.interactions.insert(value.clone());
+            }
+            RouteSpec::Native(value) => {
+                self.native_types.insert(value.clone());
+            }
+        }
     }
 
     pub(crate) fn set_session_interest(&mut self, value: crate::session::SessionInterest) {
@@ -116,13 +117,8 @@ impl InterestPlan {
 /// Result of submitting one platform frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Submission {
-    /// Full decoding was skipped because nothing was interested.
     Ignored,
-    /// The decoded canonical events were accepted.
-    Accepted {
-        /// Number of canonical events accepted.
-        events: usize,
-    },
+    Accepted { events: usize },
 }
 
 pub(crate) struct IngressBatch {
@@ -157,12 +153,10 @@ impl EventSink {
             .acquire(estimated_bytes)
             .await
             .map_err(map_ingress_error)?;
-        let permit = self
-            .sender
-            .clone()
-            .reserve_owned()
-            .await
-            .map_err(|_| AdapterError::new("runtime ingress queue is closed"))?;
+        let permit = match self.sender.clone().reserve_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return Err(AdapterError::new("runtime ingress queue is closed")),
+        };
         Ok((permit, lease))
     }
 }
@@ -185,6 +179,7 @@ pub struct AdapterContext {
     sink: EventSink,
     interest: InterestPlan,
     cancellation: CancellationToken,
+    shutdown: ShutdownSignal,
     metrics: MetricsHandle,
 }
 
@@ -197,41 +192,40 @@ impl AdapterContext {
         cancellation: CancellationToken,
         metrics: MetricsHandle,
     ) -> Self {
+        let shutdown = ShutdownSignal::new(cancellation.clone());
         Self {
             slot,
             platform,
             sink,
             interest,
             cancellation,
+            shutdown,
             metrics,
         }
     }
 
-    /// Returns the adapter's dense bot slot.
     #[must_use]
     pub const fn bot_slot(&self) -> BotSlot {
         self.slot
     }
 
-    /// Returns the compiled interest plan.
     #[must_use]
     pub fn interest(&self) -> &InterestPlan {
         &self.interest
     }
 
-    /// Returns a cancellation token for transport loops.
     #[must_use]
-    pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
+    pub fn shutdown(&self) -> &ShutdownSignal {
+        &self.shutdown
     }
 
-    /// Returns whether structured shutdown has started.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
 
-    /// Applies interest gating, bounded admission, and one full decode.
+    /// Applies interest gating, bounded admission, one full decode, and strict
+    /// body/index validation before publishing the batch.
     pub async fn submit<F>(&self, frame: F) -> std::result::Result<Submission, AdapterError>
     where
         F: InboundFrame,
@@ -243,7 +237,10 @@ impl AdapterContext {
                 "platform frame produced an empty pre-decode index",
             ));
         }
-        validate_indexes(&index.events, self.slot, &self.platform)?;
+        if let Err(error) = validate_indexes(&index.events, self.slot, &self.platform) {
+            self.metrics.validation_error();
+            return Err(error);
+        }
         if index
             .events
             .iter()
@@ -255,22 +252,45 @@ impl AdapterContext {
 
         let (permit, lease) = tokio::select! {
             _ = self.cancellation.cancelled() => {
-                return Err(AdapterError::new("adapter submission was cancelled"));
+                return Err(AdapterError::cancelled("adapter submission was cancelled"));
             }
-            admission = self.sink.reserve(index.estimated_bytes) => admission?,
+            admission = self.sink.reserve(index.estimated_bytes) => {
+                match admission {
+                    Ok(value) => value,
+                    Err(_) if self.cancellation.is_cancelled() => {
+                        return Err(AdapterError::cancelled("adapter submission was cancelled"));
+                    }
+                    Err(error) => return Err(error),
+                }
+            },
         };
-        let batch = frame.decode(self.slot, &self.platform)?;
-        validate_batch(&batch, &index.events, self.slot, &self.platform)?;
-        if batch.estimated_bytes() > index.estimated_bytes {
+        let mut batch = frame.decode(self.slot, &self.platform)?;
+        if let Err(error) = validate_batch(&batch, &index.events, self.slot, &self.platform) {
+            self.metrics.validation_error();
+            return Err(error);
+        }
+        if batch.retained_bytes() > index.estimated_bytes {
             return Err(AdapterError::new(
                 "decoded frame exceeds its pre-decode retained-byte estimate",
             ));
         }
+        let decoded_events = batch.events.len();
+        self.metrics.decoded_events(decoded_events);
+
+        // A frame may contain several canonical events while only a subset is
+        // subscribed. Validate the complete decode, then retain only events that
+        // can still reach a route or an exact active session.
+        batch
+            .events
+            .retain(|event| self.interest.accepts(&event.index));
+        if batch.events.is_empty() {
+            self.metrics.ignored_frame();
+            return Ok(Submission::Ignored);
+        }
         if self.cancellation.is_cancelled() {
-            return Err(AdapterError::new("adapter submission was cancelled"));
+            return Err(AdapterError::cancelled("adapter submission was cancelled"));
         }
         let events = batch.events.len();
-        self.metrics.decoded_events(events);
         permit.send(IngressBatch { batch, lease });
         Ok(Submission::Accepted { events })
     }
@@ -282,7 +302,7 @@ fn validate_indexes(
     platform: &PlatformId,
 ) -> std::result::Result<(), AdapterError> {
     for index in indexes {
-        validate_index(index, slot, platform)?;
+        index.validate_for(slot, platform)?;
     }
     Ok(())
 }
@@ -304,54 +324,35 @@ fn validate_batch(
         ));
     }
     for (event, indexed) in batch.events.iter().zip(indexed_events) {
-        validate_index(&event.index, slot, platform)?;
+        event.index.validate_for(slot, platform)?;
         if &event.index != indexed {
             return Err(AdapterError::new(
                 "decoded event routing index differs from the pre-decode frame index",
             ));
         }
-        if event.index.kind != event.body.kind() {
-            return Err(AdapterError::new(
-                "decoded event body does not match its routing index",
-            ));
-        }
+        event.validate_for(slot, platform)?;
     }
     Ok(())
 }
 
-fn validate_index(
-    index: &EventIndex,
-    slot: BotSlot,
-    platform: &PlatformId,
-) -> std::result::Result<(), AdapterError> {
-    if index.bot != slot || &index.platform != platform {
-        return Err(AdapterError::new(
-            "adapter emitted an event for a different bot or platform",
-        ));
-    }
-    if index
-        .conversation
-        .as_ref()
-        .is_some_and(|conversation| conversation.bot != slot)
-        || index.actor.as_ref().is_some_and(|actor| actor.bot != slot)
-    {
-        return Err(AdapterError::new(
-            "event conversation or actor uses a different bot slot",
-        ));
-    }
-    Ok(())
+/// Whether normal completion is meaningful for an adapter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AdapterMode {
+    /// Long-lived network transport. Returning before cancellation is fatal.
+    #[default]
+    Persistent,
+    /// Finite replay/import adapter that may finish successfully.
+    Finite,
 }
 
 /// One platform transport and its outbound services.
 #[async_trait]
 pub trait Adapter: Send + 'static {
-    /// Returns immutable identity before the adapter starts.
     fn descriptor(&self) -> BotDescriptor;
-
-    /// Returns split outbound services before the adapter starts.
     fn services(&self) -> BotServices;
-
-    /// Runs the inbound transport until cancellation, completion, or failure.
+    fn mode(&self) -> AdapterMode {
+        AdapterMode::Persistent
+    }
     async fn run(self: Box<Self>, context: AdapterContext)
         -> std::result::Result<(), AdapterError>;
 }

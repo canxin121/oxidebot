@@ -1,16 +1,44 @@
+use oxidebot_core::{EventValidationError, ModelError};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
+
+/// Broad adapter failure category used to distinguish expected shutdown from
+/// transport/decoder failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdapterErrorKind {
+    Failed,
+    Cancelled,
+}
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{message}")]
 pub struct AdapterError {
+    kind: AdapterErrorKind,
     message: Arc<str>,
 }
 impl AdapterError {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
         Self {
+            kind: AdapterErrorKind::Failed,
             message: message.into(),
         }
+    }
+
+    pub fn cancelled(message: impl Into<Arc<str>>) -> Self {
+        Self {
+            kind: AdapterErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> AdapterErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.kind, AdapterErrorKind::Cancelled)
     }
 }
 
@@ -31,6 +59,11 @@ impl From<DecodeError> for AdapterError {
         Self::new(value.message)
     }
 }
+impl From<EventValidationError> for AdapterError {
+    fn from(value: EventValidationError) -> Self {
+        Self::new(value.to_string())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformErrorKind {
@@ -39,6 +72,7 @@ pub enum PlatformErrorKind {
     Timeout,
     Permanent,
     Unsupported,
+    NotFound,
 }
 
 #[derive(Clone, Debug, Error)]
@@ -88,8 +122,24 @@ pub enum CommandError {
     NativeUnsupported,
     #[error("platform service panicked")]
     ServicePanicked,
+    #[error("command target belongs to another bot")]
+    WrongBot,
+    #[error("platform-native command data belongs to another platform")]
+    WrongPlatform,
+    #[error("command model is invalid: {0}")]
+    InvalidModel(String),
     #[error(transparent)]
     Platform(#[from] PlatformError),
+}
+
+impl From<ModelError> for CommandError {
+    fn from(value: ModelError) -> Self {
+        match value {
+            ModelError::WrongBot => Self::WrongBot,
+            ModelError::WrongPlatform => Self::WrongPlatform,
+            other => Self::InvalidModel(other.to_string()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -98,10 +148,14 @@ pub enum SessionError {
     Closed,
     #[error("session capacity is full")]
     Full,
-    #[error("an equivalent session is already registered")]
+    #[error("an equivalent exclusive session is already registered")]
     Occupied,
     #[error("session timed out")]
     Timeout,
+    #[error("session was cancelled")]
+    Cancelled,
+    #[error("session timeout must be non-zero and fit the monotonic clock")]
+    InvalidTimeout,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -135,8 +189,14 @@ pub enum BuildError {
     NoAdapters,
     #[error("duplicate bot identity: {0}")]
     DuplicateBot(String),
+    #[error("invalid bot descriptor: {0}")]
+    InvalidBot(String),
     #[error("too many adapters to assign bot slots")]
     TooManyBots,
+    #[error("invalid route: {0}")]
+    InvalidRoute(String),
+    #[error("run_to_completion requires finite adapters")]
+    PersistentAdapterInFiniteRun,
     #[error("invalid runtime configuration: {0}")]
     InvalidConfig(&'static str),
 }

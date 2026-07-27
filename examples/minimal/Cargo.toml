@@ -7,3 +7,5 @@ publish = false
 
 [dependencies]
 oxidebot = { path = "../../crates/oxidebot" }
+oxidebot-testkit = { path = "../../crates/oxidebot-testkit" }
+tokio = { workspace = true, features = ["macros", "rt"] }

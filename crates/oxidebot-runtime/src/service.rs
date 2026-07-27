@@ -1,7 +1,6 @@
-use crate::BotDirectory;
+use crate::{BotDirectory, ShutdownSignal};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 /// Facilities shared with one supervised background service.
 #[derive(Clone)]
@@ -11,18 +10,18 @@ where
 {
     state: Arc<S>,
     bots: BotDirectory,
-    cancellation: CancellationToken,
+    shutdown: ShutdownSignal,
 }
 
 impl<S> ServiceContext<S>
 where
     S: Send + Sync + 'static,
 {
-    pub(crate) fn new(state: Arc<S>, bots: BotDirectory, cancellation: CancellationToken) -> Self {
+    pub(crate) fn new(state: Arc<S>, bots: BotDirectory, shutdown: ShutdownSignal) -> Self {
         Self {
             state,
             bots,
-            cancellation,
+            shutdown,
         }
     }
     #[must_use]
@@ -34,8 +33,8 @@ where
         &self.bots
     }
     #[must_use]
-    pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
+    pub fn shutdown(&self) -> &ShutdownSignal {
+        &self.shutdown
     }
 }
 

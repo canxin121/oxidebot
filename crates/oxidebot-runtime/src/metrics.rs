@@ -5,18 +5,44 @@ use std::sync::{
 
 pub type MetricsHandle = Arc<RuntimeMetrics>;
 
+/// Cache-line isolated counter. Independent hot counters no longer invalidate
+/// one another's cache lines when ingress, executor, and command workers run on
+/// different cores.
+#[repr(align(64))]
+#[derive(Default)]
+struct Counter(AtomicU64);
+
+impl Counter {
+    #[inline]
+    fn add(&self, amount: u64) {
+        self.0.fetch_add(amount, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Default)]
 pub struct RuntimeMetrics {
-    ingress_frames: AtomicU64,
-    ignored_frames: AtomicU64,
-    decoded_events: AtomicU64,
-    duplicate_events: AtomicU64,
-    dispatched_events: AtomicU64,
-    dropped_events: AtomicU64,
-    session_consumed: AtomicU64,
-    handler_panics: AtomicU64,
-    commands: AtomicU64,
-    command_errors: AtomicU64,
+    ingress_frames: Counter,
+    ignored_frames: Counter,
+    decoded_events: Counter,
+    validation_errors: Counter,
+    duplicate_events: Counter,
+    dispatched_events: Counter,
+    dropped_events: Counter,
+    session_fast_misses: Counter,
+    session_consumed: Counter,
+    route_candidates: Counter,
+    filter_panics: Counter,
+    handler_calls: Counter,
+    handler_panics: Counter,
+    handler_timeouts: Counter,
+    commands: Counter,
+    cancelled_commands: Counter,
+    command_errors: Counter,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -24,63 +50,111 @@ pub struct RuntimeMetricsSnapshot {
     pub ingress_frames: u64,
     pub ignored_frames: u64,
     pub decoded_events: u64,
+    pub validation_errors: u64,
     pub duplicate_events: u64,
     pub dispatched_events: u64,
     pub dropped_events: u64,
+    pub session_fast_misses: u64,
     pub session_consumed: u64,
+    pub route_candidates: u64,
+    pub filter_panics: u64,
+    pub handler_calls: u64,
     pub handler_panics: u64,
+    pub handler_timeouts: u64,
     pub commands: u64,
+    pub cancelled_commands: u64,
     pub command_errors: u64,
 }
 
 impl RuntimeMetrics {
-    fn increment(value: &AtomicU64, amount: u64) {
-        value.fetch_add(amount, Ordering::Relaxed);
-    }
     pub(crate) fn ingress_frame(&self) {
-        Self::increment(&self.ingress_frames, 1);
+        self.ingress_frames.add(1);
     }
+
     pub(crate) fn ignored_frame(&self) {
-        Self::increment(&self.ignored_frames, 1);
+        self.ignored_frames.add(1);
     }
+
     pub(crate) fn decoded_events(&self, count: usize) {
-        Self::increment(&self.decoded_events, count as u64);
+        self.decoded_events.add(count as u64);
     }
+
+    pub(crate) fn validation_error(&self) {
+        self.validation_errors.add(1);
+    }
+
     pub(crate) fn duplicate_event(&self) {
-        Self::increment(&self.duplicate_events, 1);
+        self.duplicate_events.add(1);
     }
+
     pub(crate) fn dispatched_event(&self) {
-        Self::increment(&self.dispatched_events, 1);
+        self.dispatched_events.add(1);
     }
+
     pub(crate) fn dropped_event(&self) {
-        Self::increment(&self.dropped_events, 1);
+        self.dropped_events.add(1);
     }
+
+    pub(crate) fn session_fast_miss(&self) {
+        self.session_fast_misses.add(1);
+    }
+
     pub(crate) fn session_consumed(&self) {
-        Self::increment(&self.session_consumed, 1);
+        self.session_consumed.add(1);
     }
+
+    pub(crate) fn route_candidates(&self, count: usize) {
+        self.route_candidates.add(count as u64);
+    }
+
+    pub(crate) fn filter_panic(&self) {
+        self.filter_panics.add(1);
+    }
+
+    pub(crate) fn handler_call(&self) {
+        self.handler_calls.add(1);
+    }
+
     pub(crate) fn handler_panic(&self) {
-        Self::increment(&self.handler_panics, 1);
+        self.handler_panics.add(1);
     }
+
+    pub(crate) fn handler_timeout(&self) {
+        self.handler_timeouts.add(1);
+    }
+
     pub(crate) fn command(&self) {
-        Self::increment(&self.commands, 1);
+        self.commands.add(1);
     }
+
+    pub(crate) fn cancelled_command(&self) {
+        self.cancelled_commands.add(1);
+    }
+
     pub(crate) fn command_error(&self) {
-        Self::increment(&self.command_errors, 1);
+        self.command_errors.add(1);
     }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
-        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
         RuntimeMetricsSnapshot {
-            ingress_frames: load(&self.ingress_frames),
-            ignored_frames: load(&self.ignored_frames),
-            decoded_events: load(&self.decoded_events),
-            duplicate_events: load(&self.duplicate_events),
-            dispatched_events: load(&self.dispatched_events),
-            dropped_events: load(&self.dropped_events),
-            session_consumed: load(&self.session_consumed),
-            handler_panics: load(&self.handler_panics),
-            commands: load(&self.commands),
-            command_errors: load(&self.command_errors),
+            ingress_frames: self.ingress_frames.load(),
+            ignored_frames: self.ignored_frames.load(),
+            decoded_events: self.decoded_events.load(),
+            validation_errors: self.validation_errors.load(),
+            duplicate_events: self.duplicate_events.load(),
+            dispatched_events: self.dispatched_events.load(),
+            dropped_events: self.dropped_events.load(),
+            session_fast_misses: self.session_fast_misses.load(),
+            session_consumed: self.session_consumed.load(),
+            route_candidates: self.route_candidates.load(),
+            filter_panics: self.filter_panics.load(),
+            handler_calls: self.handler_calls.load(),
+            handler_panics: self.handler_panics.load(),
+            handler_timeouts: self.handler_timeouts.load(),
+            commands: self.commands.load(),
+            cancelled_commands: self.cancelled_commands.load(),
+            command_errors: self.command_errors.load(),
         }
     }
 }

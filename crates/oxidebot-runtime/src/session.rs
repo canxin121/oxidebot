@@ -1,4 +1,4 @@
-use crate::{budget::QueueLease, SessionError};
+use crate::{budget::QueueLease, MetricsHandle, SessionError};
 use futures_util::StreamExt;
 use oxidebot_core::{
     ConversationKey, EventEnvelope, EventIndex, EventKind, SessionNamespace, UserKey,
@@ -8,13 +8,16 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use tokio_util::time::{delay_queue::Key as DelayKey, DelayQueue};
+use tokio_util::{
+    sync::CancellationToken,
+    time::{delay_queue::Key as DelayKey, DelayQueue},
+};
 
 /// Exact conversation and actor scope used for pre-decode session interest.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -32,19 +35,17 @@ impl ScopeKey {
     }
 }
 
-/// Exact key for one dialogue or wait operation.
+/// Identity for one exclusive dialogue/wait registration. A scope may have only
+/// one active exclusive waiter; namespace distinguishes ownership and safe
+/// cancellation rather than multiplexing multiple next-message consumers.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionKey {
-    /// Conversation being awaited.
     pub conversation: ConversationKey,
-    /// Actor whose next event is awaited.
     pub actor: UserKey,
-    /// Logical dialogue namespace.
     pub namespace: SessionNamespace,
 }
 
 impl SessionKey {
-    /// Creates an exact session key.
     #[must_use]
     pub fn new(conversation: ConversationKey, actor: UserKey, namespace: SessionNamespace) -> Self {
         Self {
@@ -65,43 +66,35 @@ impl SessionKey {
 /// Whether a matched session also reaches normal routing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SessionPolicy {
-    /// Deliver only to the session waiter.
     #[default]
     Consume,
-    /// Deliver to the waiter and continue normal routing afterward.
     Tap,
 }
 
 /// Options for one ask/wait operation.
 #[derive(Clone, Debug)]
 pub struct AskOptions {
-    /// Maximum wait duration.
     pub timeout: Duration,
-    /// Logical namespace.
     pub namespace: SessionNamespace,
-    /// Delivery policy.
     pub policy: SessionPolicy,
 }
 
 impl AskOptions {
-    /// Creates consume-once ask options.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Self {
             timeout,
-            namespace: SessionNamespace::new("ask").expect("static session namespace is valid"),
+            namespace: SessionNamespace::new("ask").expect("static namespace is valid"),
             policy: SessionPolicy::Consume,
         }
     }
 
-    /// Replaces the logical namespace.
     #[must_use]
     pub fn namespace(mut self, namespace: SessionNamespace) -> Self {
         self.namespace = namespace;
         self
     }
 
-    /// Replaces the delivery policy.
     #[must_use]
     pub const fn policy(mut self, policy: SessionPolicy) -> Self {
         self.policy = policy;
@@ -117,23 +110,18 @@ pub struct SessionEvent {
 }
 
 impl SessionEvent {
-    /// Returns the immutable canonical event.
     #[must_use]
     pub fn event(&self) -> &EventEnvelope {
         self.event.as_ref()
     }
-
-    /// Returns a clone-cheap event handle.
-    #[must_use]
-    pub fn event_handle(&self) -> Arc<EventEnvelope> {
-        Arc::clone(&self.event)
-    }
 }
 
-/// Dynamic exact-scope interest consulted before full adapter decoding.
+/// Dynamic exact-scope interest consulted before full adapter decoding and
+/// before the dispatch loop allocates a session command/oneshot pair.
 #[derive(Clone)]
 pub(crate) struct SessionInterest {
     shards: Arc<[RwLock<HashSet<ScopeKey>>]>,
+    active: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for SessionInterest {
@@ -147,16 +135,17 @@ impl fmt::Debug for SessionInterest {
 
 impl SessionInterest {
     fn new(shards: usize) -> Self {
-        let values = (0..shards)
-            .map(|_| RwLock::new(HashSet::new()))
-            .collect::<Vec<_>>();
         Self {
-            shards: values.into(),
+            shards: (0..shards)
+                .map(|_| RwLock::new(HashSet::new()))
+                .collect::<Vec<_>>()
+                .into(),
+            active: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub(crate) fn accepts(&self, index: &EventIndex) -> bool {
-        if index.kind != EventKind::MessageCreated {
+        if index.kind != EventKind::MessageCreated || self.active.load(Ordering::Acquire) == 0 {
             return false;
         }
         let Some(scope) = ScopeKey::from_index(index) else {
@@ -171,22 +160,27 @@ impl SessionInterest {
 
     fn insert(&self, scope: ScopeKey) {
         let shard = shard_for(&scope, self.shards.len());
-        self.shards[shard]
+        let inserted = self.shards[shard]
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(scope);
+        if inserted {
+            self.active.fetch_add(1, Ordering::Release);
+        }
     }
 
     fn remove(&self, scope: &ScopeKey) {
         let shard = shard_for(scope, self.shards.len());
-        self.shards[shard]
+        let removed = self.shards[shard]
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(scope);
+        if removed {
+            self.active.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
-/// Result of attempting exact session delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionDelivery {
     None,
@@ -201,6 +195,7 @@ pub struct SessionRegistry {
     interest: SessionInterest,
     capacity: Arc<Semaphore>,
     sequence: Arc<AtomicU64>,
+    metrics: MetricsHandle,
 }
 
 impl SessionRegistry {
@@ -208,6 +203,7 @@ impl SessionRegistry {
         shards: usize,
         commands_per_shard: usize,
         max_sessions: usize,
+        metrics: MetricsHandle,
     ) -> (Self, Vec<SessionWorker>) {
         let interest = SessionInterest::new(shards);
         let mut senders = Vec::with_capacity(shards);
@@ -226,6 +222,7 @@ impl SessionRegistry {
                 interest,
                 capacity: Arc::new(Semaphore::new(max_sessions)),
                 sequence: Arc::new(AtomicU64::new(0)),
+                metrics,
             },
             workers,
         )
@@ -241,6 +238,9 @@ impl SessionRegistry {
         timeout: Duration,
         policy: SessionPolicy,
     ) -> Result<SessionWaiter, SessionError> {
+        if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
+            return Err(SessionError::InvalidTimeout);
+        }
         let scope = key.scope();
         let capacity =
             Arc::clone(&self.capacity)
@@ -251,6 +251,7 @@ impl SessionRegistry {
                 })?;
         let registration_id = self.sequence.fetch_add(1, Ordering::Relaxed);
         let shard = shard_for(&scope, self.senders.len());
+        let cancellation = CancellationToken::new();
         let (event_sender, event_receiver) = oneshot::channel();
         let (reply_sender, reply_receiver) = oneshot::channel();
         self.senders[shard]
@@ -260,6 +261,7 @@ impl SessionRegistry {
                 timeout,
                 policy,
                 capacity,
+                cancellation: cancellation.clone(),
                 event_sender,
                 reply: reply_sender,
             })
@@ -271,6 +273,7 @@ impl SessionRegistry {
             registration_id,
             sender: self.senders[shard].clone(),
             receiver: Some(event_receiver),
+            cancellation,
             completed: false,
         })
     }
@@ -280,7 +283,10 @@ impl SessionRegistry {
         event: Arc<EventEnvelope>,
         ingress_retention: Arc<QueueLease>,
     ) -> Result<SessionDelivery, SessionError> {
-        if event.index.kind != EventKind::MessageCreated {
+        // Critical hot-path fast miss: no channel send, oneshot allocation, or
+        // session-worker wakeup when no exact scope is active.
+        if !self.interest.accepts(&event.index) {
+            self.metrics.session_fast_miss();
             return Ok(SessionDelivery::None);
         }
         let Some(scope) = ScopeKey::from_index(&event.index) else {
@@ -301,12 +307,14 @@ impl SessionRegistry {
     }
 }
 
-/// Registered one-shot waiter. Dropping it cancels the registration best-effort.
+/// Registered one-shot waiter. Dropping it synchronously marks the entry
+/// cancelled; the best-effort command only accelerates resource reclamation.
 pub(crate) struct SessionWaiter {
     key: SessionKey,
     registration_id: u64,
     sender: mpsc::Sender<SessionCommand>,
     receiver: Option<oneshot::Receiver<Result<SessionEvent, SessionError>>>,
+    cancellation: CancellationToken,
     completed: bool,
 }
 
@@ -322,6 +330,7 @@ impl SessionWaiter {
 impl Drop for SessionWaiter {
     fn drop(&mut self) {
         if !self.completed {
+            self.cancellation.cancel();
             let _ = self.sender.try_send(SessionCommand::Cancel {
                 key: self.key.clone(),
                 registration_id: self.registration_id,
@@ -337,6 +346,7 @@ enum SessionCommand {
         timeout: Duration,
         policy: SessionPolicy,
         capacity: OwnedSemaphorePermit,
+        cancellation: CancellationToken,
         event_sender: oneshot::Sender<Result<SessionEvent, SessionError>>,
         reply: oneshot::Sender<Result<(), SessionError>>,
     },
@@ -356,6 +366,7 @@ struct SessionEntry {
     key: SessionKey,
     registration_id: u64,
     policy: SessionPolicy,
+    cancellation: CancellationToken,
     event_sender: oneshot::Sender<Result<SessionEvent, SessionError>>,
     _capacity: OwnedSemaphorePermit,
     deadline: DelayKey,
@@ -370,14 +381,7 @@ impl SessionWorker {
     pub(crate) async fn run(mut self) {
         let mut entries = HashMap::<ScopeKey, SessionEntry>::new();
         let mut deadlines = DelayQueue::<ScopeKey>::new();
-        let mut input_closed = false;
-
         loop {
-            if input_closed {
-                close_all(&mut entries, &self.interest);
-                break;
-            }
-
             tokio::select! {
                 command = self.receiver.recv() => {
                     match command {
@@ -387,7 +391,10 @@ impl SessionWorker {
                             &mut deadlines,
                             &self.interest,
                         ),
-                        None => input_closed = true,
+                        None => {
+                            close_all(&mut entries, &self.interest);
+                            break;
+                        }
                     }
                 }
                 expired = deadlines.next(), if !deadlines.is_empty() => {
@@ -395,7 +402,12 @@ impl SessionWorker {
                         let scope = expired.into_inner();
                         if let Some(entry) = entries.remove(&scope) {
                             self.interest.remove(&scope);
-                            let _ = entry.event_sender.send(Err(SessionError::Timeout));
+                            let error = if entry.cancellation.is_cancelled() {
+                                SessionError::Cancelled
+                            } else {
+                                SessionError::Timeout
+                            };
+                            let _ = entry.event_sender.send(Err(error));
                         }
                     }
                 }
@@ -417,29 +429,45 @@ fn handle_command(
             timeout,
             policy,
             capacity,
+            cancellation,
             event_sender,
             reply,
         } => {
             let scope = key.scope();
-            let result = if entries.contains_key(&scope) {
-                Err(SessionError::Occupied)
-            } else {
-                let deadline = deadlines.insert(scope.clone(), timeout);
-                entries.insert(
-                    scope.clone(),
-                    SessionEntry {
-                        key,
-                        registration_id,
-                        policy,
-                        event_sender,
-                        _capacity: capacity,
-                        deadline,
-                    },
+            if entries.contains_key(&scope) {
+                let _ = reply.send(Err(SessionError::Occupied));
+                return;
+            }
+            if cancellation.is_cancelled() || event_sender.is_closed() {
+                let _ = reply.send(Err(SessionError::Cancelled));
+                return;
+            }
+            let deadline = deadlines.insert(scope.clone(), timeout);
+            entries.insert(
+                scope.clone(),
+                SessionEntry {
+                    key,
+                    registration_id,
+                    policy,
+                    cancellation,
+                    event_sender,
+                    _capacity: capacity,
+                    deadline,
+                },
+            );
+            interest.insert(scope.clone());
+            // If the caller was cancelled between enqueueing and registration,
+            // the acknowledgement receiver is gone. Roll the registration back
+            // immediately so it cannot consume an unrelated future message.
+            if reply.send(Ok(())).is_err() {
+                remove_entry(
+                    &scope,
+                    entries,
+                    deadlines,
+                    interest,
+                    SessionError::Cancelled,
                 );
-                interest.insert(scope);
-                Ok(())
-            };
-            let _ = reply.send(result);
+            }
         }
         SessionCommand::Deliver {
             scope,
@@ -450,18 +478,23 @@ fn handle_command(
             let delivery = if let Some(entry) = entries.remove(&scope) {
                 let _ = deadlines.try_remove(&entry.deadline);
                 interest.remove(&scope);
-                let policy = entry.policy;
-                let sent = entry.event_sender.send(Ok(SessionEvent {
-                    event,
-                    _ingress_retention: ingress_retention,
-                }));
-                if sent.is_ok() {
-                    match policy {
-                        SessionPolicy::Consume => SessionDelivery::Consumed,
-                        SessionPolicy::Tap => SessionDelivery::Tap,
-                    }
-                } else {
+                if entry.cancellation.is_cancelled() || entry.event_sender.is_closed() {
+                    let _ = entry.event_sender.send(Err(SessionError::Cancelled));
                     SessionDelivery::None
+                } else {
+                    let policy = entry.policy;
+                    let sent = entry.event_sender.send(Ok(SessionEvent {
+                        event,
+                        _ingress_retention: ingress_retention,
+                    }));
+                    if sent.is_ok() {
+                        match policy {
+                            SessionPolicy::Consume => SessionDelivery::Consumed,
+                            SessionPolicy::Tap => SessionDelivery::Tap,
+                        }
+                    } else {
+                        SessionDelivery::None
+                    }
                 }
             } else {
                 SessionDelivery::None
@@ -476,13 +509,29 @@ fn handle_command(
             if entries.get(&scope).is_some_and(|entry| {
                 entry.key.namespace == key.namespace && entry.registration_id == registration_id
             }) {
-                if let Some(entry) = entries.remove(&scope) {
-                    let _ = deadlines.try_remove(&entry.deadline);
-                    interest.remove(&scope);
-                    let _ = entry.event_sender.send(Err(SessionError::Closed));
-                }
+                remove_entry(
+                    &scope,
+                    entries,
+                    deadlines,
+                    interest,
+                    SessionError::Cancelled,
+                );
             }
         }
+    }
+}
+
+fn remove_entry(
+    scope: &ScopeKey,
+    entries: &mut HashMap<ScopeKey, SessionEntry>,
+    deadlines: &mut DelayQueue<ScopeKey>,
+    interest: &SessionInterest,
+    error: SessionError,
+) {
+    if let Some(entry) = entries.remove(scope) {
+        let _ = deadlines.try_remove(&entry.deadline);
+        interest.remove(scope);
+        let _ = entry.event_sender.send(Err(error));
     }
 }
 

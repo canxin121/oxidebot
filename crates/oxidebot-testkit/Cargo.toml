@@ -17,3 +17,8 @@ tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+criterion.workspace = true
+
+[[bench]]
+name = "router"
+harness = false

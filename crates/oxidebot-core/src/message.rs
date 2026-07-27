@@ -1,8 +1,29 @@
-use crate::{CompactId, ConversationKey, PlatformId, UserKey};
+use crate::{BotSlot, CompactId, ConversationKey, InvalidId, PlatformId, RetainedSize, UserKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, ops::Range, path::PathBuf, sync::Arc};
+use thiserror::Error;
+
+/// Maximum number of metadata entries accepted on one message.
+pub const MAX_METADATA_ENTRIES: usize = 64;
+/// Maximum combined metadata key and raw JSON bytes.
+pub const MAX_METADATA_BYTES: usize = 256 * 1024;
+
+/// Structural model validation error.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ModelError {
+    #[error(transparent)]
+    InvalidId(#[from] InvalidId),
+    #[error("value references a different bot slot")]
+    WrongBot,
+    #[error("native data belongs to a different platform")]
+    WrongPlatform,
+    #[error("rich-text span is outside valid UTF-8 boundaries")]
+    InvalidTextSpan,
+    #[error("message metadata exceeds its structural limit")]
+    MetadataTooLarge,
+}
 
 /// Reference to one platform message.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -440,5 +461,173 @@ impl From<&str> for OutgoingMessage {
 impl From<String> for OutgoingMessage {
     fn from(value: String) -> Self {
         Self::text(Arc::<str>::from(value))
+    }
+}
+
+impl MessageRef {
+    /// Validates ownership and external identifier limits.
+    pub fn validate_for(&self, bot: BotSlot) -> Result<(), ModelError> {
+        if self.conversation.bot != bot {
+            return Err(ModelError::WrongBot);
+        }
+        self.conversation.validate()?;
+        self.id.validate()?;
+        Ok(())
+    }
+}
+
+impl MessageTarget {
+    /// Validates that all addresses belong to one bot.
+    pub fn validate_for(&self, bot: BotSlot) -> Result<(), ModelError> {
+        if self.conversation.bot != bot {
+            return Err(ModelError::WrongBot);
+        }
+        self.conversation.validate()?;
+        for recipient in &self.recipients {
+            if recipient.bot != bot {
+                return Err(ModelError::WrongBot);
+            }
+            recipient.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl NativeData {
+    /// Verifies that platform-specific data is used by its owning adapter.
+    pub fn validate_for(&self, platform: &PlatformId) -> Result<(), ModelError> {
+        if &self.platform == platform {
+            Ok(())
+        } else {
+            Err(ModelError::WrongPlatform)
+        }
+    }
+}
+
+impl TextStyle {
+    fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        match self {
+            Self::UserMention(user) => {
+                if user.bot != bot {
+                    return Err(ModelError::WrongBot);
+                }
+                user.validate()?;
+            }
+            Self::Native(native) => native.validate_for(platform)?,
+            Self::Bold
+            | Self::Italic
+            | Self::Underline
+            | Self::Strikethrough
+            | Self::Code
+            | Self::Spoiler
+            | Self::Link(_) => {}
+        }
+        Ok(())
+    }
+}
+
+impl RichText {
+    /// Validates UTF-8 span boundaries and nested styles.
+    pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        for span in &self.spans {
+            if span.range.start > span.range.end
+                || span.range.end > self.text.len()
+                || !self.text.is_char_boundary(span.range.start)
+                || !self.text.is_char_boundary(span.range.end)
+            {
+                return Err(ModelError::InvalidTextSpan);
+            }
+            for style in &span.styles {
+                style.validate_for(bot, platform)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Media {
+    /// Validates nested IDs and native data without performing I/O.
+    pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        if let MediaSource::PlatformId(id) = &self.source {
+            id.validate()?;
+        }
+        if let Some(caption) = &self.caption {
+            caption.validate_for(bot, platform)?;
+        }
+        if let Some(native) = &self.native {
+            native.validate_for(platform)?;
+        }
+        Ok(())
+    }
+}
+
+impl MessageContent {
+    /// Validates nested portable and native content.
+    pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        match self {
+            Self::RichText(text) => text.validate_for(bot, platform),
+            Self::Media(media) => media.validate_for(bot, platform),
+            Self::Native(native) => native.validate_for(platform),
+            Self::Text(_) | Self::Location { .. } | Self::Contact { .. } => Ok(()),
+        }
+    }
+}
+
+impl MessageOptions {
+    /// Validates reply ownership, native data, and bounded metadata.
+    pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        if let Some(reply) = &self.reply_to {
+            reply.validate_for(bot)?;
+        }
+        if let Some(native) = &self.native {
+            native.validate_for(platform)?;
+        }
+        if self.metadata.len() > MAX_METADATA_ENTRIES {
+            return Err(ModelError::MetadataTooLarge);
+        }
+        let metadata_bytes = self
+            .metadata
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(value.get().len()))
+            .sum::<usize>();
+        if metadata_bytes > MAX_METADATA_BYTES {
+            return Err(ModelError::MetadataTooLarge);
+        }
+        Ok(())
+    }
+}
+
+impl OutgoingMessage {
+    /// Validates a command payload before it enters a bot queue.
+    pub fn validate_for(&self, bot: BotSlot, platform: &PlatformId) -> Result<(), ModelError> {
+        for content in &self.content {
+            content.validate_for(bot, platform)?;
+        }
+        self.options.validate_for(bot, platform)
+    }
+}
+
+impl RetainedSize for MessageRef {
+    fn retained_bytes(&self) -> usize {
+        self.estimated_bytes()
+    }
+}
+
+impl RetainedSize for MessageTarget {
+    fn retained_bytes(&self) -> usize {
+        self.estimated_bytes()
+    }
+}
+
+impl RetainedSize for NativeData {
+    fn retained_bytes(&self) -> usize {
+        self.estimated_bytes()
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+}
+
+impl RetainedSize for OutgoingMessage {
+    fn retained_bytes(&self) -> usize {
+        self.estimated_bytes()
     }
 }

@@ -1,15 +1,22 @@
 use crate::{
     BotSlot, CompactId, ConversationKey, EventId, ExecutionKey, Media, MessageContent, MessageRef,
-    NativeData, PlatformId, UserKey,
+    ModelError, NativeData, PlatformId, RetainedSize, UserKey,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{
-    collections::HashSet,
     sync::Arc,
     time::{Instant, SystemTime},
 };
+use thiserror::Error;
+
+/// Maximum bytes allowed in command, interaction, and native route keys.
+pub const MAX_ROUTE_KEY_BYTES: usize = 512;
+/// Maximum number of submitted scalar values on one interaction.
+pub const MAX_INTERACTION_VALUES: usize = 128;
+/// Maximum combined bytes of interaction values.
+pub const MAX_INTERACTION_VALUE_BYTES: usize = 256 * 1024;
 
 /// Canonical event category. One semantic action has exactly one category.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -38,6 +45,9 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Number of slots needed for dense kind-indexed tables.
+    pub const BIT_COUNT: usize = 64;
+
     /// Returns the bit used by [`EventKindSet`].
     #[must_use]
     pub const fn bit(self) -> u64 {
@@ -78,6 +88,16 @@ impl EventKindSet {
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+}
+
+/// How message work is partitioned by the virtual-actor executor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MessageExecutionPartition {
+    /// Preserve strict ordering for an entire conversation or thread.
+    #[default]
+    Conversation,
+    /// Allow different actors in one conversation to execute concurrently.
+    ConversationActor,
 }
 
 /// Lightweight routing metadata extracted before full event decoding.
@@ -136,7 +156,21 @@ impl EventIndex {
 
     /// Determines the default ordered-execution key.
     #[must_use]
-    pub fn execution_key(&self, event_id: &EventId) -> ExecutionKey {
+    pub fn execution_key(
+        &self,
+        event_id: &EventId,
+        message_partition: MessageExecutionPartition,
+    ) -> ExecutionKey {
+        if self.kind == EventKind::MessageCreated
+            && message_partition == MessageExecutionPartition::ConversationActor
+        {
+            if let (Some(conversation), Some(actor)) = (&self.conversation, &self.actor) {
+                return ExecutionKey::ConversationActor {
+                    conversation: conversation.clone(),
+                    actor: actor.clone(),
+                };
+            }
+        }
         if let Some(conversation) = &self.conversation {
             ExecutionKey::Conversation(conversation.clone())
         } else if let Some(actor) = &self.actor {
@@ -490,7 +524,7 @@ impl EventBody {
 }
 
 /// Adapter-produced event before runtime sequence and receive time are assigned.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EventDraft {
     /// Stable event identifier.
     pub id: EventId,
@@ -502,14 +536,17 @@ pub struct EventDraft {
     pub delivery_attempt: u16,
     /// Canonical body.
     pub body: EventBody,
-    /// Optional shared raw payload.
-    pub raw: Option<Arc<RawPayload>>,
 }
 
 impl EventDraft {
-    /// Finalizes the event for runtime dispatch.
+    /// Finalizes the event for runtime dispatch and attaches the frame-owned raw payload.
     #[must_use]
-    pub fn finalize(self, sequence: u64, received_at: Instant) -> EventEnvelope {
+    pub fn finalize(
+        self,
+        sequence: u64,
+        received_at: Instant,
+        raw: Option<Arc<RawPayload>>,
+    ) -> EventEnvelope {
         EventEnvelope {
             id: self.id,
             sequence,
@@ -518,68 +555,72 @@ impl EventDraft {
             received_at,
             delivery_attempt: self.delivery_attempt,
             body: self.body,
-            raw: self.raw,
+            raw,
         }
     }
 
-    /// Approximate retained payload bytes.
+    /// Bytes unique to this event draft. Frame raw data is accounted once by [`EventBatch`].
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
-        self.raw
-            .as_ref()
-            .map_or(0, |raw| raw.estimated_bytes())
-            .saturating_add(self.id.estimated_bytes())
+        self.id
+            .estimated_bytes()
             .saturating_add(self.index.estimated_bytes())
             .saturating_add(self.body.estimated_bytes())
             .saturating_add(192)
     }
 }
 
-/// Batch decoded once from one platform frame.
-#[derive(Clone, Debug, Default)]
+/// Batch decoded once from one platform frame. The raw payload is retained once
+/// even when the frame expands into several canonical events.
+#[derive(Debug, Default)]
 pub struct EventBatch {
+    /// Shared original platform payload.
+    pub raw: Option<Arc<RawPayload>>,
     /// Canonical event drafts.
     pub events: Vec<EventDraft>,
 }
 
 impl EventBatch {
-    /// Creates a batch.
+    /// Creates a batch without retaining the original frame.
     #[must_use]
     pub fn new(events: impl IntoIterator<Item = EventDraft>) -> Self {
         Self {
+            raw: None,
             events: events.into_iter().collect(),
         }
     }
 
-    /// Approximate retained bytes. Shared raw payloads are counted once.
+    /// Attaches one shared raw frame.
+    #[must_use]
+    pub fn with_raw(mut self, raw: Arc<RawPayload>) -> Self {
+        self.raw = Some(raw);
+        self
+    }
+
+    /// Approximate retained bytes; the shared raw payload is counted exactly once.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
-        let mut seen = HashSet::new();
-        let raw_bytes = self
-            .events
-            .iter()
-            .filter_map(|event| event.raw.as_ref())
-            .filter(|raw| seen.insert(Arc::as_ptr(raw) as usize))
-            .map(|raw| raw.estimated_bytes())
-            .sum::<usize>();
-        raw_bytes.saturating_add(
-            self.events
-                .iter()
-                .map(|event| {
-                    event
-                        .id
-                        .estimated_bytes()
-                        .saturating_add(event.index.estimated_bytes())
-                        .saturating_add(event.body.estimated_bytes())
-                        .saturating_add(192)
-                })
-                .sum::<usize>(),
-        )
+        self.raw
+            .as_ref()
+            .map_or(0, |raw| raw.estimated_bytes())
+            .saturating_add(
+                self.events
+                    .iter()
+                    .map(EventDraft::estimated_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.events.capacity() * std::mem::size_of::<EventDraft>())
+    }
+}
+
+impl RetainedSize for EventBatch {
+    fn retained_bytes(&self) -> usize {
+        self.estimated_bytes()
     }
 }
 
 /// Runtime-owned immutable event.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EventEnvelope {
     /// Stable event identifier.
     pub id: EventId,
@@ -618,15 +659,314 @@ impl EventEnvelope {
         }
     }
 
-    /// Approximate retained bytes used by bounded executor queues.
+    /// Approximate total retained bytes.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         self.raw
             .as_ref()
             .map_or(0, |raw| raw.estimated_bytes())
-            .saturating_add(self.id.estimated_bytes())
+            .saturating_add(self.incremental_estimated_bytes())
+    }
+
+    /// Bytes unique to this queued event. Shared frame raw payload is already
+    /// covered by the ingress retention lease and is deliberately excluded.
+    #[must_use]
+    pub fn incremental_estimated_bytes(&self) -> usize {
+        self.id
+            .estimated_bytes()
             .saturating_add(self.index.estimated_bytes())
             .saturating_add(self.body.estimated_bytes())
             .saturating_add(192)
+    }
+
+    /// Alias used by runtime budget accounting.
+    #[must_use]
+    pub fn incremental_retained_bytes(&self) -> usize {
+        self.incremental_estimated_bytes()
+    }
+}
+
+/// Error raised when an adapter's pre-indexed and decoded representations are
+/// not structurally identical.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum EventValidationError {
+    #[error("event references a different bot")]
+    WrongBot,
+    #[error("event references a different platform")]
+    WrongPlatform,
+    #[error("event route key is empty or too large")]
+    InvalidRouteKey,
+    #[error("event body kind differs from its index")]
+    KindMismatch,
+    #[error("event body addresses differ from its routing index")]
+    IndexBodyMismatch,
+    #[error("event command differs from the canonical message text")]
+    CommandMismatch,
+    #[error("interaction fields exceed their structural limits")]
+    InteractionTooLarge,
+    #[error(transparent)]
+    Model(#[from] ModelError),
+    #[error(transparent)]
+    InvalidId(#[from] crate::InvalidId),
+}
+
+impl EventIndex {
+    /// Validates address ownership and bounded route keys.
+    pub fn validate_for(
+        &self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> Result<(), EventValidationError> {
+        if self.bot != bot {
+            return Err(EventValidationError::WrongBot);
+        }
+        self.platform.validate()?;
+        if &self.platform != platform {
+            return Err(EventValidationError::WrongPlatform);
+        }
+        if let Some(conversation) = &self.conversation {
+            if conversation.bot != bot {
+                return Err(EventValidationError::WrongBot);
+            }
+            conversation.validate()?;
+        }
+        if let Some(actor) = &self.actor {
+            if actor.bot != bot {
+                return Err(EventValidationError::WrongBot);
+            }
+            actor.validate()?;
+        }
+        for value in [
+            self.command.as_deref(),
+            self.interaction.as_deref(),
+            self.native_type.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty() || value.len() > MAX_ROUTE_KEY_BYTES {
+                return Err(EventValidationError::InvalidRouteKey);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_user(user: &UserKey, bot: BotSlot) -> Result<(), EventValidationError> {
+    if user.bot != bot {
+        return Err(EventValidationError::WrongBot);
+    }
+    user.validate()?;
+    Ok(())
+}
+
+fn validate_conversation(
+    conversation: &ConversationKey,
+    bot: BotSlot,
+) -> Result<(), EventValidationError> {
+    if conversation.bot != bot {
+        return Err(EventValidationError::WrongBot);
+    }
+    conversation.validate()?;
+    Ok(())
+}
+
+fn normalized_command(text: Option<&str>) -> Option<&str> {
+    text?
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.split('@').next())
+        .filter(|value| !value.is_empty())
+}
+
+impl EventBody {
+    /// Recursively validates body ownership and equality with the routing index.
+    pub fn validate_for(
+        &self,
+        index: &EventIndex,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> Result<(), EventValidationError> {
+        if self.kind() != index.kind {
+            return Err(EventValidationError::KindMismatch);
+        }
+        match self {
+            Self::MessageCreated(message) => {
+                message.reference.validate_for(bot)?;
+                if index.conversation.as_ref() != Some(&message.reference.conversation)
+                    || index.actor.as_ref() != message.sender.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if normalized_command(message.text.as_deref()) != index.command.as_deref() {
+                    return Err(EventValidationError::CommandMismatch);
+                }
+                if let Some(sender) = &message.sender {
+                    validate_user(sender, bot)?;
+                }
+                for content in &message.content {
+                    content.validate_for(bot, platform)?;
+                }
+            }
+            Self::MessageUpdated(event) => {
+                event.message.reference.validate_for(bot)?;
+                if index.conversation.as_ref() != Some(&event.message.reference.conversation)
+                    || index.actor.as_ref() != event.message.sender.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if normalized_command(event.message.text.as_deref()) != index.command.as_deref() {
+                    return Err(EventValidationError::CommandMismatch);
+                }
+                if let Some(sender) = &event.message.sender {
+                    validate_user(sender, bot)?;
+                }
+                for content in &event.message.content {
+                    content.validate_for(bot, platform)?;
+                }
+                if let Some(previous) = &event.previous_content {
+                    for content in previous {
+                        content.validate_for(bot, platform)?;
+                    }
+                }
+            }
+            Self::MessagesDeleted(event) => {
+                let conversation = event.messages.first().map(|message| &message.conversation);
+                if event.messages.is_empty()
+                    || index.conversation.as_ref() != conversation
+                    || index.actor.as_ref() != event.actor.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                for message in &event.messages {
+                    message.validate_for(bot)?;
+                    if Some(&message.conversation) != conversation {
+                        return Err(EventValidationError::IndexBodyMismatch);
+                    }
+                }
+                if let Some(actor) = &event.actor {
+                    validate_user(actor, bot)?;
+                }
+            }
+            Self::Interaction(event) => {
+                validate_user(&event.actor, bot)?;
+                if let Some(conversation) = &event.conversation {
+                    validate_conversation(conversation, bot)?;
+                }
+                let value_bytes = event.values.iter().map(|value| value.len()).sum::<usize>();
+                if event.id.is_empty()
+                    || event.id.len() > crate::MAX_SEMANTIC_ID_BYTES
+                    || event.values.len() > MAX_INTERACTION_VALUES
+                    || value_bytes > MAX_INTERACTION_VALUE_BYTES
+                {
+                    return Err(EventValidationError::InteractionTooLarge);
+                }
+                if index.actor.as_ref() != Some(&event.actor)
+                    || index.conversation.as_ref() != event.conversation.as_ref()
+                    || index.interaction.as_ref() != event.custom_id.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(native) = &event.native {
+                    native.validate_for(platform)?;
+                }
+            }
+            Self::ReactionChanged(event) => {
+                event.message.validate_for(bot)?;
+                if index.conversation.as_ref() != Some(&event.message.conversation)
+                    || index.actor.as_ref() != event.actor.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(actor) = &event.actor {
+                    validate_user(actor, bot)?;
+                }
+                for reaction in event.added.iter().chain(&event.removed) {
+                    if let Reaction::Custom(id) = reaction {
+                        id.validate()?;
+                    }
+                }
+            }
+            Self::MemberChanged(event) => {
+                validate_conversation(&event.conversation, bot)?;
+                validate_user(&event.member, bot)?;
+                if index.conversation.as_ref() != Some(&event.conversation)
+                    || index.actor.as_ref() != event.actor.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(actor) = &event.actor {
+                    validate_user(actor, bot)?;
+                }
+                if let Some(native) = &event.native {
+                    native.validate_for(platform)?;
+                }
+            }
+            Self::ConversationChanged(event) => {
+                validate_conversation(&event.conversation, bot)?;
+                if index.conversation.as_ref() != Some(&event.conversation) || index.actor.is_some()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(native) = &event.native {
+                    native.validate_for(platform)?;
+                }
+            }
+            Self::FileChanged(event) => {
+                if let Some(conversation) = &event.conversation {
+                    validate_conversation(conversation, bot)?;
+                }
+                if index.conversation.as_ref() != event.conversation.as_ref()
+                    || index.actor.as_ref() != event.actor.as_ref()
+                {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(actor) = &event.actor {
+                    validate_user(actor, bot)?;
+                }
+                if let Some(file) = &event.file {
+                    file.validate_for(bot, platform)?;
+                }
+                if let Some(file_id) = &event.file_id {
+                    file_id.validate()?;
+                }
+                if let Some(native) = &event.native {
+                    native.validate_for(platform)?;
+                }
+            }
+            Self::PaymentChanged(event) => {
+                event.id.validate()?;
+                if index.actor.as_ref() != event.actor.as_ref() || index.conversation.is_some() {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                if let Some(actor) = &event.actor {
+                    validate_user(actor, bot)?;
+                }
+                if let Some(native) = &event.native {
+                    native.validate_for(platform)?;
+                }
+            }
+            Self::Native(event) => {
+                if index.native_type.as_deref() != Some(event.kind.as_ref()) {
+                    return Err(EventValidationError::IndexBodyMismatch);
+                }
+                event.data.validate_for(platform)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EventDraft {
+    /// Validates an adapter-produced event before runtime admission.
+    pub fn validate_for(
+        &self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> Result<(), EventValidationError> {
+        self.id.validate()?;
+        self.index.validate_for(bot, platform)?;
+        self.body.validate_for(&self.index, bot, platform)
     }
 }

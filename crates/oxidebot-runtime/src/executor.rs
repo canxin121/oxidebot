@@ -1,16 +1,16 @@
 use crate::{
-    budget::{QueueAcquireError, QueueLease, QueueLimiter},
+    budget::{HierarchicalLease, QueueAcquireError, QueueLease, QueueLimiter},
     router::CompiledRouter,
     BotHandle, MetricsHandle, OverloadPolicy, QueueBudget,
 };
-use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use oxidebot_core::{EventEnvelope, ExecutionKey};
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use oxidebot_core::{BotSlot, EventEnvelope, ExecutionKey, MessageExecutionPartition};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     sync::Arc,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutorSubmit {
@@ -22,41 +22,61 @@ pub(crate) enum ExecutorSubmit {
 #[derive(Clone)]
 pub(crate) struct ExecutorHandle {
     senders: Arc<[mpsc::Sender<DispatchJob>]>,
-    limiter: QueueLimiter,
+    global_limiter: QueueLimiter,
+    per_bot_limiters: Arc<[QueueLimiter]>,
     overload: OverloadPolicy,
+    message_partition: MessageExecutionPartition,
     metrics: MetricsHandle,
 }
 
 impl ExecutorHandle {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new<S>(
         shards: usize,
-        budget: QueueBudget,
+        bot_count: usize,
+        global_budget: QueueBudget,
+        per_bot_budget: QueueBudget,
         max_in_flight_per_shard: usize,
+        max_in_flight_per_bot: usize,
         overload: OverloadPolicy,
+        message_partition: MessageExecutionPartition,
         router: Arc<CompiledRouter<S>>,
         metrics: MetricsHandle,
     ) -> (Self, Vec<ExecutorWorker<S>>)
     where
         S: Send + Sync + 'static,
     {
-        let limiter = QueueLimiter::new(budget);
-        let per_shard_capacity = budget.max_items.div_ceil(shards).max(1);
+        let global_limiter = QueueLimiter::new(global_budget);
+        let per_bot_limiters = (0..bot_count)
+            .map(|_| QueueLimiter::new(per_bot_budget))
+            .collect::<Vec<_>>();
+        let in_flight_by_bot: Arc<[Arc<Semaphore>]> = (0..bot_count)
+            .map(|_| Arc::new(Semaphore::new(max_in_flight_per_bot)))
+            .collect::<Vec<_>>()
+            .into();
         let mut senders = Vec::with_capacity(shards);
         let mut workers = Vec::with_capacity(shards);
+
+        // Every shard can absorb the global item maximum. The shared limiter
+        // remains the actual total bound, so an admitted hot-shard event never
+        // waits on a smaller local channel while holding global permits.
         for _ in 0..shards {
-            let (sender, receiver) = mpsc::channel(per_shard_capacity);
+            let (sender, receiver) = mpsc::channel(global_budget.max_items);
             senders.push(sender);
             workers.push(ExecutorWorker {
                 receiver,
                 router: Arc::clone(&router),
                 max_in_flight: max_in_flight_per_shard,
+                in_flight_by_bot: Arc::clone(&in_flight_by_bot),
             });
         }
         (
             Self {
                 senders: senders.into(),
-                limiter,
+                global_limiter,
+                per_bot_limiters: per_bot_limiters.into(),
                 overload,
+                message_partition,
                 metrics,
             },
             workers,
@@ -69,31 +89,30 @@ impl ExecutorHandle {
         bot: BotHandle,
         ingress_retention: Arc<QueueLease>,
     ) -> ExecutorSubmit {
-        let lease = match self.overload {
-            OverloadPolicy::Block => self.limiter.acquire(event.estimated_bytes()).await,
-            OverloadPolicy::DropNewest => self.limiter.try_acquire(event.estimated_bytes()),
+        let bytes = event.incremental_retained_bytes();
+        let Some(local_limiter) = self.per_bot_limiters.get(bot.slot().0 as usize) else {
+            return ExecutorSubmit::Closed;
         };
-        let lease = match lease {
-            Ok(lease) => lease,
-            Err(QueueAcquireError::Full) => {
+        let leases = match self.acquire_hierarchical(local_limiter, bytes).await {
+            Ok(leases) => leases,
+            Err(QueueAcquireError::Full | QueueAcquireError::TooLarge) => {
                 self.metrics.dropped_event();
-                return ExecutorSubmit::Dropped;
-            }
-            Err(QueueAcquireError::TooLarge) => {
-                self.metrics.dropped_event();
-                tracing::error!(event_id = %event.id, "event exceeds the executor byte budget");
+                if matches!(self.overload, OverloadPolicy::Block) {
+                    tracing::error!(event_id = %event.id, "event exceeds executor budget");
+                }
                 return ExecutorSubmit::Dropped;
             }
             Err(QueueAcquireError::Closed) => return ExecutorSubmit::Closed,
         };
 
-        let key = event.index.execution_key(&event.id);
+        let key = event.index.execution_key(&event.id, self.message_partition);
         let shard = shard_for(&key, self.senders.len());
         let job = DispatchJob {
             key,
+            bot_slot: bot.slot(),
             event,
             bot,
-            _executor_lease: lease,
+            _leases: leases,
             _ingress_retention: ingress_retention,
         };
         let sent = match self.overload {
@@ -113,19 +132,39 @@ impl ExecutorHandle {
         self.metrics.dispatched_event();
         ExecutorSubmit::Accepted
     }
+
+    async fn acquire_hierarchical(
+        &self,
+        local: &QueueLimiter,
+        bytes: usize,
+    ) -> Result<HierarchicalLease, QueueAcquireError> {
+        // Every caller acquires local then global, providing one consistent
+        // ordering across all bots and resources.
+        let local_lease = match self.overload {
+            OverloadPolicy::Block => local.acquire(bytes).await?,
+            OverloadPolicy::DropNewest => local.try_acquire(bytes)?,
+        };
+        let global_lease = match self.overload {
+            OverloadPolicy::Block => self.global_limiter.acquire(bytes).await,
+            OverloadPolicy::DropNewest => self.global_limiter.try_acquire(bytes),
+        }?;
+        Ok(HierarchicalLease::new(local_lease, global_lease))
+    }
 }
 
 struct DispatchJob {
     key: ExecutionKey,
+    bot_slot: BotSlot,
     event: Arc<EventEnvelope>,
     bot: BotHandle,
-    _executor_lease: QueueLease,
+    _leases: HierarchicalLease,
     _ingress_retention: Arc<QueueLease>,
 }
 
 struct JobCompletion {
     key: ExecutionKey,
-    _executor_lease: QueueLease,
+    _bot_permit: OwnedSemaphorePermit,
+    _leases: HierarchicalLease,
     _ingress_retention: Arc<QueueLease>,
 }
 
@@ -136,6 +175,7 @@ where
     receiver: mpsc::Receiver<DispatchJob>,
     router: Arc<CompiledRouter<S>>,
     max_in_flight: usize,
+    in_flight_by_bot: Arc<[Arc<Semaphore>]>,
 }
 
 impl<S> ExecutorWorker<S>
@@ -145,19 +185,55 @@ where
     pub(crate) async fn run(mut self) {
         let mut queues = HashMap::<ExecutionKey, VecDeque<DispatchJob>>::new();
         let mut ready = VecDeque::<ExecutionKey>::new();
+        let mut ready_set = HashSet::<ExecutionKey>::new();
         let mut running_keys = HashSet::<ExecutionKey>::new();
-        let mut running = FuturesUnordered::<BoxFuture<'static, JobCompletion>>::new();
+        let mut running = FuturesUnordered::new();
         let mut input_closed = false;
 
         loop {
-            schedule_jobs(
-                &mut queues,
-                &mut ready,
-                &mut running_keys,
-                &mut running,
-                self.max_in_flight,
-                Arc::clone(&self.router),
-            );
+            let mut attempts = ready.len();
+            while running.len() < self.max_in_flight && attempts > 0 {
+                attempts -= 1;
+                let Some(key) = ready.pop_front() else {
+                    break;
+                };
+                ready_set.remove(&key);
+                if running_keys.contains(&key) {
+                    continue;
+                }
+                let Some(bot_slot) = queues
+                    .get(&key)
+                    .and_then(|queue| queue.front())
+                    .map(|job| job.bot_slot)
+                else {
+                    queues.remove(&key);
+                    continue;
+                };
+                let Some(semaphore) = self.in_flight_by_bot.get(bot_slot.0 as usize) else {
+                    queues.remove(&key);
+                    continue;
+                };
+                let bot_permit = match Arc::clone(semaphore).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(TryAcquireError::NoPermits) => {
+                        if ready_set.insert(key.clone()) {
+                            ready.push_back(key);
+                        }
+                        continue;
+                    }
+                    Err(TryAcquireError::Closed) => {
+                        queues.remove(&key);
+                        continue;
+                    }
+                };
+                let Some(job) = queues.get_mut(&key).and_then(VecDeque::pop_front) else {
+                    queues.remove(&key);
+                    continue;
+                };
+                running_keys.insert(key);
+                running.push(run_dispatch(job, bot_permit, Arc::clone(&self.router)));
+                attempts = ready.len();
+            }
 
             if input_closed && queues.is_empty() && running.is_empty() {
                 break;
@@ -166,15 +242,31 @@ where
             tokio::select! {
                 job = self.receiver.recv(), if !input_closed => {
                     match job {
-                        Some(job) => enqueue_job(job, &mut queues, &mut ready, &running_keys),
+                        Some(job) => {
+                            let key = job.key.clone();
+                            let queue = queues.entry(key.clone()).or_default();
+                            let was_empty = queue.is_empty();
+                            queue.push_back(job);
+                            if was_empty
+                                && !running_keys.contains(&key)
+                                && ready_set.insert(key.clone())
+                            {
+                                ready.push_back(key);
+                            }
+                        }
                         None => input_closed = true,
                     }
                 }
                 completion = running.next(), if !running.is_empty() => {
                     if let Some(completion) = completion {
                         running_keys.remove(&completion.key);
-                        if queues.get(&completion.key).is_some_and(|queue| !queue.is_empty()) {
-                            ready.push_back(completion.key);
+                        if queues
+                            .get(&completion.key)
+                            .is_some_and(|queue| !queue.is_empty())
+                        {
+                            if ready_set.insert(completion.key.clone()) {
+                                ready.push_back(completion.key);
+                            }
                         } else {
                             queues.remove(&completion.key);
                         }
@@ -185,63 +277,28 @@ where
     }
 }
 
-fn enqueue_job(
+async fn run_dispatch<S>(
     job: DispatchJob,
-    queues: &mut HashMap<ExecutionKey, VecDeque<DispatchJob>>,
-    ready: &mut VecDeque<ExecutionKey>,
-    running_keys: &HashSet<ExecutionKey>,
-) {
-    let key = job.key.clone();
-    let queue = queues.entry(key.clone()).or_default();
-    let was_empty = queue.is_empty();
-    queue.push_back(job);
-    if was_empty && !running_keys.contains(&key) {
-        ready.push_back(key);
-    }
-}
-
-fn schedule_jobs<S>(
-    queues: &mut HashMap<ExecutionKey, VecDeque<DispatchJob>>,
-    ready: &mut VecDeque<ExecutionKey>,
-    running_keys: &mut HashSet<ExecutionKey>,
-    running: &mut FuturesUnordered<BoxFuture<'static, JobCompletion>>,
-    max_in_flight: usize,
+    bot_permit: OwnedSemaphorePermit,
     router: Arc<CompiledRouter<S>>,
-) where
+) -> JobCompletion
+where
     S: Send + Sync + 'static,
 {
-    while running.len() < max_in_flight {
-        let Some(key) = ready.pop_front() else {
-            break;
-        };
-        if running_keys.contains(&key) {
-            continue;
-        }
-        let job = queues.get_mut(&key).and_then(VecDeque::pop_front);
-        let Some(job) = job else {
-            queues.remove(&key);
-            continue;
-        };
-        running_keys.insert(key.clone());
-        let router = Arc::clone(&router);
-        running.push(
-            async move {
-                let DispatchJob {
-                    key,
-                    event,
-                    bot,
-                    _executor_lease,
-                    _ingress_retention,
-                } = job;
-                router.dispatch(event, bot).await;
-                JobCompletion {
-                    key,
-                    _executor_lease,
-                    _ingress_retention,
-                }
-            }
-            .boxed(),
-        );
+    let DispatchJob {
+        key,
+        bot_slot: _,
+        event,
+        bot,
+        _leases,
+        _ingress_retention,
+    } = job;
+    router.dispatch(event, bot).await;
+    JobCompletion {
+        key,
+        _bot_permit: bot_permit,
+        _leases,
+        _ingress_retention,
     }
 }
 

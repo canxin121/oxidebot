@@ -4,14 +4,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 /// Maximum retained items and bytes for one bounded queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueBudget {
-    /// Maximum queued items.
     pub max_items: usize,
-    /// Maximum estimated retained bytes.
     pub max_bytes: usize,
 }
 
 impl QueueBudget {
-    /// Creates a queue budget.
     #[must_use]
     pub const fn new(max_items: usize, max_bytes: usize) -> Self {
         Self {
@@ -21,16 +18,16 @@ impl QueueBudget {
     }
 }
 
-/// Behavior when a bounded execution queue cannot admit more work.
+/// Behavior when a bounded queue cannot admit more work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OverloadPolicy {
-    /// Wait for capacity and preserve every accepted event.
     #[default]
     Block,
-    /// Discard the newest item and increment the corresponding metric.
     DropNewest,
 }
 
+/// Combined item/byte limiter. Callers must acquire all hierarchical limiters
+/// in the same local-then-global order to avoid cross-resource deadlocks.
 #[derive(Clone)]
 pub(crate) struct QueueLimiter {
     items: Arc<Semaphore>,
@@ -49,14 +46,17 @@ impl QueueLimiter {
 
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<QueueLease, QueueAcquireError> {
         let bytes = self.checked_bytes(bytes)?;
-        let item = Arc::clone(&self.items)
-            .acquire_owned()
-            .await
-            .map_err(|_| QueueAcquireError::Closed)?;
         let byte = Arc::clone(&self.bytes)
             .acquire_many_owned(bytes)
             .await
             .map_err(|_| QueueAcquireError::Closed)?;
+        let item = match Arc::clone(&self.items).acquire_owned().await {
+            Ok(item) => item,
+            Err(_) => {
+                drop(byte);
+                return Err(QueueAcquireError::Closed);
+            }
+        };
         Ok(QueueLease {
             _item: item,
             _bytes: byte,
@@ -65,12 +65,16 @@ impl QueueLimiter {
 
     pub(crate) fn try_acquire(&self, bytes: usize) -> Result<QueueLease, QueueAcquireError> {
         let bytes = self.checked_bytes(bytes)?;
-        let item = Arc::clone(&self.items)
-            .try_acquire_owned()
-            .map_err(map_try_error)?;
         let byte = Arc::clone(&self.bytes)
             .try_acquire_many_owned(bytes)
             .map_err(map_try_error)?;
+        let item = match Arc::clone(&self.items).try_acquire_owned() {
+            Ok(item) => item,
+            Err(error) => {
+                drop(byte);
+                return Err(map_try_error(error));
+            }
+        };
         Ok(QueueLease {
             _item: item,
             _bytes: byte,
@@ -103,4 +107,20 @@ pub(crate) enum QueueAcquireError {
 pub(crate) struct QueueLease {
     _item: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
+}
+
+/// Two-level lease used to enforce process-wide and per-bot bounds.
+#[derive(Debug)]
+pub(crate) struct HierarchicalLease {
+    _local: QueueLease,
+    _global: QueueLease,
+}
+
+impl HierarchicalLease {
+    pub(crate) fn new(local: QueueLease, global: QueueLease) -> Self {
+        Self {
+            _local: local,
+            _global: global,
+        }
+    }
 }

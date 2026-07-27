@@ -1,9 +1,10 @@
-//! Runtime orchestration, routing, bounded queues, and adapter contracts.
+//! Runtime orchestration, compiled routing, bounded queues, and adapter contracts.
 
 mod adapter;
 mod app;
 mod bot;
 mod budget;
+mod cancellation;
 mod config;
 mod dedupe;
 mod error;
@@ -19,6 +20,7 @@ pub use adapter::*;
 pub use app::*;
 pub use bot::*;
 pub use budget::{OverloadPolicy, QueueBudget};
+pub use cancellation::ShutdownSignal;
 pub use config::*;
 pub use error::*;
 pub use filter::*;
