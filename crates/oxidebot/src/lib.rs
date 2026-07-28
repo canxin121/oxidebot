@@ -15,7 +15,8 @@ pub use oxidebot_macros::{branch, command, BotCommand, BotState, CommandArgs};
 pub mod extract {
     pub use oxidebot_core::{BotIdentity, EventId};
     pub use oxidebot_runtime::{
-        Args, Bot, BranchArgs, ChatGroup, CommandRegistry, CommandResult, Context, Dialogue,
+        Args, Bot, BranchArgs, ChatGroup, CommandRegistry, CommandResult, ConfirmationWords,
+        Context, Dialogue, DialogueQuestion,
         EventContext, Extract, ExtractError, FromState, MaybeGroup, MessageContext, MessageId, Messenger, Reply, Resolve,
         Segments, Sender, ShutdownSignal, State, Target, Text,
     };
@@ -95,6 +96,29 @@ macro_rules! message {
         $(message.push($part);)*
         message
     }};
+}
+
+
+/// Builds one interactive button with a compact domain-oriented syntax.
+#[macro_export]
+macro_rules! button {
+    ($label:expr => url($value:expr)) => {
+        $crate::Button::url($label, $value)
+    };
+    ($label:expr => action($value:expr)) => {
+        $crate::Button::callback($label, $value)
+    };
+    ($label:expr => text($value:expr)) => {
+        $crate::Button::send_text($label, $value)
+    };
+}
+
+/// Builds one action row from buttons.
+#[macro_export]
+macro_rules! row {
+    ($($button:expr),* $(,)?) => {
+        $crate::ActionRow::buttons([$($button),*])
+    };
 }
 
 /// Parses a structure-preserving message template once at the call site.

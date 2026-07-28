@@ -259,3 +259,65 @@ pub enum RuntimeError {
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 pub type HandlerResult<T = crate::Outcome> = std::result::Result<T, HandlerError>;
+
+/// Safe, explicit conversion helpers for application and platform results.
+///
+/// These helpers reduce repetitive `map_err` blocks without ever turning an
+/// arbitrary internal error into a user-visible chat reply.
+pub trait ResultExt<T>: Sized {
+    /// Records an application failure as an internal handler error with useful
+    /// operation context. The resulting text is logged by the runtime, not sent
+    /// to the user.
+    fn internal(self, operation: impl AsRef<str>) -> HandlerResult<T>;
+
+    /// Marks a platform/API operation failure. The error remains non-user-facing.
+    fn api(self) -> HandlerResult<T>;
+
+    /// Marks a platform/API failure and records the operation that failed.
+    fn api_context(self, operation: impl AsRef<str>) -> HandlerResult<T>;
+
+    /// Replaces an expected application failure with an intentional user-facing
+    /// message while keeping the original error out of the reply.
+    fn user(self, message: impl Into<Arc<str>>) -> HandlerResult<T>;
+}
+
+impl<T, E> ResultExt<T> for std::result::Result<T, E>
+where
+    E: std::fmt::Display,
+{
+    fn internal(self, operation: impl AsRef<str>) -> HandlerResult<T> {
+        self.map_err(|error| {
+            HandlerError::Internal(format!("{}: {error}", operation.as_ref()))
+        })
+    }
+
+    fn api(self) -> HandlerResult<T> {
+        self.map_err(|error| HandlerError::Api(error.to_string()))
+    }
+
+    fn api_context(self, operation: impl AsRef<str>) -> HandlerResult<T> {
+        self.map_err(|error| {
+            HandlerError::Api(format!("{}: {error}", operation.as_ref()))
+        })
+    }
+
+    fn user(self, message: impl Into<Arc<str>>) -> HandlerResult<T> {
+        self.map_err(|_| HandlerError::User(message.into()))
+    }
+}
+
+/// Safe conversion helpers for optional application data.
+pub trait OptionExt<T>: Sized {
+    fn user_or(self, message: impl Into<Arc<str>>) -> HandlerResult<T>;
+    fn internal_or(self, operation: impl Into<String>) -> HandlerResult<T>;
+}
+
+impl<T> OptionExt<T> for Option<T> {
+    fn user_or(self, message: impl Into<Arc<str>>) -> HandlerResult<T> {
+        self.ok_or_else(|| HandlerError::User(message.into()))
+    }
+
+    fn internal_or(self, operation: impl Into<String>) -> HandlerResult<T> {
+        self.ok_or_else(|| HandlerError::Internal(operation.into()))
+    }
+}

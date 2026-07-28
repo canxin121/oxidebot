@@ -1,33 +1,54 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Expr, Field, Fields, FnArg,
-    GenericArgument, ItemFn, LitChar, LitStr, Pat, Path, PathArguments, Type,
+    parse::{Parse, ParseStream}, parse_macro_input, spanned::Spanned, Attribute, Data,
+    DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn, LitChar, LitStr,
+    Meta, Pat, Path, PathArguments, Token, Type,
 };
 
-#[proc_macro_attribute]
-pub fn command(attribute: TokenStream, input: TokenStream) -> TokenStream {
-    match expand_command_function(attribute, parse_macro_input!(input as ItemFn)) {
-        Ok(tokens) => tokens.into(),
-        Err(error) => error.into_compile_error().into(),
+
+struct BranchAttribute {
+    path: Path,
+    unit: bool,
+}
+
+impl Parse for BranchAttribute {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let path = input.parse()?;
+        let unit = if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            let mode: Ident = input.parse()?;
+            if mode != "unit" {
+                return Err(syn::Error::new(mode.span(), "expected `unit`"));
+            }
+            true
+        } else {
+            false
+        };
+        if !input.is_empty() {
+            return Err(input.error("unexpected branch attribute input"));
+        }
+        Ok(Self { path, unit })
     }
 }
 
-/// Binds an ordinary async function to one statically generated command-tree branch.
+/// Binds one command-tree branch to an ordinary async function.
 ///
-/// The first function argument is the branch's typed argument value; all
-/// remaining arguments use OxideBot's normal extractor system. The generated
-/// unit value can be installed directly with `Module::add(handler_name)`.
+/// The first function parameter is the branch argument value. Use
+/// `#[oxidebot::branch(path, unit)]` for a unit branch with no argument value.
 #[proc_macro_attribute]
 pub fn branch(attribute: TokenStream, input: TokenStream) -> TokenStream {
-    match expand_branch_function(attribute, parse_macro_input!(input as ItemFn)) {
+    match expand_branch_function(
+        parse_macro_input!(attribute as BranchAttribute),
+        parse_macro_input!(input as ItemFn),
+    ) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }
 }
 
 fn expand_branch_function(
-    attribute: TokenStream,
+    attribute: BranchAttribute,
     mut function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
     if function.sig.asyncness.is_none() {
@@ -42,7 +63,8 @@ fn expand_branch_function(
             "#[oxidebot::branch] does not support generic functions",
         ));
     }
-    let marker: Path = syn::parse(attribute)?;
+
+    let BranchAttribute { path, unit } = attribute;
     let feature_ident = function.sig.ident.clone();
     let implementation_ident = format_ident!("__oxidebot_{}_implementation", feature_ident);
     let handler_ident = format_ident!("__oxidebot_{}_handler", feature_ident);
@@ -60,24 +82,36 @@ fn expand_branch_function(
     function.vis = syn::Visibility::Inherited;
     function.sig.ident = implementation_ident.clone();
 
-    let mut inputs = function.sig.inputs.iter();
-    let Some(FnArg::Typed(first)) = inputs.next() else {
-        return Err(syn::Error::new(
-            function.sig.span(),
-            "#[oxidebot::branch] requires the branch arguments as its first parameter",
-        ));
+    let mut inputs = function.sig.inputs.iter().cloned().collect::<Vec<_>>();
+    let branch_argument = if unit {
+        None
+    } else {
+        if inputs.is_empty() {
+            return Err(syn::Error::new(
+                function.sig.inputs.span(),
+                "a non-unit branch handler needs its branch arguments as the first parameter",
+            ));
+        }
+        Some(inputs.remove(0))
     };
-    let Pat::Ident(first_pattern) = first.pat.as_ref() else {
-        return Err(syn::Error::new(
-            first.pat.span(),
-            "the branch argument must use a simple identifier pattern",
-        ));
-    };
-    let first_ident = first_pattern.ident.clone();
-    let first_ty = first.ty.clone();
+
     let mut wrapper_inputs = Vec::new();
-    let mut wrapper_types = Vec::new();
-    let mut call_arguments = vec![quote! { __oxidebot_branch_args }];
+    let mut wrapper_types = vec![quote! { ::oxidebot::BranchArgs<#path> }];
+    let mut call_arguments = Vec::new();
+    if let Some(argument) = branch_argument {
+        let FnArg::Typed(typed) = argument else {
+            return Err(syn::Error::new(argument.span(), "methods are not supported"));
+        };
+        let Pat::Ident(pattern) = typed.pat.as_ref() else {
+            return Err(syn::Error::new(
+                typed.pat.span(),
+                "branch argument parameters must use a simple identifier pattern",
+            ));
+        };
+        let ident = pattern.ident.clone();
+        call_arguments.push(quote! { #ident });
+    }
+
     for argument in inputs {
         let FnArg::Typed(typed) = argument else {
             return Err(syn::Error::new(argument.span(), "methods are not supported"));
@@ -85,7 +119,7 @@ fn expand_branch_function(
         let Pat::Ident(pattern) = typed.pat.as_ref() else {
             return Err(syn::Error::new(
                 typed.pat.span(),
-                "branch handler parameters must use simple identifier patterns",
+                "branch handler extractor parameters must use simple identifier patterns",
             ));
         };
         let ident = pattern.ident.clone();
@@ -94,28 +128,37 @@ fn expand_branch_function(
         wrapper_types.push(quote! { #ty });
         call_arguments.push(quote! { #ident });
     }
+
+    let branch_input = if unit {
+        quote! { _: ::oxidebot::BranchArgs<#path>, }
+    } else {
+        let FnArg::Typed(typed) = function
+            .sig
+            .inputs
+            .first()
+            .expect("non-unit branch input checked")
+        else {
+            unreachable!()
+        };
+        let Pat::Ident(pattern) = typed.pat.as_ref() else {
+            unreachable!()
+        };
+        let ident = &pattern.ident;
+        quote! { ::oxidebot::BranchArgs(#ident): ::oxidebot::BranchArgs<#path>, }
+    };
     let extractor_bounds = wrapper_types.iter().map(|ty| {
         quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
-    });
-    let extractor_bounds_install = wrapper_types.iter().map(|ty| {
-        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
-    });
-
-    // Rename the first argument in the hidden implementation so its original
-    // type and documentation remain intact while the wrapper extracts through
-    // the branch marker.
-    if let Some(FnArg::Typed(first_mut)) = function.sig.inputs.first_mut() {
-        first_mut.pat = Box::new(syn::parse_quote!(#first_ident));
-    }
+    }).collect::<Vec<_>>();
 
     Ok(quote! {
+        #(#implementation_attributes)*
         #[doc(hidden)]
         #function
 
         #(#implementation_attributes)*
         #[doc(hidden)]
         async fn #handler_ident(
-            ::oxidebot::BranchArgs(__oxidebot_branch_args): ::oxidebot::BranchArgs<#marker>,
+            #branch_input
             #(#wrapper_inputs),*
         ) #return_type {
             #implementation_ident(#(#call_arguments),*).await
@@ -132,10 +175,9 @@ fn expand_branch_function(
             #visibility fn feature<S>(self) -> ::oxidebot::Feature<S>
             where
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
-                #marker: ::oxidebot::CommandBranchTag<Arguments = #first_ty>,
                 #(#extractor_bounds,)*
             {
-                ::oxidebot::Feature::command_branch(#marker, #handler_ident)
+                ::oxidebot::Feature::command_branch(#path, #handler_ident)
             }
         }
 
@@ -143,8 +185,7 @@ fn expand_branch_function(
         impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
-            #marker: ::oxidebot::CommandBranchTag<Arguments = #first_ty>,
-            #(#extractor_bounds_install,)*
+            #(#extractor_bounds,)*
         {
             fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
                 <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
@@ -153,7 +194,26 @@ fn expand_branch_function(
                 )
             }
         }
+
+        #(#implementation_attributes)*
+        impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
+        where
+            S: ::core::marker::Send + ::core::marker::Sync + 'static,
+            #(#extractor_bounds,)*
+        {
+            fn into_feature(self) -> ::oxidebot::Feature<S> {
+                self.feature()
+            }
+        }
     })
+}
+
+#[proc_macro_attribute]
+pub fn command(attribute: TokenStream, input: TokenStream) -> TokenStream {
+    match expand_command_function(attribute, parse_macro_input!(input as ItemFn)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
 }
 
 fn expand_command_function(
@@ -214,6 +274,11 @@ fn expand_command_function(
     function.sig.ident = implementation_ident.clone();
 
     let mut command_fields = Vec::new();
+    let mut completer_bindings = Vec::new();
+    let generated_field_module = format_ident!(
+        "{}_fields",
+        ident_to_module_name(&args_ident.to_string()),
+    );
     let mut wrapper_inputs = Vec::new();
     let mut wrapper_types = Vec::new();
     let mut call_arguments = Vec::new();
@@ -245,6 +310,18 @@ fn expand_command_function(
             wrapper_types.push(quote! { #ty });
             call_arguments.push(quote! { #ident });
         } else {
+            if let Some(provider) = arg_path_option(&arg_attributes, "complete")? {
+                let marker = format_ident!(
+                    "{}",
+                    to_pascal_case(ident.to_string().trim_start_matches("r#")),
+                );
+                completer_bindings.push(quote! {
+                    feature = feature.complete(
+                        #generated_field_module::#marker,
+                        #provider,
+                    );
+                });
+            }
             command_fields.push(quote! {
                 #(#arg_attributes)*
                 #ident: #ty
@@ -272,11 +349,14 @@ fn expand_command_function(
         wrapper_types.insert(0, quote! { ::oxidebot::Args<#args_ident> });
         quote! { ::oxidebot::Args(__oxidebot_args): ::oxidebot::Args<#args_ident>, }
     };
-    let command_builder = if command_fields.is_empty() {
+    let mut command_builder = if command_fields.is_empty() {
         quote! { ::oxidebot::command(#command_name) }
     } else {
         quote! { ::oxidebot::command(#command_name).args::<#args_ident>() }
     };
+    if let Some(description) = doc_string(&outer_attributes) {
+        command_builder = quote! { #command_builder.description(#description) };
+    }
     let extractor_bounds = wrapper_types.iter().map(|ty| {
         quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
     });
@@ -317,7 +397,9 @@ fn expand_command_function(
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
                 #(#extractor_bounds,)*
             {
-                ::oxidebot::Feature::command(Self::command(), #handler_ident)
+                let mut feature = ::oxidebot::Feature::command(Self::command(), #handler_ident);
+                #(#completer_bindings)*
+                feature
             }
         }
 
@@ -353,6 +435,33 @@ fn expand_command_function(
             #feature_ident::command()
         }
     })
+}
+
+fn arg_path_option(
+    attributes: &[Attribute],
+    name: &str,
+) -> syn::Result<Option<Path>> {
+    for attribute in attributes {
+        let entries = attribute.parse_args_with(
+            syn::punctuated::Punctuated::<Meta, Token![,]>::parse_terminated,
+        )?;
+        for entry in entries {
+            let Meta::NameValue(value) = entry else {
+                continue;
+            };
+            if !value.path.is_ident(name) {
+                continue;
+            }
+            let Expr::Path(path) = value.value else {
+                return Err(syn::Error::new(
+                    value.value.span(),
+                    format!("#[arg({name} = ...)] expects a function path"),
+                ));
+            };
+            return Ok(Some(path.path));
+        }
+    }
+    Ok(None)
 }
 
 fn to_pascal_case(value: &str) -> String {
@@ -546,6 +655,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 || options.action.is_some()
                 || !options.choices.is_empty()
                 || options.autocomplete
+                || options.complete.is_some()
                 || options.min_value.is_some()
                 || options.max_value.is_some()
                 || options.min_length.is_some()
@@ -1273,6 +1383,7 @@ struct FieldOptions {
     action: Option<String>,
     choices: Vec<String>,
     autocomplete: bool,
+    complete: Option<Path>,
     min_value: Option<Expr>,
     max_value: Option<Expr>,
     min_length: Option<Expr>,
@@ -1342,6 +1453,9 @@ impl FieldOptions {
                     } else {
                         true
                     };
+                } else if meta.path.is_ident("complete") {
+                    output.complete = Some(meta.value()?.parse::<Path>()?);
+                    output.autocomplete = true;
                 } else if meta.path.is_ident("min") || meta.path.is_ident("min_value") {
                     output.min_value = Some(meta.value()?.parse::<Expr>()?);
                 } else if meta.path.is_ident("max") || meta.path.is_ident("max_value") {

@@ -16,7 +16,7 @@ use crate::{
         Poll, ReplyOptions, RichLayout, RichText, Sticker,
     },
     conversation::MessageRef,
-    interaction::{MessageComponents, PlatformNativeData},
+    interaction::{ActionRow, Button, InlineKeyboard, MessageComponents, PlatformNativeData},
 };
 
 /// The single cross-platform message intermediate representation used for
@@ -73,6 +73,60 @@ impl Message {
     pub fn components(mut self, components: MessageComponents) -> Self {
         self.options.components = Some(components);
         self
+    }
+
+    /// Appends one row of interactive components. Existing inline-keyboard
+    /// rows are preserved; another component surface is intentionally replaced
+    /// because platforms expose at most one message component container.
+    #[must_use]
+    pub fn component_row(mut self, row: ActionRow) -> Self {
+        match self.options.components.as_mut() {
+            Some(MessageComponents::InlineKeyboard(keyboard)) => keyboard.rows.push(row),
+            _ => {
+                self.options.components = Some(MessageComponents::InlineKeyboard(
+                    InlineKeyboard::new([row]),
+                ));
+            }
+        }
+        self
+    }
+
+    /// Appends a row of buttons without manually constructing keyboard wrappers.
+    #[must_use]
+    pub fn buttons(self, buttons: impl IntoIterator<Item = Button>) -> Self {
+        self.component_row(ActionRow::buttons(buttons))
+    }
+
+    #[must_use]
+    pub fn button(self, button: Button) -> Self {
+        self.buttons([button])
+    }
+
+    #[must_use]
+    pub fn button_url(
+        self,
+        label: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        self.button(Button::url(label, url))
+    }
+
+    #[must_use]
+    pub fn button_action(
+        self,
+        label: impl Into<String>,
+        data: impl Into<String>,
+    ) -> Self {
+        self.button(Button::callback(label, data))
+    }
+
+    #[must_use]
+    pub fn button_text(
+        self,
+        label: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.button(Button::send_text(label, text))
     }
 
     #[must_use]
@@ -192,6 +246,37 @@ impl Message {
     #[must_use]
     pub fn emoji(self, id: impl Into<String>) -> Self {
         self.then(MessageSegment::emoji(id))
+    }
+
+    /// Iterates legacy file-backed image segments without a second enum match.
+    pub fn image_files(&self) -> impl DoubleEndedIterator<Item = &File> {
+        self.segments.iter().filter_map(|segment| match segment {
+            MessageSegment::Image { file: Some(file) } => Some(file),
+            _ => None,
+        })
+    }
+
+    /// Iterates legacy file-backed document segments. Portable `Media` values
+    /// remain available through `segments_of::<Files>()`.
+    pub fn attached_files(&self) -> impl DoubleEndedIterator<Item = &File> {
+        self.segments.iter().filter_map(|segment| match segment {
+            MessageSegment::File { file: Some(file) } => Some(file),
+            _ => None,
+        })
+    }
+
+    pub fn mentioned_users(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.segments.iter().filter_map(|segment| match segment {
+            MessageSegment::At { user_id } => Some(user_id.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn reply_ids(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.segments.iter().filter_map(|segment| match segment {
+            MessageSegment::Reply { message_id } => Some(message_id.as_str()),
+            _ => None,
+        })
     }
 
     #[must_use]

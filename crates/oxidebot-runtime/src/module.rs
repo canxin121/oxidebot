@@ -52,6 +52,7 @@ where
     definition: HandlerDefinition<S>,
     completers: Vec<CompleterBinding<S>>,
     errors: Vec<String>,
+    runtime_shortcuts: bool,
 }
 
 struct CompleterBinding<S>
@@ -141,6 +142,7 @@ where
             definition,
             completers: Vec::new(),
             errors: Vec::new(),
+            runtime_shortcuts: false,
         }
     }
 
@@ -328,6 +330,13 @@ where
         self
     }
 
+    /// Enables the bounded runtime shortcut registry for this command.
+    #[must_use]
+    pub const fn runtime_shortcuts(mut self) -> Self {
+        self.runtime_shortcuts = true;
+        self
+    }
+
     #[must_use]
     pub fn completion(mut self, completion: CompletionConfig) -> Self {
         match &mut self.definition.selector {
@@ -378,6 +387,7 @@ where
         let mut module = Module::new();
         module.handlers.push(self.definition);
         module.scope_errors.extend(self.errors);
+        module.runtime_shortcuts = self.runtime_shortcuts;
         for binding in self.completers {
             if module
                 .completers
@@ -414,8 +424,8 @@ where
 }
 
 impl Command {
-    /// Binds this definition and an ordinary async handler into one locally
-    /// configurable Bot feature.
+    /// Binds this command and an ordinary async function into one locally
+    /// configurable feature.
     #[must_use]
     pub fn handle<S, H, T>(self, handler: H) -> Feature<S>
     where
@@ -425,6 +435,7 @@ impl Command {
         Feature::command(self, handler)
     }
 }
+
 
 #[must_use]
 pub fn message_feature<S, H, T>(handler: H) -> Feature<S>
@@ -1484,7 +1495,7 @@ where
                 .branch_path()
                 .last()
                 .map_or(0, |branch| u64::from(branch.0))
-        ))?;
+        ));
 
     for _ in 0..completion.max_rounds {
         let error = match result.parse_active() {
