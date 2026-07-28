@@ -461,30 +461,30 @@ where
 
     pub async fn run(self) -> Result<T, HandlerError> {
         let mut prompt = self.prompt;
-        let mut final_error = String::from("dialogue input could not be parsed");
+        let final_error = self.error_prompt.get_raw_text();
         for attempt in 0..self.attempts {
             let answer = self.dialogue.ask_text(prompt).await?;
             let input = if self.trim { answer.trim() } else { answer.as_str() };
-            match input.parse::<T>() {
-                Ok(value) => {
-                    if let Some(validator) = &self.validator {
-                        if let Err(error) = validator(&value) {
-                            final_error = error.to_string();
-                        } else {
-                            return Ok(value);
-                        }
-                    } else {
-                        return Ok(value);
-                    }
-                }
-                Err(error) => final_error = error.to_string(),
+            let valid = match input.parse::<T>() {
+                Ok(value) => match &self.validator {
+                    Some(validator) if validator(&value).is_err() => None,
+                    _ => Some(value),
+                },
+                Err(_) => None,
+            };
+            if let Some(value) = valid {
+                return Ok(value);
             }
             if attempt + 1 == self.attempts {
                 break;
             }
             prompt = self.error_prompt.clone();
         }
-        Err(HandlerError::user(final_error))
+        Err(HandlerError::user(if final_error.trim().is_empty() {
+            "Input could not be parsed after the configured attempts."
+        } else {
+            final_error.as_str()
+        }))
     }
 }
 

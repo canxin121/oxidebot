@@ -48,7 +48,7 @@ fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::T
     let Some(FnArg::Typed(context)) = inputs.next() else {
         return Err(syn::Error::new(function.sig.inputs.span(), "methods are not supported"));
     };
-    let Some(state) = type_argument(context.ty.as_ref(), "Context") else {
+    let Some(state) = type_argument(context.ty.as_ref(), "Context").cloned() else {
         return Err(syn::Error::new(
             context.ty.span(),
             "the first completer parameter must be Context<State>",
@@ -214,15 +214,17 @@ fn expand_branch_function(
     let mut wrapper_types = vec![quote! { ::oxidebot::BranchArgs<#path> }];
     let mut call_arguments = Vec::new();
     if let Some(argument) = branch_argument {
+        let span = argument.span();
         let FnArg::Typed(_) = argument else {
-            return Err(syn::Error::new(argument.span(), "methods are not supported"));
+            return Err(syn::Error::new(span, "methods are not supported"));
         };
         call_arguments.push(quote! { __oxidebot_branch_value });
     }
 
     for (index, argument) in inputs.into_iter().enumerate() {
+        let span = argument.span();
         let FnArg::Typed(typed) = argument else {
-            return Err(syn::Error::new(argument.span(), "methods are not supported"));
+            return Err(syn::Error::new(span, "methods are not supported"));
         };
         let ident = format_ident!("__oxidebot_extractor_{index}");
         let ty = typed.ty.clone();
@@ -829,7 +831,10 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         if !selected {
             continue;
         }
-        let ident = field.ident.ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
+        let field_span = field.span();
+        let ident = field
+            .ident
+            .ok_or_else(|| syn::Error::new(field_span, "expected a named field"))?;
         let field_ty = field.ty;
         let (selected_ty, body, selected_bound) = if let Some(inner) = type_argument(&field_ty, "Arc") {
             (
