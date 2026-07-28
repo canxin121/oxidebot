@@ -501,12 +501,12 @@ fn sender_for_event(event: &Event) -> Option<&User> {
     match event {
         Event::MessageEvent(event) => Some(&event.sender),
         Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreseEvent(event) => Some(&event.user),
+            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(&event.user),
             NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.user),
             NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.user),
             NoticeEvent::GroupMuteChangeEvent(event) => event.operator.as_ref(),
             NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.user),
-            NoticeEvent::GroupHightLightChangeEvent(event) => {
+            NoticeEvent::GroupHighlightChangeEvent(event) => {
                 event.sender.as_ref().or(event.operator.as_ref())
             }
             NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.user),
@@ -530,12 +530,12 @@ fn group_for_event(event: &Event) -> Option<&Group> {
     match event {
         Event::MessageEvent(event) => event.group.as_ref(),
         Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreseEvent(event) => Some(&event.group),
+            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(&event.group),
             NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.group),
             NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.group),
             NoticeEvent::GroupMuteChangeEvent(event) => Some(&event.group),
             NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.group),
-            NoticeEvent::GroupHightLightChangeEvent(event) => Some(&event.group),
+            NoticeEvent::GroupHighlightChangeEvent(event) => Some(&event.group),
             NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.group),
             NoticeEvent::MessageReactionsEvent(event) => event.group.as_ref(),
             NoticeEvent::MessageDeletedEvent(event) => event.group.as_ref(),

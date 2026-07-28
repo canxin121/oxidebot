@@ -606,23 +606,12 @@ pub trait CallApiTrait: Send + Sync {
     }
 
     /// Edits an existing message.
-    ///
-    /// The default delegates to the legacy misspelled `edit_messagee` method
-    /// so existing 0.1 adapters remain source-compatible.
     async fn edit_message(
         &self,
         message_id: String,
         new_message: Vec<MessageSegment>,
     ) -> Result<()> {
-        self.edit_messagee(message_id, new_message).await
-    }
-
-    /// Legacy spelling retained for 0.1 adapter compatibility.
-    async fn edit_messagee(
-        &self,
-        message_id: String,
-        new_message: Vec<MessageSegment>,
-    ) -> Result<()> {
+        let _ = (message_id, new_message);
         Err(anyhow::anyhow!("Not implemented"))
     }
 

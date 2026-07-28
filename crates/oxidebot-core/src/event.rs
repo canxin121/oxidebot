@@ -45,14 +45,14 @@ impl Event {
         match self {
             Self::MessageEvent(_) => EventType::Message,
             Self::NoticeEvent(event) => match event {
-                NoticeEvent::GroupMemberIncreseEvent(_) => EventType::NoticeGroupMemberIncrease,
+                NoticeEvent::GroupMemberIncreaseEvent(_) => EventType::NoticeGroupMemberIncrease,
                 NoticeEvent::GroupMemberDecreaseEvent(_) => EventType::NoticeGroupMemberDecrease,
                 NoticeEvent::GroupAdminChangeEvent(_) => EventType::NoticeGroupAdminChange,
                 NoticeEvent::GroupMuteChangeEvent(_) => EventType::NoticeGroupMuteChange,
                 NoticeEvent::GroupMemberMuteChangeEvent(_) => {
                     EventType::NoticeGroupMemberMuteChange
                 }
-                NoticeEvent::GroupHightLightChangeEvent(_) => EventType::NoticeGroupHighlightChange,
+                NoticeEvent::GroupHighlightChangeEvent(_) => EventType::NoticeGroupHighlightChange,
                 NoticeEvent::GroupMemberAliasChangeEvent(_) => {
                     EventType::NoticeGroupMemberAliasChange
                 }
@@ -366,12 +366,12 @@ pub mod tags {
     }
 
     notice_tags!(
-        GroupMemberIncrease => GroupMemberIncreseEvent : GroupMemberIncreseEvent => NoticeGroupMemberIncrease,
+        GroupMemberIncrease => GroupMemberIncreaseEvent : GroupMemberIncreaseEvent => NoticeGroupMemberIncrease,
         GroupMemberDecrease => GroupMemberDecreaseEvent : GroupMemberDecreaseEvent => NoticeGroupMemberDecrease,
         GroupAdminChange => GroupAdminChangeEvent : GroupAdminChangeEvent => NoticeGroupAdminChange,
         GroupMuteChange => GroupMuteChangeEvent : GroupMuteChangeEvent => NoticeGroupMuteChange,
         GroupMemberMuteChange => GroupMemberMuteChangeEvent : GroupMemberMuteChangeEvent => NoticeGroupMemberMuteChange,
-        GroupHighlightChange => GroupHightLightChangeEvent : GroupHightLightChangeEvent => NoticeGroupHighlightChange,
+        GroupHighlightChange => GroupHighlightChangeEvent : GroupHighlightChangeEvent => NoticeGroupHighlightChange,
         GroupMemberAliasChange => GroupMemberAliasChangeEvent : GroupMemberAliasChangeEvent => NoticeGroupMemberAliasChange,
         MessageReactions => MessageReactionsEvent : MessageReactionsEvent => NoticeMessageReactions,
         MessageDeleted => MessageDeletedEvent : MessageDeletedEvent => NoticeMessageDeleted,

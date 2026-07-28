@@ -195,7 +195,7 @@ pub(crate) fn reply_target(event: &Event) -> Option<SendMessageTarget> {
                 .unwrap_or_else(|| SendMessageTarget::Private(event.sender.id.clone())),
         ),
         Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreseEvent(event) => {
+            NoticeEvent::GroupMemberIncreaseEvent(event) => {
                 Some(SendMessageTarget::Group(event.group.id.clone()))
             }
             NoticeEvent::GroupMemberDecreaseEvent(event) => {
@@ -210,7 +210,7 @@ pub(crate) fn reply_target(event: &Event) -> Option<SendMessageTarget> {
             NoticeEvent::GroupMemberMuteChangeEvent(event) => {
                 Some(SendMessageTarget::Group(event.group.id.clone()))
             }
-            NoticeEvent::GroupHightLightChangeEvent(event) => {
+            NoticeEvent::GroupHighlightChangeEvent(event) => {
                 Some(SendMessageTarget::Group(event.group.id.clone()))
             }
             NoticeEvent::GroupMemberAliasChangeEvent(event) => {
