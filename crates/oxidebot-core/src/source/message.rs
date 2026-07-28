@@ -83,9 +83,10 @@ impl Message {
         match self.options.components.as_mut() {
             Some(MessageComponents::InlineKeyboard(keyboard)) => keyboard.rows.push(row),
             _ => {
-                self.options.components = Some(MessageComponents::InlineKeyboard(
-                    InlineKeyboard::new([row]),
-                ));
+                self.options.components =
+                    Some(MessageComponents::InlineKeyboard(InlineKeyboard::new([
+                        row,
+                    ])));
             }
         }
         self
@@ -103,29 +104,17 @@ impl Message {
     }
 
     #[must_use]
-    pub fn button_url(
-        self,
-        label: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Self {
+    pub fn button_url(self, label: impl Into<String>, url: impl Into<String>) -> Self {
         self.button(Button::url(label, url))
     }
 
     #[must_use]
-    pub fn button_action(
-        self,
-        label: impl Into<String>,
-        data: impl Into<String>,
-    ) -> Self {
+    pub fn button_action(self, label: impl Into<String>, data: impl Into<String>) -> Self {
         self.button(Button::callback(label, data))
     }
 
     #[must_use]
-    pub fn button_text(
-        self,
-        label: impl Into<String>,
-        text: impl Into<String>,
-    ) -> Self {
+    pub fn button_text(self, label: impl Into<String>, text: impl Into<String>) -> Self {
         self.button(Button::send_text(label, text))
     }
 

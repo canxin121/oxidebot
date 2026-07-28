@@ -10,8 +10,7 @@ use oxidebot_core::{
     source::message::{
         DeliveryPlan, DeliveryReport, FallbackPolicy, File, Message, MessageSegment,
     },
-    BotIdentity, BotObject, LocalizedMessage, Media, PlatformId, TemplateValue,
-    TranslationCatalog,
+    BotIdentity, BotObject, LocalizedMessage, Media, PlatformId, TemplateValue, TranslationCatalog,
 };
 use regex::Regex;
 use std::{
@@ -560,11 +559,17 @@ where
     }
 
     pub(crate) fn attach_bots(&self, bots: BotDirectory) {
-        *self.bots.write().expect("authoring bot directory lock poisoned") = Some(bots);
+        *self
+            .bots
+            .write()
+            .expect("authoring bot directory lock poisoned") = Some(bots);
     }
 
     pub(crate) fn detach_bots(&self) {
-        *self.bots.write().expect("authoring bot directory lock poisoned") = None;
+        *self
+            .bots
+            .write()
+            .expect("authoring bot directory lock poisoned") = None;
     }
 
     pub(crate) fn bots(&self) -> Option<BotDirectory> {
@@ -739,11 +744,7 @@ pub struct I18nMessage {
 
 impl I18nMessage {
     #[must_use]
-    pub fn arg(
-        mut self,
-        name: impl Into<Arc<str>>,
-        value: impl Into<TemplateValue>,
-    ) -> Self {
+    pub fn arg(mut self, name: impl Into<Arc<str>>, value: impl Into<TemplateValue>) -> Self {
         self.message = self.message.arg(name, value);
         self
     }
@@ -1087,7 +1088,7 @@ impl CommandRegistry {
     }
 
     #[must_use]
-    pub(crate) fn runtime_shortcuts(&self, id: CommandId) -> Vec<Shortcut> {
+    pub(crate) fn runtime_shortcuts_for(&self, id: CommandId) -> Vec<Shortcut> {
         self.inner
             .read()
             .expect("command registry lock poisoned")

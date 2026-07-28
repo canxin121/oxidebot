@@ -5,13 +5,12 @@ use crate::{
     ShutdownSignal,
 };
 use async_trait::async_trait;
-use oxidebot_core::event::kernel::{
-    DispatchBatch, DispatchDraft, DispatchIndex, DispatchKind,
-};
+use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex, DispatchKind};
 use oxidebot_core::event::{EventType, EventTypeSet, MessageEvent};
 use oxidebot_core::{
-    source::{group::Group, message::Message, user::User}, BotIdentity, BotSlot, CompactId,
-    ConversationKey, Event, EventId, PlatformId, RetainedSize, UserKey,
+    source::{group::Group, message::Message, user::User},
+    BotIdentity, BotSlot, CompactId, ConversationKey, Event, EventId, PlatformId, RetainedSize,
+    UserKey,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -182,8 +181,16 @@ impl MessageFrame {
             .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
             .saturating_add(self.actor.estimated_bytes())
             .saturating_add(self.sender.id.len())
-            .saturating_add(if self.sender.profile.is_some() { 512 } else { 0 })
-            .saturating_add(if self.sender.group_info.is_some() { 256 } else { 0 })
+            .saturating_add(if self.sender.profile.is_some() {
+                512
+            } else {
+                0
+            })
+            .saturating_add(if self.sender.group_info.is_some() {
+                256
+            } else {
+                0
+            })
             .saturating_add(self.group.as_ref().map_or(0, |group| {
                 group
                     .id

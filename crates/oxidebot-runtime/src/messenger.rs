@@ -1,7 +1,5 @@
 use crate::{Address, BotDirectory, BotSelection, HandlerError, HandlerResult, Receipt, Reply};
-use oxidebot_core::{
-    source::message::Message, BotIdentity, FallbackPolicy, MessageTarget,
-};
+use oxidebot_core::{source::message::Message, BotIdentity, FallbackPolicy, MessageTarget};
 
 /// The ordinary immediate-send API used inside a handler.
 ///

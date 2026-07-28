@@ -286,9 +286,7 @@ where
     E: std::fmt::Display,
 {
     fn internal(self, operation: impl AsRef<str>) -> HandlerResult<T> {
-        self.map_err(|error| {
-            HandlerError::Internal(format!("{}: {error}", operation.as_ref()))
-        })
+        self.map_err(|error| HandlerError::Internal(format!("{}: {error}", operation.as_ref())))
     }
 
     fn api(self) -> HandlerResult<T> {
@@ -296,9 +294,7 @@ where
     }
 
     fn api_context(self, operation: impl AsRef<str>) -> HandlerResult<T> {
-        self.map_err(|error| {
-            HandlerError::Api(format!("{}: {error}", operation.as_ref()))
-        })
+        self.map_err(|error| HandlerError::Api(format!("{}: {error}", operation.as_ref())))
     }
 
     fn user(self, message: impl Into<Arc<str>>) -> HandlerResult<T> {

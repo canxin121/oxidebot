@@ -16,11 +16,9 @@ use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
     IdempotencyGuarantee,
 };
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -135,8 +133,7 @@ impl Default for ConsoleAdapter {
 #[async_trait]
 impl Adapter for ConsoleAdapter {
     fn descriptor(&self) -> BotDescriptor {
-        BotDescriptor::new(self.platform.clone(), self.bot.clone())
-            .display_name("OxideBot Console")
+        BotDescriptor::new(self.platform.clone(), self.bot.clone()).display_name("OxideBot Console")
     }
 
     fn services(&self) -> BotServices {

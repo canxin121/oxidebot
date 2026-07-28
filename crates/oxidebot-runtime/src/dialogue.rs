@@ -9,13 +9,7 @@ use oxidebot_core::{
     source::message::{Message, MessageSegment},
     BotObject, ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
 };
-use std::{
-    fmt::Display,
-    future::IntoFuture,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt::Display, future::IntoFuture, str::FromStr, sync::Arc, time::Duration};
 
 /// A bounded one-user dialogue scoped to the current conversation and actor.
 #[derive(Clone)]
@@ -276,7 +270,6 @@ impl Dialogue {
     }
 }
 
-
 /// Boxed future used by [`DialogueForm`] implementations. Form collection is
 /// a cold, explicitly interactive path, so boxing here does not affect normal
 /// message or command dispatch.
@@ -464,7 +457,11 @@ where
         let final_error = self.error_prompt.get_raw_text();
         for attempt in 0..self.attempts {
             let answer = self.dialogue.ask_text(prompt).await?;
-            let input = if self.trim { answer.trim() } else { answer.as_str() };
+            let input = if self.trim {
+                answer.trim()
+            } else {
+                answer.as_str()
+            };
             let valid = match input.parse::<T>() {
                 Ok(value) => match &self.validator {
                     Some(validator) if validator(&value).is_err() => None,

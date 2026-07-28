@@ -1,9 +1,11 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, spanned::Spanned, Attribute, Data,
-    DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn, LitChar, LitInt, LitStr,
-    Meta, Pat, Path, PathArguments, Token, Type,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    spanned::Spanned,
+    Attribute, Data, DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn,
+    LitChar, LitInt, LitStr, Meta, Pat, Path, PathArguments, Token, Type,
 };
 
 /// Turns one state-aware completion function into a statically typed provider.
@@ -14,9 +16,12 @@ use syn::{
 #[proc_macro_attribute]
 pub fn completer(attribute: TokenStream, input: TokenStream) -> TokenStream {
     if !attribute.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "#[oxidebot::completer] does not accept arguments")
-            .into_compile_error()
-            .into();
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[oxidebot::completer] does not accept arguments",
+        )
+        .into_compile_error()
+        .into();
     }
     match expand_completer_function(parse_macro_input!(input as ItemFn)) {
         Ok(tokens) => tokens.into(),
@@ -46,7 +51,10 @@ fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::T
 
     let mut inputs = function.sig.inputs.iter();
     let Some(FnArg::Typed(context)) = inputs.next() else {
-        return Err(syn::Error::new(function.sig.inputs.span(), "methods are not supported"));
+        return Err(syn::Error::new(
+            function.sig.inputs.span(),
+            "methods are not supported",
+        ));
     };
     let Some(state) = type_argument(context.ty.as_ref(), "Context").cloned() else {
         return Err(syn::Error::new(
@@ -55,7 +63,10 @@ fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::T
         ));
     };
     let Some(FnArg::Typed(input)) = inputs.next() else {
-        return Err(syn::Error::new(function.sig.inputs.span(), "methods are not supported"));
+        return Err(syn::Error::new(
+            function.sig.inputs.span(),
+            "methods are not supported",
+        ));
     };
     if !is_type(input.ty.as_ref(), "CompletionInput") {
         return Err(syn::Error::new(
@@ -346,10 +357,7 @@ fn expand_command_function(
         &format!("__oxidebot_{}_handler", feature_ident),
         feature_ident.span(),
     );
-    let spec_ident = syn::Ident::new(
-        &format!("{}_command", feature_ident),
-        feature_ident.span(),
-    );
+    let spec_ident = syn::Ident::new(&format!("{}_command", feature_ident), feature_ident.span());
     let args_ident = syn::Ident::new(
         &format!(
             "__OxideBot{}Args",
@@ -385,10 +393,8 @@ fn expand_command_function(
     let mut command_fields = Vec::new();
     let mut completer_bindings = Vec::new();
     let mut completer_providers = Vec::<Path>::new();
-    let generated_field_module = format_ident!(
-        "{}_fields",
-        ident_to_module_name(&args_ident.to_string()),
-    );
+    let generated_field_module =
+        format_ident!("{}_fields", ident_to_module_name(&args_ident.to_string()),);
     let mut wrapper_inputs = Vec::new();
     let mut wrapper_types = Vec::new();
     let mut call_arguments = Vec::new();
@@ -558,14 +564,10 @@ fn expand_command_function(
     })
 }
 
-fn arg_path_option(
-    attributes: &[Attribute],
-    name: &str,
-) -> syn::Result<Option<Path>> {
+fn arg_path_option(attributes: &[Attribute], name: &str) -> syn::Result<Option<Path>> {
     for attribute in attributes {
-        let entries = attribute.parse_args_with(
-            syn::punctuated::Punctuated::<Meta, Token![,]>::parse_terminated,
-        )?;
+        let entries = attribute
+            .parse_args_with(syn::punctuated::Punctuated::<Meta, Token![,]>::parse_terminated)?;
         for entry in entries {
             let Meta::NameValue(value) = entry else {
                 continue;
@@ -702,15 +704,24 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
     }
     let name = input.ident;
     let Data::Struct(data) = input.data else {
-        return Err(syn::Error::new(name.span(), "DialogueForm can only be derived for a struct"));
+        return Err(syn::Error::new(
+            name.span(),
+            "DialogueForm can only be derived for a struct",
+        ));
     };
     let Fields::Named(fields) = data.fields else {
-        return Err(syn::Error::new(name.span(), "DialogueForm requires named fields"));
+        return Err(syn::Error::new(
+            name.span(),
+            "DialogueForm requires named fields",
+        ));
     };
 
     let mut initializers = Vec::new();
     for field in fields.named {
-        let ident = field.ident.clone().ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
+        let ident = field
+            .ident
+            .clone()
+            .ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
         let ty = field.ty.clone();
         let options = DialogueFieldOptions::parse(&field)?;
         let prompt = options
@@ -734,8 +745,10 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             }
             let words = options.error.map_or_else(
                 || quote! { ::oxidebot::ConfirmationWords::default() },
-                |error| quote! {
-                    ::oxidebot::ConfirmationWords::default().retry_message(#error)
+                |error| {
+                    quote! {
+                        ::oxidebot::ConfirmationWords::default().retry_message(#error)
+                    }
                 },
             );
             quote! {
@@ -779,8 +792,12 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                 selected
             }
         } else {
-            let error = options.error.map(|value| quote! { question = question.error(#value); });
-            let validate = options.validate.map(|path| quote! { question = question.try_validate(#path); });
+            let error = options
+                .error
+                .map(|value| quote! { question = question.error(#value); });
+            let validate = options
+                .validate
+                .map(|path| quote! { question = question.try_validate(|value| #path(value)); });
             quote! {{
                 let mut question = dialogue.question::<#ty>(#prompt).attempts(#attempts);
                 #error
@@ -827,7 +844,10 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     let mut implementations = Vec::new();
     let mut selected_types = ::std::collections::HashSet::new();
     for field in fields.named {
-        let selected = field.attrs.iter().any(|attribute| attribute.path().is_ident("state"));
+        let selected = field
+            .attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("state"));
         if !selected {
             continue;
         }
@@ -836,7 +856,9 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             .ident
             .ok_or_else(|| syn::Error::new(field_span, "expected a named field"))?;
         let field_ty = field.ty;
-        let (selected_ty, body, selected_bound) = if let Some(inner) = type_argument(&field_ty, "Arc") {
+        let (selected_ty, body, selected_bound) = if let Some(inner) =
+            type_argument(&field_ty, "Arc")
+        {
             (
                 inner.clone(),
                 quote! { ::std::sync::Arc::clone(&root.#ident) },
@@ -888,10 +910,7 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let visibility = input.vis.clone();
     let name = input.ident;
-    let field_module = format_ident!(
-        "{}_fields",
-        ident_to_module_name(&name.to_string())
-    );
+    let field_module = format_ident!("{}_fields", ident_to_module_name(&name.to_string()));
     let field_visibility: syn::Visibility = if matches!(visibility, syn::Visibility::Inherited) {
         syn::parse_quote!(pub(super))
     } else {
@@ -927,10 +946,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             .ident
             .clone()
             .ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
-        let rust_name = ident
-            .to_string()
-            .trim_start_matches("r#")
-            .to_owned();
+        let rust_name = ident.to_string().trim_start_matches("r#").to_owned();
         let argument_name = options.name.clone().unwrap_or_else(|| rust_name.clone());
         let field_kind = FieldKind::of(&field.ty);
         let value_ty = match &field_kind {
@@ -993,10 +1009,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             });
             continue;
         }
-        let marker_ident = format_ident!(
-            "{}",
-            to_pascal_case(rust_name.trim_start_matches("r#"))
-        );
+        let marker_ident = format_ident!("{}", to_pascal_case(rust_name.trim_start_matches("r#")));
         field_markers.push(quote! {
             #[derive(Clone, Copy, Debug, Default)]
             #field_visibility struct #marker_ident;

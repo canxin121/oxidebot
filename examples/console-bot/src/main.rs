@@ -1,4 +1,8 @@
-use oxidebot::{commands::prelude::{CompletionInput, CompletionItem, CompletionKind}, message::prelude::TemplateValue, prelude::*};
+use oxidebot::{
+    commands::prelude::{CompletionInput, CompletionItem, CompletionKind},
+    message::prelude::TemplateValue,
+    prelude::*,
+};
 use oxidebot_adapter_console::ConsoleAdapter;
 
 #[derive(Clone, Default)]
@@ -54,14 +58,12 @@ async fn echo(
 
 #[oxidebot::command("hello")]
 async fn hello(Sender(user): Sender, i18n: I18n) -> HandlerResult<Message> {
-    i18n
-        .message("hello")
+    i18n.message("hello")
         .arg("user", TemplateValue::mention(user.id))
         .await
 }
 
-
-fn non_empty(value: &String) -> Result<(), &'static str> {
+fn non_empty(value: &str) -> Result<(), &'static str> {
     (!value.trim().is_empty())
         .then_some(())
         .ok_or("Project name cannot be empty.")
@@ -91,9 +93,11 @@ struct SetupForm {
 
 #[oxidebot::command("setup")]
 async fn setup(dialogue: Dialogue, i18n: I18n) -> HandlerResult<Message> {
-    let form = dialogue.named("console-project-setup").form::<SetupForm>().await?;
-    i18n
-        .message("setup.complete")
+    let form = dialogue
+        .named("console-project-setup")
+        .form::<SetupForm>()
+        .await?;
+    i18n.message("setup.complete")
         .arg("name", form.name)
         .arg("environment", form.environment)
         .arg("confirmed", form.confirmed.to_string())

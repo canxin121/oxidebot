@@ -5,10 +5,10 @@ use crate::{
     hooks::{
         After, Before, Endpoint, Guard, GuardDecision, SharedAfter, SharedBefore, SharedGuard,
     },
-    BuildError, Command, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId,
-    CommandOutput, CommandParseError, CommandResult, CompletionConfig, CompletionInput, Context,
-    Dialogue, DynamicCompleter, Extract, HandlerError, HandlerResult, Outcome, RewriteInput,
-    Shortcut, SourceSpan,
+    BuildError, Command, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandOutput,
+    CommandParseError, CommandResult, CompletionConfig, CompletionInput, Context, Dialogue,
+    DynamicCompleter, Extract, HandlerError, HandlerResult, Outcome, RewriteInput, Shortcut,
+    SourceSpan,
 };
 use futures_util::future::BoxFuture;
 use oxidebot_core::{
@@ -493,46 +493,6 @@ impl Command {
     }
 }
 
-#[must_use]
-pub fn message_feature<S, H, T>(handler: H) -> Feature<S>
-where
-    S: Send + Sync + 'static,
-    H: IntoHandler<T, S>,
-{
-    Feature::message(handler)
-}
-
-#[must_use]
-pub fn event_feature<S, E, H, T>(event: E, handler: H) -> Feature<S>
-where
-    S: Send + Sync + 'static,
-    E: EventTag,
-    H: IntoHandler<T, S>,
-{
-    Feature::event(event, handler)
-}
-
-#[must_use]
-pub fn interaction_feature<S, H, T>(
-    custom_id: impl Into<Arc<str>>,
-    handler: H,
-) -> Feature<S>
-where
-    S: Send + Sync + 'static,
-    H: IntoHandler<T, S>,
-{
-    Feature::interaction(custom_id, handler)
-}
-
-#[must_use]
-pub fn native_feature<S, H, T>(kind: impl Into<Arc<str>>, handler: H) -> Feature<S>
-where
-    S: Send + Sync + 'static,
-    H: IntoHandler<T, S>,
-{
-    Feature::native(kind, handler)
-}
-
 impl<S> Default for Module<S>
 where
     S: Send + Sync + 'static,
@@ -564,6 +524,10 @@ where
 
     /// Installs one generated or manually configured Bot feature.
     #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "`add` installs a feature into this fluent module builder; it is not arithmetic"
+    )]
     pub fn add<F>(self, feature: F) -> Self
     where
         F: crate::IntoFeature<S>,
@@ -800,27 +764,6 @@ where
         }))
     }
 
-    pub(crate) fn insert_completer<C>(
-        &mut self,
-        command: CommandId,
-        field: CommandFieldId,
-        completer: C,
-    ) where
-        C: DynamicCompleter<S>,
-    {
-        if self
-            .completers
-            .insert((command, field), Arc::new(completer))
-            .is_some()
-        {
-            self.scope_errors.push(format!(
-                "more than one dynamic completer is registered for command {:016x}, field {:08x}",
-                command.0,
-                field.0,
-            ));
-        }
-    }
-
     pub(crate) fn install_completers(
         &self,
         target: &mut HashMap<(CommandId, CommandFieldId), Arc<dyn DynamicCompleter<S>>>,
@@ -835,12 +778,6 @@ where
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn set_default_block(&mut self, value: bool) {
-        for handler in &mut self.handlers {
-            handler.default_block = value;
-        }
     }
 
     fn apply_overlays_to(&self, mut command: Command) -> Command {
@@ -1550,7 +1487,7 @@ where
                 .branch_path()
                 .last()
                 .map_or(0, |branch| u64::from(branch.0))
-        ));
+        ))?;
 
     for _ in 0..completion.max_rounds {
         let error = match result.parse_active() {
@@ -1667,7 +1604,10 @@ where
 {
     match event {
         Event::MessageEvent(message_event) => {
-            let shortcuts = context.authoring().registry.runtime_shortcuts(command.id());
+            let shortcuts = context
+                .authoring()
+                .registry
+                .runtime_shortcuts_for(command.id());
             if let Some(command_input) = command_input {
                 let input = command_input
                     .get_or_try_init(|| async {

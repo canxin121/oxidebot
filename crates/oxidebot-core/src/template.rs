@@ -8,6 +8,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+type TranslationEntry = ((Arc<str>, Arc<str>), MessageTemplate);
+
 pub trait SegmentSelector: Send + Sync + 'static {
     const KIND: SegmentKind;
 }
@@ -496,10 +498,7 @@ impl TranslationCatalog {
         self.insert_parsed(entries)
     }
 
-    fn insert_parsed(
-        &self,
-        entries: Vec<((Arc<str>, Arc<str>), MessageTemplate)>,
-    ) -> Result<usize, TranslationError> {
+    fn insert_parsed(&self, entries: Vec<TranslationEntry>) -> Result<usize, TranslationError> {
         let mut state = self
             .inner
             .write()
@@ -571,7 +570,7 @@ impl TranslationCatalog {
 fn parse_translation_file(
     locale: Arc<str>,
     path: &Path,
-) -> Result<Vec<((Arc<str>, Arc<str>), MessageTemplate)>, TranslationError> {
+) -> Result<Vec<TranslationEntry>, TranslationError> {
     let source = fs::read_to_string(path).map_err(|error| {
         TranslationError::Io(format!("could not read {}: {error}", path.display()))
     })?;

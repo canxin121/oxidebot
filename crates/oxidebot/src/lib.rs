@@ -9,7 +9,9 @@ pub use oxidebot_runtime as runtime;
 pub use oxidebot_runtime::*;
 
 /// Derives a strongly typed command schema and parser.
-pub use oxidebot_macros::{branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm};
+pub use oxidebot_macros::{
+    branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
+};
 
 /// Typed values that ordinary handler functions may request.
 pub mod extract {
@@ -28,15 +30,14 @@ pub mod extract {
 pub mod commands {
     pub use oxidebot_runtime::{
         command, value_pattern, when_branch, when_field_equals, ArgumentAction, ArgumentChoice,
-        ArgumentSpec, BranchArgs, Command, CommandArgs, CommandBranch, CommandBranchTag,
-        CatalogCommandRenderer, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId,
-        CommandMatch, CommandNodeId, CommandOutput, CommandOverlay, CommandParseError,
-        CommandRegistry, CommandRenderer, CommandResult, CommandSchema, CommandSource, CommandTree,
-        CommandValue, CommandValueKind, CompletionConfig, CompletionInput, CompletionItem,
-        CompletionKind, DefaultCommandRenderer, DynamicCompleter, FnValuePattern,
-        FromCommandMatch, FromCommandValue, LocalizedText, Mention, ParsedArguments,
-        RegexTextPattern, Resolve, ResolveCommandValue, Shortcut, ShortcutPattern, SourceSpan,
-        UnitBranch, ValuePattern,
+        ArgumentSpec, BranchArgs, CatalogCommandRenderer, Command, CommandArgs, CommandBranch,
+        CommandBranchTag, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandMatch,
+        CommandNodeId, CommandOutput, CommandOverlay, CommandParseError, CommandRegistry,
+        CommandRenderer, CommandResult, CommandSchema, CommandSource, CommandTree, CommandValue,
+        CommandValueKind, CompletionConfig, CompletionInput, CompletionItem, CompletionKind,
+        DefaultCommandRenderer, DynamicCompleter, FnValuePattern, FromCommandMatch,
+        FromCommandValue, LocalizedText, Mention, ParsedArguments, RegexTextPattern, Resolve,
+        ResolveCommandValue, Shortcut, ShortcutPattern, SourceSpan, UnitBranch, ValuePattern,
     };
 
     pub mod prelude {
@@ -44,8 +45,8 @@ pub mod commands {
             command, ArgumentAction, ArgumentChoice, ArgumentSpec, BranchArgs, Command,
             CommandArgs, CommandBranchTag, CommandFieldTag, CommandMatch, CommandOutput,
             CommandRegistry, CommandTree, CompletionConfig, CompletionInput, CompletionItem,
-            CompletionKind, FromCommandValue, LocalizedText, Mention, Resolve,
-            ResolveCommandValue, Shortcut, ValuePattern,
+            CompletionKind, FromCommandValue, LocalizedText, Mention, Resolve, ResolveCommandValue,
+            Shortcut, ValuePattern,
         };
         pub use oxidebot_macros::{branch, command, completer, BotCommand, CommandArgs};
     }
@@ -81,8 +82,8 @@ pub mod message {
 /// resolution.
 pub mod delivery {
     pub use oxidebot_core::source::message::{
-        DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError,
-        DeliveryReport, FallbackPolicy,
+        DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
+        FallbackPolicy,
     };
     pub use oxidebot_runtime::{
         resolve_and_host_file, resolve_message_media, Address, BotDirectory, BotSelection,
@@ -102,8 +103,8 @@ pub mod delivery {
 /// Focused imports for platform-adapter and transport authors.
 pub mod adapter {
     pub use oxidebot_runtime::{
-        Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
-        FrameIndex, InboundFrame, MessageFrame, MessageFrameBuilder, Submission,
+        Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, FrameIndex,
+        InboundFrame, MessageFrame, MessageFrameBuilder, Submission,
     };
 
     pub mod prelude {
@@ -129,8 +130,8 @@ pub mod handler {
 pub mod standard {
     pub use oxidebot_runtime::{
         command_admin_module, diagnostics_module, echo_module, language_module,
-        shortcut_admin_module, AdminTools, CommandAdminArguments, EchoArguments,
-        LanguageArguments, LocaleStorage, ShortcutArguments, StoredLocaleResolver,
+        shortcut_admin_module, AdminTools, CommandAdminArguments, EchoArguments, LanguageArguments,
+        LocaleStorage, ShortcutArguments, StoredLocaleResolver,
     };
 }
 
@@ -164,25 +165,28 @@ pub mod prelude {
         },
         BotId, BotIdentity, CallApiTrait, EventId, PlatformId,
     };
-    pub use oxidebot_macros::{branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm};
+    pub use oxidebot_macros::{
+        branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
+    };
     pub use oxidebot_runtime::{
         command, Args, Bot, BranchArgs, ChatGroup, Command, CommandArgs, CommandBranchTag,
         CommandTree, CompletionConfig, ConfirmationWords, Context, Dialogue, DialogueForm,
         DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
-        GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeGroup,
-        MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation,
-        Receipt, Reply, ResultExt, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target,
-        Text,
+        GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeGroup, MessageContext,
+        MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation, Receipt, Reply,
+        ResultExt, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
     };
 }
 
 /// Compatibility import that intentionally exposes the complete public surface.
 /// New applications should prefer the focused preludes above.
 pub mod all {
-    pub use oxidebot_core::*;
-    pub use oxidebot_macros::{branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm};
-    pub use oxidebot_runtime::*;
     pub use crate::{button, message, message_args, message_template, row};
+    pub use oxidebot_core::*;
+    pub use oxidebot_macros::{
+        branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
+    };
+    pub use oxidebot_runtime::*;
 }
 
 /// Builds the unified cross-platform message IR from text and message segments.

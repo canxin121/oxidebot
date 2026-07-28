@@ -173,20 +173,14 @@ impl RuntimeConfig {
     /// Configures inbound frame and event admission without exposing unrelated
     /// executor, command, or session settings at the call site.
     #[must_use]
-    pub fn configure_ingress(
-        mut self,
-        configure: impl FnOnce(&mut IngressConfig<'_>),
-    ) -> Self {
+    pub fn configure_ingress(mut self, configure: impl FnOnce(&mut IngressConfig<'_>)) -> Self {
         configure(&mut IngressConfig { config: &mut self });
         self
     }
 
     /// Configures handler execution and propagation limits.
     #[must_use]
-    pub fn configure_execution(
-        mut self,
-        configure: impl FnOnce(&mut ExecutionConfig<'_>),
-    ) -> Self {
+    pub fn configure_execution(mut self, configure: impl FnOnce(&mut ExecutionConfig<'_>)) -> Self {
         configure(&mut ExecutionConfig { config: &mut self });
         self
     }

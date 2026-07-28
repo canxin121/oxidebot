@@ -9,10 +9,10 @@ use crate::{
     session::{SessionDelivery, SessionRegistry},
     Adapter, AuthoringRuntime, BotDescriptor, BotDirectory, BotServices, BuildError,
     CatalogCommandRenderer, CommandCatalog, CommandFieldId, CommandId, CommandMiddleware,
-    CommandOutputMiddleware, CommandRegistry, CommandRenderer, CommandRewriter,
-    DeliveryMiddleware, DynamicCompleter, Filter, LocaleResolver, MessageNormalizer,
-    MetricsHandle, Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service,
-    ServiceContext, ServiceError, ShutdownSignal,
+    CommandOutputMiddleware, CommandRegistry, CommandRenderer, CommandRewriter, DeliveryMiddleware,
+    DynamicCompleter, Filter, LocaleResolver, MessageNormalizer, MetricsHandle, Result,
+    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
+    ServiceError, ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
@@ -277,6 +277,10 @@ where
     /// Installs one generated command, locally configured feature, or complete
     /// module directly into this application.
     #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "`add` installs a feature into this fluent application builder; it is not arithmetic"
+    )]
     pub fn add<F>(mut self, feature: F) -> Self
     where
         F: crate::IntoFeature<S>,

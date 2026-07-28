@@ -878,11 +878,11 @@ impl Command {
     /// Matches and parses one canonical message, returning a structured
     /// command result or a precise parse error.
     pub fn parse_message(&self, message: &Message) -> Result<CommandMatch, CommandParseError> {
-        let matched = self
-            .match_message(message)?
-            .ok_or_else(|| CommandParseError::NotMatched {
-                command: Arc::clone(&self.name),
-            })?;
+        let matched =
+            self.match_message(message)?
+                .ok_or_else(|| CommandParseError::NotMatched {
+                    command: Arc::clone(&self.name),
+                })?;
         let parsed = matched.parse_active()?;
         Ok(matched.with_parsed(parsed))
     }

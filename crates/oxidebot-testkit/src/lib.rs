@@ -176,7 +176,10 @@ pub enum ScriptStep {
     /// Waits until the scripted API has observed at least `count` successful
     /// sends. This is a deterministic synchronization point for multi-turn
     /// dialogue tests and does not rely on arbitrary sleeps.
-    WaitForSent { count: usize, timeout: Duration },
+    WaitForSent {
+        count: usize,
+        timeout: Duration,
+    },
 }
 
 /// Successfully sent message recorded by the scripted API.
@@ -367,7 +370,7 @@ impl Adapter for ScriptedAdapter {
 pub enum ReplyExpectation {
     Exact(String),
     Contains(String),
-    Message(Message),
+    Message(Box<Message>),
 }
 
 /// Result of a completed high-level Bot test.
@@ -439,6 +442,10 @@ where
 
     /// Adds one generated command, locally configured feature, or module.
     #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "`add` installs a feature into this fluent test builder; it is not arithmetic"
+    )]
     pub fn add<F>(mut self, feature: F) -> Self
     where
         F: oxidebot_runtime::IntoFeature<S>,
@@ -527,7 +534,7 @@ where
 
     #[must_use]
     pub fn expect_message(self, message: Message) -> Self {
-        self.push_expectation(ReplyExpectation::Message(message))
+        self.push_expectation(ReplyExpectation::Message(Box::new(message)))
     }
 
     /// Explicitly documents that a scenario must not send any messages.
@@ -565,7 +572,7 @@ where
             let matches = match expected {
                 ReplyExpectation::Exact(expected) => actual_text == *expected,
                 ReplyExpectation::Contains(expected) => actual_text.contains(expected),
-                ReplyExpectation::Message(expected) => &actual_message == expected,
+                ReplyExpectation::Message(expected) => &actual_message == expected.as_ref(),
             };
             if !matches {
                 return Err(format!(
@@ -582,7 +589,6 @@ where
         })
     }
 }
-
 
 /// Focused parser harness that exercises the same immutable command IR without
 /// starting adapters, queues, or the executor.
