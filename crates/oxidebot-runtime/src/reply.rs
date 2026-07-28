@@ -63,6 +63,26 @@ impl Reply {
         &self.target
     }
 
+    pub(crate) fn retarget(&self, target: MessageTarget) -> Self {
+        Self {
+            api: Arc::clone(&self.api),
+            target,
+            reply_to: None,
+            fallback: self.fallback,
+            pipeline: self.pipeline.clone(),
+        }
+    }
+
+    pub(crate) fn rebind(&self, api: BotObject, target: MessageTarget) -> Self {
+        Self {
+            api: Arc::new(api),
+            target,
+            reply_to: None,
+            fallback: self.fallback,
+            pipeline: self.pipeline.clone(),
+        }
+    }
+
     /// Overrides capability fallback behavior for subsequent sends.
     #[must_use]
     pub const fn fallback(mut self, fallback: FallbackPolicy) -> Self {

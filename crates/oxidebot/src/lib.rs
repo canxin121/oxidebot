@@ -9,14 +9,14 @@ pub use oxidebot_runtime as runtime;
 pub use oxidebot_runtime::*;
 
 /// Derives a strongly typed command schema and parser.
-pub use oxidebot_macros::{command, BotCommand, CommandArgs};
+pub use oxidebot_macros::{branch, command, BotCommand, BotState, CommandArgs};
 
 /// Typed values that ordinary handler functions may request.
 pub mod extract {
     pub use oxidebot_core::{BotIdentity, EventId};
     pub use oxidebot_runtime::{
         Args, Bot, BranchArgs, ChatGroup, CommandRegistry, CommandResult, Context, Dialogue,
-        EventContext, Extract, ExtractError, MaybeGroup, MessageContext, MessageId, Reply, Resolve,
+        EventContext, Extract, ExtractError, FromState, MaybeGroup, MessageContext, MessageId, Messenger, Reply, Resolve,
         Segments, Sender, ShutdownSignal, State, Target, Text,
     };
 }
@@ -26,7 +26,7 @@ pub mod commands {
     pub use oxidebot_runtime::{
         command, value_pattern, when_branch, when_field_equals, ArgumentAction, ArgumentChoice,
         ArgumentSpec, BranchArgs, Command, CommandArgs, CommandBranch, CommandBranchTag,
-        CommandCatalog, CommandFieldId, CommandId, CommandMatch, CommandNodeId, CommandOutput,
+        CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandMatch, CommandNodeId, CommandOutput,
         CommandOverlay, CommandParseError, CommandRegistry, CommandRenderer, CommandResult,
         CommandSchema, CommandSource, CommandTree, CommandValue, CommandValueKind,
         CompletionConfig, CompletionInput, CompletionItem, CompletionKind, DefaultCommandRenderer,
@@ -39,7 +39,8 @@ pub mod commands {
 /// Flat Bot-module, admission, hook, and effect building blocks.
 pub mod handler {
     pub use oxidebot_runtime::{
-        After, Before, Guard, GuardDecision, GuardResult, IntoOutcome, Module, Outcome, Propagation,
+        After, Before, Feature, FeatureExt, GeneratedFeature, Guard, GuardDecision, GuardResult,
+        IntoFeature, IntoOutcome, Module, Outcome, Propagation,
     };
 }
 
@@ -66,7 +67,7 @@ pub mod prelude {
         TextSegments, TextSpan, TextStyle, TranslationCatalog, TranslationError, UserMentions,
         Videos,
     };
-    pub use oxidebot_macros::{command, BotCommand, CommandArgs};
+    pub use oxidebot_macros::{branch, command, BotCommand, BotState, CommandArgs};
     pub use oxidebot_runtime::{
         command, command_admin_module, diagnostics_module, echo_module, language_module,
         resolve_and_host_file, resolve_message_media, shortcut_admin_module, value_pattern,
@@ -77,7 +78,7 @@ pub mod prelude {
         CompletionInput, CompletionItem, CompletionKind, Context, DefaultCommandRenderer,
         DeliveryMiddleware, Dialogue, DynamicCompleter, EventContext, EventLocaleResolver, Extract,
         ExtractError, FnValuePattern, GuardDecision, GuardResult, HandlerError, HandlerResult,
-        IntoOutcome, LocalMediaResolver, LocaleResolver, LocaleStorage, MediaFetcher, MediaHost,
+        IntoFeature, IntoOutcome, LocalMediaResolver, LocaleResolver, LocaleStorage, MediaFetcher, MediaHost,
         MediaResolver, MessageContext, MessageId, MessageNormalizer, Module, Outcome, OxideBot,
         PortableMediaResolver, Propagation, Receipt, RegexTextPattern, Reply, Resolve,
         ResolveCommandValue, ResolvedMedia, ResolvedMessageMedia, RewriteInput, Segments, Sender,

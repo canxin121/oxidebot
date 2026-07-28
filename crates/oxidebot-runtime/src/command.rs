@@ -31,6 +31,17 @@ pub struct CommandNodeId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CommandFieldId(pub u32);
 
+/// Compile-time marker generated for one field in a `CommandArgs` schema.
+///
+/// Field markers keep completion and async resolution next to the feature that
+/// owns the command without exposing stringly typed field names in application
+/// code. The stable runtime field ID is still resolved from the canonical
+/// command tree, so help, parsing, completion, and platform commands share one
+/// source of truth.
+pub trait CommandFieldTag: Clone + Copy + Send + Sync + 'static {
+    const NAME: &'static str;
+}
+
 /// Localized text used by command schemas, diagnostics, help, completion, and
 /// native command publication.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2895,6 +2906,16 @@ pub trait CommandArgs: Sized + Send + 'static {
     #[must_use]
     fn command(name: impl Into<Arc<str>>) -> Command {
         Command::new(name).schema(Self::schema())
+    }
+
+    /// Defines and binds a flat argument command in one expression.
+    #[must_use]
+    fn feature<S, H, T>(name: impl Into<Arc<str>>, handler: H) -> crate::Feature<S>
+    where
+        S: Send + Sync + 'static,
+        H: crate::IntoHandler<T, S>,
+    {
+        crate::Feature::command(Self::command(name), handler)
     }
 }
 

@@ -222,6 +222,17 @@ where
         self
     }
 
+    /// Installs one generated command, locally configured feature, or complete
+    /// module directly into this application.
+    #[must_use]
+    pub fn add<F>(mut self, feature: F) -> Self
+    where
+        F: crate::IntoFeature<S>,
+    {
+        self.module = self.module.add(feature);
+        self
+    }
+
     /// Includes one reusable Bot feature module.
     ///
     /// Modules remain uncompiled until `build`, so commands from separate
@@ -259,9 +270,10 @@ where
             filters,
             services,
             metrics,
-            authoring,
+            mut authoring,
         } = self;
         config.validate()?;
+        module.install_completers(&mut authoring.completers)?;
         let dynamic_shortcuts = module.runtime_shortcuts_enabled();
         let command_catalog = module.catalog();
         let has_static_shortcuts = command_catalog
@@ -722,6 +734,7 @@ where
     for worker in command_workers {
         command_tasks.spawn(worker.run());
     }
+    authoring.attach_bots(bot_directory.clone());
     authoring
         .registry
         .attach_publication(bot_directory.clone(), command_catalog.clone());
@@ -730,6 +743,7 @@ where
     {
         cancellation.cancel();
         authoring.registry.detach_publication();
+        authoring.detach_bots();
         command_tasks.abort_all();
         while command_tasks.join_next().await.is_some() {}
         return Err(error);
@@ -946,6 +960,7 @@ where
     // native definitions. Release that attachment before waiting for the
     // per-bot command channels to close.
     authoring.registry.detach_publication();
+    authoring.detach_bots();
     drop(bot_directory);
     record_first(
         &mut fatal_error,

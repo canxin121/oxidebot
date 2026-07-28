@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Expr, Field, Fields, FnArg,
-    GenericArgument, ItemFn, LitChar, LitStr, Pat, PathArguments, Type,
+    GenericArgument, ItemFn, LitChar, LitStr, Pat, Path, PathArguments, Type,
 };
 
 #[proc_macro_attribute]
@@ -11,6 +11,149 @@ pub fn command(attribute: TokenStream, input: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }
+}
+
+/// Binds an ordinary async function to one statically generated command-tree branch.
+///
+/// The first function argument is the branch's typed argument value; all
+/// remaining arguments use OxideBot's normal extractor system. The generated
+/// unit value can be installed directly with `Module::add(handler_name)`.
+#[proc_macro_attribute]
+pub fn branch(attribute: TokenStream, input: TokenStream) -> TokenStream {
+    match expand_branch_function(attribute, parse_macro_input!(input as ItemFn)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn expand_branch_function(
+    attribute: TokenStream,
+    mut function: ItemFn,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if function.sig.asyncness.is_none() {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "#[oxidebot::branch] requires an async function",
+        ));
+    }
+    if !function.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            function.sig.generics.span(),
+            "#[oxidebot::branch] does not support generic functions",
+        ));
+    }
+    let marker: Path = syn::parse(attribute)?;
+    let feature_ident = function.sig.ident.clone();
+    let implementation_ident = format_ident!("__oxidebot_{}_implementation", feature_ident);
+    let handler_ident = format_ident!("__oxidebot_{}_handler", feature_ident);
+    let visibility = function.vis.clone();
+    let return_type = function.sig.output.clone();
+    let outer_attributes = function.attrs.clone();
+    let implementation_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    function.attrs = implementation_attributes.clone();
+    function.vis = syn::Visibility::Inherited;
+    function.sig.ident = implementation_ident.clone();
+
+    let mut inputs = function.sig.inputs.iter();
+    let Some(FnArg::Typed(first)) = inputs.next() else {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "#[oxidebot::branch] requires the branch arguments as its first parameter",
+        ));
+    };
+    let Pat::Ident(first_pattern) = first.pat.as_ref() else {
+        return Err(syn::Error::new(
+            first.pat.span(),
+            "the branch argument must use a simple identifier pattern",
+        ));
+    };
+    let first_ident = first_pattern.ident.clone();
+    let first_ty = first.ty.clone();
+    let mut wrapper_inputs = Vec::new();
+    let mut wrapper_types = Vec::new();
+    let mut call_arguments = vec![quote! { __oxidebot_branch_args }];
+    for argument in inputs {
+        let FnArg::Typed(typed) = argument else {
+            return Err(syn::Error::new(argument.span(), "methods are not supported"));
+        };
+        let Pat::Ident(pattern) = typed.pat.as_ref() else {
+            return Err(syn::Error::new(
+                typed.pat.span(),
+                "branch handler parameters must use simple identifier patterns",
+            ));
+        };
+        let ident = pattern.ident.clone();
+        let ty = typed.ty.clone();
+        wrapper_inputs.push(quote! { #typed });
+        wrapper_types.push(quote! { #ty });
+        call_arguments.push(quote! { #ident });
+    }
+    let extractor_bounds = wrapper_types.iter().map(|ty| {
+        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+    });
+    let extractor_bounds_install = wrapper_types.iter().map(|ty| {
+        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+    });
+
+    // Rename the first argument in the hidden implementation so its original
+    // type and documentation remain intact while the wrapper extracts through
+    // the branch marker.
+    if let Some(FnArg::Typed(first_mut)) = function.sig.inputs.first_mut() {
+        first_mut.pat = Box::new(syn::parse_quote!(#first_ident));
+    }
+
+    Ok(quote! {
+        #[doc(hidden)]
+        #function
+
+        #(#implementation_attributes)*
+        #[doc(hidden)]
+        async fn #handler_ident(
+            ::oxidebot::BranchArgs(__oxidebot_branch_args): ::oxidebot::BranchArgs<#marker>,
+            #(#wrapper_inputs),*
+        ) #return_type {
+            #implementation_ident(#(#call_arguments),*).await
+        }
+
+        #(#outer_attributes)*
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, Debug, Default)]
+        #visibility struct #feature_ident;
+
+        #(#implementation_attributes)*
+        impl #feature_ident {
+            #[must_use]
+            #visibility fn feature<S>(self) -> ::oxidebot::Feature<S>
+            where
+                S: ::core::marker::Send + ::core::marker::Sync + 'static,
+                #marker: ::oxidebot::CommandBranchTag<Arguments = #first_ty>,
+                #(#extractor_bounds,)*
+            {
+                ::oxidebot::Feature::command_branch(#marker, #handler_ident)
+            }
+        }
+
+        #(#implementation_attributes)*
+        impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
+        where
+            S: ::core::marker::Send + ::core::marker::Sync + 'static,
+            #marker: ::oxidebot::CommandBranchTag<Arguments = #first_ty>,
+            #(#extractor_bounds_install,)*
+        {
+            fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
+                <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
+                    self.feature(),
+                    module,
+                )
+            }
+        }
+    })
 }
 
 fn expand_command_function(
@@ -35,21 +178,25 @@ fn expand_command_function(
     } else {
         syn::parse::<LitStr>(attribute)?.value()
     };
-    let original_ident = function.sig.ident.clone();
+    let feature_ident = function.sig.ident.clone();
     let implementation_ident = syn::Ident::new(
-        &format!("__oxidebot_{}_implementation", original_ident),
-        original_ident.span(),
+        &format!("__oxidebot_{}_implementation", feature_ident),
+        feature_ident.span(),
+    );
+    let handler_ident = syn::Ident::new(
+        &format!("__oxidebot_{}_handler", feature_ident),
+        feature_ident.span(),
     );
     let spec_ident = syn::Ident::new(
-        &format!("{}_command", original_ident),
-        original_ident.span(),
+        &format!("{}_command", feature_ident),
+        feature_ident.span(),
     );
     let args_ident = syn::Ident::new(
         &format!(
             "__OxideBot{}Args",
-            to_pascal_case(&original_ident.to_string())
+            to_pascal_case(&feature_ident.to_string())
         ),
-        original_ident.span(),
+        feature_ident.span(),
     );
 
     let visibility = function.vis.clone();
@@ -68,6 +215,7 @@ fn expand_command_function(
 
     let mut command_fields = Vec::new();
     let mut wrapper_inputs = Vec::new();
+    let mut wrapper_types = Vec::new();
     let mut call_arguments = Vec::new();
 
     for argument in function.sig.inputs.iter_mut() {
@@ -94,6 +242,7 @@ fn expand_command_function(
             let mut wrapper = typed.clone();
             wrapper.attrs = other_attributes;
             wrapper_inputs.push(quote! { #wrapper });
+            wrapper_types.push(quote! { #ty });
             call_arguments.push(quote! { #ident });
         } else {
             command_fields.push(quote! {
@@ -120,6 +269,7 @@ fn expand_command_function(
     let args_input = if command_fields.is_empty() {
         quote! {}
     } else {
+        wrapper_types.insert(0, quote! { ::oxidebot::Args<#args_ident> });
         quote! { ::oxidebot::Args(__oxidebot_args): ::oxidebot::Args<#args_ident>, }
     };
     let command_builder = if command_fields.is_empty() {
@@ -127,6 +277,12 @@ fn expand_command_function(
     } else {
         quote! { ::oxidebot::command(#command_name).args::<#args_ident>() }
     };
+    let extractor_bounds = wrapper_types.iter().map(|ty| {
+        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+    });
+    let extractor_bounds_for_install = wrapper_types.iter().map(|ty| {
+        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+    });
 
     Ok(quote! {
         #args_declaration
@@ -134,18 +290,67 @@ fn expand_command_function(
         #[doc(hidden)]
         #function
 
-        #(#outer_attributes)*
-        #visibility async fn #original_ident(
+        #(#implementation_attributes)*
+        #[doc(hidden)]
+        async fn #handler_ident(
             #args_input
             #(#wrapper_inputs),*
         ) #return_type {
             #implementation_ident(#(#call_arguments),*).await
         }
 
+        #(#outer_attributes)*
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, Debug, Default)]
+        #visibility struct #feature_ident;
+
         #(#implementation_attributes)*
+        impl #feature_ident {
+            #[must_use]
+            #visibility fn command() -> ::oxidebot::Command {
+                #command_builder
+            }
+
+            #[must_use]
+            #visibility fn feature<S>(self) -> ::oxidebot::Feature<S>
+            where
+                S: ::core::marker::Send + ::core::marker::Sync + 'static,
+                #(#extractor_bounds,)*
+            {
+                ::oxidebot::Feature::command(Self::command(), #handler_ident)
+            }
+        }
+
+        #(#implementation_attributes)*
+        impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
+        where
+            S: ::core::marker::Send + ::core::marker::Sync + 'static,
+            #(#extractor_bounds_for_install,)*
+        {
+            fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
+                <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
+                    self.feature(),
+                    module,
+                )
+            }
+        }
+
+        #(#implementation_attributes)*
+        impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
+        where
+            S: ::core::marker::Send + ::core::marker::Sync + 'static,
+            #(#extractor_bounds_for_install,)*
+        {
+            fn into_feature(self) -> ::oxidebot::Feature<S> {
+                self.feature()
+            }
+        }
+
+        #(#implementation_attributes)*
+        #[deprecated(note = "use Module::add(the_command_feature) or the_command_feature.feature()")]
         #[must_use]
         #visibility fn #spec_ident() -> ::oxidebot::Command {
-            #command_builder
+            #feature_ident::command()
         }
     })
 }
@@ -180,8 +385,98 @@ pub fn derive_command_args(input: TokenStream) -> TokenStream {
     }
 }
 
-fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+#[proc_macro_derive(BotState, attributes(state))]
+pub fn derive_bot_state(input: TokenStream) -> TokenStream {
+    match expand_bot_state(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "BotState does not support generic root states",
+        ));
+    }
     let name = input.ident;
+    let Data::Struct(data) = input.data else {
+        return Err(syn::Error::new(
+            name.span(),
+            "BotState can only be derived for a struct",
+        ));
+    };
+    let Fields::Named(fields) = data.fields else {
+        return Err(syn::Error::new(
+            name.span(),
+            "BotState requires named fields",
+        ));
+    };
+    let mut implementations = Vec::new();
+    let mut selected_types = ::std::collections::HashSet::new();
+    for field in fields.named {
+        let selected = field.attrs.iter().any(|attribute| attribute.path().is_ident("state"));
+        if !selected {
+            continue;
+        }
+        let ident = field.ident.ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
+        let field_ty = field.ty;
+        let (selected_ty, body, selected_bound) = if let Some(inner) = type_argument(&field_ty, "Arc") {
+            (
+                inner.clone(),
+                quote! { ::std::sync::Arc::clone(&root.#ident) },
+                quote! { #inner: ::core::marker::Send + ::core::marker::Sync + 'static },
+            )
+        } else {
+            (
+                field_ty.clone(),
+                quote! { ::std::sync::Arc::new(root.#ident.clone()) },
+                quote! { #field_ty: ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static },
+            )
+        };
+        let key = selected_ty.to_token_stream().to_string();
+        if !selected_types.insert(key) {
+            return Err(syn::Error::new(
+                selected_ty.span(),
+                "BotState cannot expose two #[state] fields with the same selected type",
+            ));
+        }
+        implementations.push(quote! {
+            impl ::oxidebot::FromState<#name> for #selected_ty
+            where
+                #name: ::core::marker::Send + ::core::marker::Sync + 'static,
+                #selected_bound,
+            {
+                fn from_state(
+                    root: &::std::sync::Arc<#name>,
+                ) -> ::std::sync::Arc<Self> {
+                    #body
+                }
+            }
+        });
+    }
+    if implementations.is_empty() {
+        return Err(syn::Error::new(
+            name.span(),
+            "BotState needs at least one field annotated with #[state]",
+        ));
+    }
+    Ok(quote! { #(#implementations)* })
+}
+
+fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let visibility = input.vis.clone();
+    let name = input.ident;
+    let field_module = format_ident!(
+        "{}_fields",
+        ident_to_module_name(&name.to_string())
+    );
+    let field_visibility: syn::Visibility = if matches!(visibility, syn::Visibility::Inherited) {
+        syn::parse_quote!(pub(super))
+    } else {
+        syn::parse_quote!(pub)
+    };
     let Data::Struct(data) = input.data else {
         return Err(syn::Error::new(
             name.span(),
@@ -201,6 +496,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
     let mut schema_fields = Vec::new();
     let mut initializers = Vec::new();
+    let mut field_markers = Vec::new();
     let mut inferred_bounds = Vec::<syn::WherePredicate>::new();
 
     for field in fields.named {
@@ -271,6 +567,17 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             });
             continue;
         }
+        let marker_ident = format_ident!(
+            "{}",
+            to_pascal_case(rust_name.trim_start_matches("r#"))
+        );
+        field_markers.push(quote! {
+            #[derive(Clone, Copy, Debug, Default)]
+            #field_visibility struct #marker_ident;
+            impl ::oxidebot::CommandFieldTag for #marker_ident {
+                const NAME: &'static str = #argument_name;
+            }
+        });
         if action_is_count && !is_integer {
             return Err(syn::Error::new(
                 field.ty.span(),
@@ -496,6 +803,10 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
+        #visibility mod #field_module {
+            #(#field_markers)*
+        }
+
         impl #impl_generics ::oxidebot::CommandArgs for #name #type_generics #where_clause {
             fn schema() -> ::oxidebot::CommandSchema {
                 let mut schema = ::oxidebot::CommandSchema::new();

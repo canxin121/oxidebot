@@ -524,6 +524,7 @@ where
     pub output_middleware: Vec<Arc<dyn CommandOutputMiddleware<S>>>,
     pub delivery_middleware: Vec<Arc<dyn DeliveryMiddleware<S>>>,
     pub completers: HashMap<(CommandId, CommandFieldId), Arc<dyn DynamicCompleter<S>>>,
+    bots: Arc<RwLock<Option<BotDirectory>>>,
 }
 
 impl<S> Default for AuthoringRuntime<S>
@@ -541,6 +542,7 @@ where
             output_middleware: Vec::new(),
             delivery_middleware: Vec::new(),
             completers: HashMap::new(),
+            bots: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -551,6 +553,21 @@ where
 {
     pub async fn locale(&self, context: &Context<S>) -> Option<Arc<str>> {
         self.locale_resolver.resolve(context).await
+    }
+
+    pub(crate) fn attach_bots(&self, bots: BotDirectory) {
+        *self.bots.write().expect("authoring bot directory lock poisoned") = Some(bots);
+    }
+
+    pub(crate) fn detach_bots(&self) {
+        *self.bots.write().expect("authoring bot directory lock poisoned") = None;
+    }
+
+    pub(crate) fn bots(&self) -> Option<BotDirectory> {
+        self.bots
+            .read()
+            .expect("authoring bot directory lock poisoned")
+            .clone()
     }
 
     pub async fn render(
@@ -1065,12 +1082,22 @@ where
     }
 }
 
-pub trait CommandBranchTag: Send + Sync + 'static {
+pub trait CommandBranchTag: Send + Sync + Sized + 'static {
     type Command: crate::CommandTree;
     type Arguments: FromCommandMatch;
     const PATH: &'static [&'static str];
     const MATCH_DESCENDANTS: bool = false;
     const STRIP_PREFIX: usize = 0;
+
+    /// Binds this generated branch marker to its handler as one feature.
+    #[must_use]
+    fn handle<S, H, T>(self, handler: H) -> crate::Feature<S>
+    where
+        S: Send + Sync + 'static,
+        H: crate::IntoHandler<T, S>,
+    {
+        crate::Feature::command_branch(self, handler)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1196,6 +1223,15 @@ pub enum BotSelection {
 pub struct Address {
     pub target: MessageTarget,
     pub bot: BotSelection,
+}
+
+impl From<MessageTarget> for Address {
+    fn from(target: MessageTarget) -> Self {
+        Self {
+            target,
+            bot: BotSelection::Current,
+        }
+    }
 }
 
 impl Address {
