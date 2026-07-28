@@ -77,6 +77,24 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// Resource-conservative defaults suitable for small personal bots.
+    #[must_use]
+    pub fn eco() -> Self {
+        Self::for_profile(RuntimeProfile::Eco)
+    }
+
+    /// General-purpose defaults suitable for most applications.
+    #[must_use]
+    pub fn balanced() -> Self {
+        Self::for_profile(RuntimeProfile::Balanced)
+    }
+
+    /// Larger queues and concurrency for high-volume applications.
+    #[must_use]
+    pub fn throughput() -> Self {
+        Self::for_profile(RuntimeProfile::Throughput)
+    }
+
     #[must_use]
     pub fn for_profile(profile: RuntimeProfile) -> Self {
         let (items, bytes, shards, in_flight, frame_events, handler_replies, handler_timeout): (
@@ -152,7 +170,60 @@ impl RuntimeConfig {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), BuildError> {
+    /// Configures inbound frame and event admission without exposing unrelated
+    /// executor, command, or session settings at the call site.
+    #[must_use]
+    pub fn configure_ingress(
+        mut self,
+        configure: impl FnOnce(&mut IngressConfig<'_>),
+    ) -> Self {
+        configure(&mut IngressConfig { config: &mut self });
+        self
+    }
+
+    /// Configures handler execution and propagation limits.
+    #[must_use]
+    pub fn configure_execution(
+        mut self,
+        configure: impl FnOnce(&mut ExecutionConfig<'_>),
+    ) -> Self {
+        configure(&mut ExecutionConfig { config: &mut self });
+        self
+    }
+
+    /// Configures outbound platform API queues, retries, and deadlines.
+    #[must_use]
+    pub fn configure_commands(
+        mut self,
+        configure: impl FnOnce(&mut CommandRuntimeConfig<'_>),
+    ) -> Self {
+        configure(&mut CommandRuntimeConfig { config: &mut self });
+        self
+    }
+
+    /// Configures bounded dialogue/session storage and routing.
+    #[must_use]
+    pub fn configure_sessions(
+        mut self,
+        configure: impl FnOnce(&mut SessionRuntimeConfig<'_>),
+    ) -> Self {
+        configure(&mut SessionRuntimeConfig { config: &mut self });
+        self
+    }
+
+    /// Configures event deduplication and graceful shutdown.
+    #[must_use]
+    pub fn configure_resilience(
+        mut self,
+        configure: impl FnOnce(&mut ResilienceConfig<'_>),
+    ) -> Self {
+        configure(&mut ResilienceConfig { config: &mut self });
+        self
+    }
+
+    /// Validates all cross-field safety invariants before the application is
+    /// built. [`crate::OxideBot::build`] invokes this automatically.
+    pub fn validate(&self) -> Result<(), BuildError> {
         let budgets = [
             self.ingress,
             self.ingress_per_bot,
@@ -329,6 +400,207 @@ impl RuntimeConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Named ingress section used by [`RuntimeConfig::configure_ingress`].
+pub struct IngressConfig<'a> {
+    config: &'a mut RuntimeConfig,
+}
+
+impl IngressConfig<'_> {
+    pub fn global(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.ingress = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn per_bot(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.ingress_per_bot = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn max_frame_bytes(&mut self, bytes: usize) -> &mut Self {
+        self.config.max_frame_bytes = bytes;
+        self
+    }
+
+    pub fn max_frame_events(&mut self, events: usize) -> &mut Self {
+        self.config.max_frame_events = events;
+        self
+    }
+
+    pub fn max_event_bytes(&mut self, bytes: usize) -> &mut Self {
+        self.config.max_event_bytes = bytes;
+        self
+    }
+}
+
+/// Named execution section used by [`RuntimeConfig::configure_execution`].
+pub struct ExecutionConfig<'a> {
+    config: &'a mut RuntimeConfig,
+}
+
+impl ExecutionConfig<'_> {
+    pub fn global(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.executor = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn per_bot(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.executor_per_bot = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn overload(&mut self, policy: OverloadPolicy) -> &mut Self {
+        self.config.executor_overload = policy;
+        self
+    }
+
+    pub fn shards(&mut self, value: usize) -> &mut Self {
+        self.config.executor_shards = value;
+        self
+    }
+
+    pub fn in_flight_per_shard(&mut self, value: usize) -> &mut Self {
+        self.config.executor_in_flight_per_shard = value;
+        self
+    }
+
+    pub fn in_flight_per_bot(&mut self, value: usize) -> &mut Self {
+        self.config.executor_in_flight_per_bot = value;
+        self
+    }
+
+    pub fn max_replies(&mut self, value: usize) -> &mut Self {
+        self.config.max_handler_replies = value;
+        self
+    }
+
+    pub fn handler_timeout(&mut self, value: Option<Duration>) -> &mut Self {
+        self.config.handler_timeout = value;
+        self
+    }
+}
+
+/// Named outbound-command section used by
+/// [`RuntimeConfig::configure_commands`].
+pub struct CommandRuntimeConfig<'a> {
+    config: &'a mut RuntimeConfig,
+}
+
+impl CommandRuntimeConfig<'_> {
+    pub fn per_bot_queue(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.command = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn global_queue(&mut self, max_items: usize, max_bytes: usize) -> &mut Self {
+        self.config.global_command = QueueBudget::new(max_items, max_bytes);
+        self
+    }
+
+    pub fn max_payload_bytes(&mut self, bytes: usize) -> &mut Self {
+        self.config.max_command_bytes = bytes;
+        self
+    }
+
+    pub fn overload(&mut self, policy: OverloadPolicy) -> &mut Self {
+        self.config.command_overload = policy;
+        self
+    }
+
+    pub fn global_in_flight(&mut self, value: usize) -> &mut Self {
+        self.config.command_in_flight_global = value;
+        self
+    }
+
+    pub fn reserved_high_global(&mut self, value: usize) -> &mut Self {
+        self.config.command_in_flight_reserved_high_global = value;
+        self
+    }
+
+    pub fn per_bot_in_flight(&mut self, value: usize) -> &mut Self {
+        self.config.command_in_flight_per_bot = value;
+        self
+    }
+
+    pub fn reserved_high_per_bot(&mut self, value: usize) -> &mut Self {
+        self.config.command_in_flight_reserved_high_per_bot = value;
+        self
+    }
+
+    pub fn high_priority_burst(&mut self, value: usize) -> &mut Self {
+        self.config.command_high_priority_burst = value;
+        self
+    }
+
+    pub fn retries(&mut self, value: u8) -> &mut Self {
+        self.config.command_max_retries = value;
+        self
+    }
+
+    pub fn attempt_timeout(&mut self, value: Option<Duration>) -> &mut Self {
+        self.config.command_attempt_timeout = value;
+        self
+    }
+
+    pub fn total_timeout(&mut self, value: Option<Duration>) -> &mut Self {
+        self.config.command_total_timeout = value;
+        self
+    }
+
+    pub fn retry_backoff(&mut self, base: Duration, maximum: Duration) -> &mut Self {
+        self.config.command_retry_base = base;
+        self.config.command_retry_max = maximum;
+        self
+    }
+}
+
+/// Named dialogue/session section used by
+/// [`RuntimeConfig::configure_sessions`].
+pub struct SessionRuntimeConfig<'a> {
+    config: &'a mut RuntimeConfig,
+}
+
+impl SessionRuntimeConfig<'_> {
+    pub fn shards(&mut self, value: usize) -> &mut Self {
+        self.config.session_shards = value;
+        self
+    }
+
+    pub fn commands_per_shard(&mut self, value: usize) -> &mut Self {
+        self.config.session_commands_per_shard = value;
+        self
+    }
+
+    pub fn max_sessions(&mut self, value: usize) -> &mut Self {
+        self.config.max_sessions = value;
+        self
+    }
+
+    pub fn message_partition(&mut self, value: MessageExecutionPartition) -> &mut Self {
+        self.config.message_execution_partition = value;
+        self
+    }
+}
+
+/// Named resilience section used by
+/// [`RuntimeConfig::configure_resilience`].
+pub struct ResilienceConfig<'a> {
+    config: &'a mut RuntimeConfig,
+}
+
+impl ResilienceConfig<'_> {
+    pub fn dedupe(&mut self, capacity: usize, max_bytes: usize, ttl: Duration) -> &mut Self {
+        self.config.dedupe_capacity = capacity;
+        self.config.dedupe_max_bytes = max_bytes;
+        self.config.dedupe_ttl = ttl;
+        self
+    }
+
+    pub fn shutdown_grace(&mut self, value: Duration) -> &mut Self {
+        self.config.shutdown_grace = value;
+        self
     }
 }
 

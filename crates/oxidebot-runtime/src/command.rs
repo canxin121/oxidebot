@@ -9,7 +9,7 @@ use oxidebot_core::{
         message::{File, Message, MessageSegment},
         user::User,
     },
-    BotIdentity, FormValue,
+    BotIdentity, FormValue, TemplateValue, TranslationCatalog,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -863,6 +863,28 @@ impl Command {
             }
         }
         Some(keys)
+    }
+
+    /// Matches one canonical message without runtime-added shortcuts. This is
+    /// useful for parser tools and focused command tests that do not need to
+    /// start the full runtime.
+    pub fn match_message(
+        &self,
+        message: &Message,
+    ) -> Result<Option<CommandMatch>, CommandParseError> {
+        self.match_message_with_shortcuts(message, &[])
+    }
+
+    /// Matches and parses one canonical message, returning a structured
+    /// command result or a precise parse error.
+    pub fn parse_message(&self, message: &Message) -> Result<CommandMatch, CommandParseError> {
+        let matched = self
+            .match_message(message)?
+            .ok_or_else(|| CommandParseError::NotMatched {
+                command: Arc::clone(&self.name),
+            })?;
+        let parsed = matched.parse_active()?;
+        Ok(matched.with_parsed(parsed))
     }
 
     pub(crate) fn match_message_with_shortcuts(
@@ -2939,11 +2961,23 @@ where
 /// with the platform menu `BotCommand` model from `oxidebot-core`.
 pub trait CommandTree: FromCommandMatch {
     fn command() -> Command;
+
+    /// Defines and binds the complete typed command tree in one expression.
+    #[must_use]
+    fn feature<S, H, T>(handler: H) -> crate::Feature<S>
+    where
+        S: Send + Sync + 'static,
+        H: crate::IntoHandler<T, S>,
+    {
+        crate::Feature::command(Self::command(), handler)
+    }
 }
 
 /// Command syntax and type conversion failures.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CommandParseError {
+    #[error("message did not match command `{command}`")]
+    NotMatched { command: Arc<str> },
     #[error("missing required subcommand; expected one of: {choices}")]
     MissingSubcommand { choices: Arc<str> },
     #[error("unknown subcommand `{value}`{suggestion}; expected one of: {choices}")]
@@ -3032,6 +3066,7 @@ impl CommandParseError {
             return self.to_string();
         }
         match self {
+            Self::NotMatched { command } => format!("消息没有匹配命令 `{command}`"),
             Self::MissingSubcommand { choices } => {
                 format!("缺少子命令；可用子命令：{choices}")
             }
@@ -3649,6 +3684,88 @@ impl CommandRenderer for DefaultCommandRenderer {
             }
             CommandOutput::Message(message) => message.clone(),
         }
+    }
+}
+
+/// Resource-backed renderer that lets applications wrap or replace the
+/// framework's structured command output with normal message templates.
+/// Missing or invalid resource entries fall back to [`DefaultCommandRenderer`]
+/// instead of making help/error delivery fallible.
+#[derive(Clone, Debug)]
+pub struct CatalogCommandRenderer {
+    catalog: TranslationCatalog,
+    prefix: Arc<str>,
+}
+
+impl CatalogCommandRenderer {
+    #[must_use]
+    pub fn new(catalog: TranslationCatalog) -> Self {
+        Self {
+            catalog,
+            prefix: Arc::from("oxidebot.command"),
+        }
+    }
+
+    #[must_use]
+    pub fn prefix(mut self, value: impl Into<Arc<str>>) -> Self {
+        self.prefix = value.into();
+        self
+    }
+
+    fn key(&self, suffix: &str) -> String {
+        format!("{}.{}", self.prefix.trim_end_matches('.'), suffix)
+    }
+}
+
+impl CommandRenderer for CatalogCommandRenderer {
+    fn render(&self, output: &CommandOutput, locale: Option<&str>) -> Message {
+        if let CommandOutput::Message(message) = output {
+            return message.clone();
+        }
+        let fallback = DefaultCommandRenderer.render(output, locale);
+        let (suffix, mut values) = match output {
+            CommandOutput::Catalog { .. } => ("catalog", BTreeMap::new()),
+            CommandOutput::Help {
+                command,
+                branch_names,
+            } => {
+                let mut values = BTreeMap::new();
+                values.insert(Arc::from("command"), TemplateValue::text(command.name()));
+                values.insert(
+                    Arc::from("usage"),
+                    TemplateValue::text(command.usage_for(branch_names)),
+                );
+                ("help", values)
+            }
+            CommandOutput::NotFound { query, .. } => {
+                let mut values = BTreeMap::new();
+                values.insert(Arc::from("query"), TemplateValue::text(query.as_ref()));
+                ("not_found", values)
+            }
+            CommandOutput::ParseError {
+                command,
+                branch_names,
+                error,
+            } => {
+                let mut values = BTreeMap::new();
+                values.insert(Arc::from("command"), TemplateValue::text(command.name()));
+                values.insert(
+                    Arc::from("usage"),
+                    TemplateValue::text(command.usage_for(branch_names)),
+                );
+                values.insert(
+                    Arc::from("error"),
+                    TemplateValue::text(error.localized_message(locale)),
+                );
+                ("parse_error", values)
+            }
+            CommandOutput::Suggestions { .. } => ("suggestions", BTreeMap::new()),
+            CommandOutput::Message(_) => unreachable!(),
+        };
+        values.insert(Arc::from("body"), TemplateValue::Message(fallback.clone()));
+        self.catalog
+            .render(locale, &self.key(suffix), &values)
+            .unwrap_or(fallback)
     }
 }
 

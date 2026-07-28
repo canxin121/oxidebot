@@ -39,7 +39,6 @@ where
     completers: HashMap<(CommandId, CommandFieldId), Arc<dyn DynamicCompleter<S>>>,
 }
 
-
 /// One Bot feature with all of its local configuration kept together.
 ///
 /// A feature represents one command, event, interaction, or native handler plus
@@ -128,6 +127,64 @@ pub trait FeatureExt: Sized {
         Self: GeneratedFeature<S>,
     {
         self.into_feature().for_bot(bot)
+    }
+
+    fn block<S>(self, block: bool) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().block(block)
+    }
+
+    fn continue_after<S>(self) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().continue_after()
+    }
+
+    fn stop_after<S>(self) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().stop_after()
+    }
+
+    fn shortcut<S>(self, shortcut: Shortcut) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().shortcut(shortcut)
+    }
+
+    fn runtime_shortcuts<S>(self) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().runtime_shortcuts()
+    }
+
+    fn completion<S>(self, completion: CompletionConfig) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+    {
+        self.into_feature().completion(completion)
+    }
+
+    fn complete<S, F, C>(self, field: F, provider: C) -> Feature<S>
+    where
+        S: Send + Sync + 'static,
+        Self: GeneratedFeature<S>,
+        F: CommandFieldTag,
+        C: DynamicCompleter<S>,
+    {
+        self.into_feature().complete(field, provider)
     }
 }
 
@@ -436,7 +493,6 @@ impl Command {
     }
 }
 
-
 #[must_use]
 pub fn message_feature<S, H, T>(handler: H) -> Feature<S>
 where
@@ -743,7 +799,6 @@ where
             }
         }))
     }
-
 
     pub(crate) fn insert_completer<C>(
         &mut self,

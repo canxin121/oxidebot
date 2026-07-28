@@ -8,21 +8,23 @@ use crate::{
     router::{CompiledRouter, RouterLimits, RouterRuntime},
     session::{SessionDelivery, SessionRegistry},
     Adapter, AuthoringRuntime, BotDescriptor, BotDirectory, BotServices, BuildError,
-    CommandCatalog, CommandFieldId, CommandId, CommandMiddleware, CommandOutputMiddleware,
-    CommandRegistry, CommandRenderer, CommandRewriter, DeliveryMiddleware, DynamicCompleter,
-    Filter, LocaleResolver, MessageNormalizer, MetricsHandle, Result, RuntimeConfig, RuntimeError,
-    RuntimeMetrics, RuntimeProfile, Service, ServiceContext, ServiceError, ShutdownSignal,
+    CatalogCommandRenderer, CommandCatalog, CommandFieldId, CommandId, CommandMiddleware,
+    CommandOutputMiddleware, CommandRegistry, CommandRenderer, CommandRewriter,
+    DeliveryMiddleware, DynamicCompleter, Filter, LocaleResolver, MessageNormalizer,
+    MetricsHandle, Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service,
+    ServiceContext, ServiceError, ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
 use oxidebot_core::{
     application::{CommandDefinition, CommandOption},
-    BotCapabilities, BotIdentity, BotSlot, EventId,
+    BotCapabilities, BotIdentity, BotSlot, EventId, TranslationCatalog, TranslationError,
 };
 use std::{
     collections::{HashSet, VecDeque},
     future::{pending, Future},
     panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
     sync::Arc,
     time::Instant,
 };
@@ -124,6 +126,54 @@ where
         self
     }
 
+    /// Installs the bounded message-template catalog used by the `I18n`
+    /// extractor and application-authored localized messages.
+    #[must_use]
+    pub fn translations(mut self, catalog: TranslationCatalog) -> Self {
+        self.authoring.translations = Some(catalog);
+        self
+    }
+
+    /// Installs one catalog for application messages and command output. The
+    /// resource-backed renderer falls back to the built-in renderer when an
+    /// `oxidebot.command.*` template is absent.
+    #[must_use]
+    pub fn localization(mut self, catalog: TranslationCatalog) -> Self {
+        self.authoring.renderer = Arc::new(CatalogCommandRenderer::new(catalog.clone()));
+        self.authoring.translations = Some(catalog);
+        self
+    }
+
+    /// Loads bounded structure-preserving message translations from a
+    /// directory containing `<locale>.json` files.
+    pub fn translations_from_dir(
+        self,
+        directory: impl AsRef<Path>,
+        default_locale: impl Into<Arc<str>>,
+        capacity: usize,
+    ) -> std::result::Result<Self, TranslationError> {
+        Ok(self.translations(TranslationCatalog::from_dir(
+            capacity,
+            default_locale,
+            directory,
+        )?))
+    }
+
+    /// Loads `<locale>.json` resources and enables both `I18n` messages and
+    /// resource-backed command rendering.
+    pub fn localization_from_dir(
+        self,
+        directory: impl AsRef<Path>,
+        default_locale: impl Into<Arc<str>>,
+        capacity: usize,
+    ) -> std::result::Result<Self, TranslationError> {
+        Ok(self.localization(TranslationCatalog::from_dir(
+            capacity,
+            default_locale,
+            directory,
+        )?))
+    }
+
     #[must_use]
     pub fn command_registry(mut self, registry: CommandRegistry) -> Self {
         self.authoring.registry = registry;
@@ -177,6 +227,7 @@ where
         self
     }
 
+    #[deprecated(note = "attach dynamic completion to Feature::complete or #[arg(complete = ...)]")]
     #[must_use]
     pub fn completer<C>(mut self, command: CommandId, field: CommandFieldId, completer: C) -> Self
     where
@@ -190,6 +241,7 @@ where
 
     /// Registers a dynamic completion provider by branch and field name while
     /// resolving the stable IDs from the canonical command tree.
+    #[deprecated(note = "attach dynamic completion to Feature::complete or #[arg(complete = ...)]")]
     pub fn completer_for<C>(
         mut self,
         command: &crate::Command,

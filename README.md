@@ -23,82 +23,89 @@ There is no reduced “simple event”, no `RichEvent`, no second API, and no
 compatibility event bus. Every handler reads the same shared 0.1.8 event that
 adapters decode.
 
-## A complete small bot
+## Run a bot immediately
+
+The workspace now includes a real stdin/stdout adapter and a copyable example:
+
+```bash
+cargo run -p oxidebot-console-example
+```
+
+Then type `/ping`, `/echo hello`, or `/help` in the terminal. The complete
+example is in [`examples/console-bot`](examples/console-bot), and the adapter is
+published as the independent `oxidebot-adapter-console` crate inside this
+workspace.
+
+A minimal application is deliberately small:
 
 ```rust
 use oxidebot::prelude::*;
+use oxidebot_adapter_console::ConsoleAdapter;
 
+#[oxidebot::command("ping")]
+/// Check whether the bot is alive.
 async fn ping() -> &'static str {
     "pong"
 }
 
+#[oxidebot::command("echo")]
+async fn echo(
+    #[arg(rest, required = true, prompt = "What should I echo?")]
+    content: Vec<String>,
+) -> String {
+    content.join(" ")
+}
+
+#[tokio::main]
+async fn main() -> oxidebot::Result<()> {
+    OxideBot::new()
+        .adapter(ConsoleAdapter::development())
+        .add(ping)
+        .add(echo)
+        .include(Module::new().help())
+        .run()
+        .await
+}
+```
+
+`#[oxidebot::command]` produces one generated feature value containing the
+command schema, handler, help metadata, platform-command definition, and any
+field-local completers. It is installed once with `.add(ping)`; there is no
+separate `ping_command()`/handler pairing to keep synchronized.
+
+For reusable command argument types, derive `CommandArgs` and attach the command
+and handler as one locally configurable feature:
+
+```rust
 #[derive(Debug, CommandArgs)]
-#[command(
-    description = "Search the knowledge base",
-    category = "knowledge",
-    alias = "find"
-)]
+#[command(description = "Search the knowledge base", alias = "find")]
 struct SearchArgs {
-    /// What to search for.
     #[arg(prompt = "What should I search for?")]
     query: String,
 
-    /// Maximum number of results.
-    #[arg(long, short = 'n', default = 10_u32)]
+    #[arg(long, short = 'n', default = 10_u32, min = 1.0, max = 100.0)]
     limit: u32,
-
-    /// Include diagnostic details.
-    #[arg(long, short = 'v')]
-    verbose: bool,
-
-    /// Optional labels after the query.
-    #[arg(rest)]
-    labels: Vec<String>,
-}
-
-#[derive(Clone, Default)]
-struct AppState;
-
-impl AppState {
-    async fn search(
-        &self,
-        user_id: String,
-        query: String,
-        limit: u32,
-        verbose: bool,
-        labels: Vec<String>,
-    ) -> String {
-        format!(
-            "user={user_id} query={query} limit={limit} verbose={verbose} labels={labels:?}",
-        )
-    }
 }
 
 async fn search(
     Args(args): Args<SearchArgs>,
     State(state): State<AppState>,
     Sender(user): Sender,
-) -> String {
+) -> HandlerResult<String> {
     state
-        .search(user.id, args.query, args.limit, args.verbose, args.labels)
+        .search(user.id, args.query, args.limit)
         .await
+        .internal("search knowledge base")
 }
 
-fn features() -> Module<AppState> {
-    Module::new()
-        .command(
-            command("ping").description("Check whether the bot is alive"),
-            ping,
-        )
-        .command(SearchArgs::command("search"), search)
-        .help()
-}
+let search = SearchArgs::feature("search", search)
+    .guard(can_search)
+    .before(audit_start)
+    .after(record_metrics);
 
-OxideBot::with_state(AppState)
-    .adapter(adapter)
-    .include(features())
-    .run()
-    .await?;
+let features = Module::new()
+    .add(search)
+    .help();
 ```
 
 Handlers may return:
@@ -148,9 +155,33 @@ Built-in extractors include:
 
 Extraction is synchronous, monomorphized, and runs only after a handler has
 matched and command validation/completion has succeeded. There is no
-asynchronous `FromRequest`, dynamic extension map, or substate conversion
-registry in the hot path. A custom domain extractor is a small implementation
-of `Extract<S>`:
+asynchronous `FromRequest`, dynamic extension map, or runtime substate registry
+in the hot path.
+
+Application services can be exposed statically with `BotState`:
+
+```rust
+#[derive(BotState)]
+struct AppState {
+    #[state]
+    projects: ProjectStore,
+
+    #[state]
+    database: std::sync::Arc<Database>,
+}
+
+async fn list(
+    State(projects): State<ProjectStore>,
+    State(database): State<Database>,
+) -> HandlerResult<String> {
+    // Both values are selected at compile time from the root AppState.
+    let count = projects.count(database.as_ref()).await.internal("count projects")?;
+    Ok(format!("{count} projects"))
+}
+```
+
+For event-derived domain values, a custom extractor remains a small explicit
+implementation:
 
 ```rust
 struct ProjectId(String);
@@ -205,7 +236,7 @@ async fn deploy(Args(args): Args<DeployArgs>) -> String {
     format!("deploying {}", args.service)
 }
 
-let deploy_command = DeployArgs::command("deploy").completion(
+let deploy = DeployArgs::feature("deploy", deploy).completion(
     CompletionConfig::new()
         .timeout(std::time::Duration::from_secs(60))
         .max_rounds(3)
@@ -238,7 +269,9 @@ async fn todo(Args(command): Args<TodoCommand>) -> String {
     }
 }
 
-let module = Module::new().command(TodoCommand::command(), todo).help();
+let module = Module::new()
+    .add(TodoCommand::feature(todo))
+    .help();
 ```
 
 Only a missing required argument can enter interactive dialogue recovery.
@@ -255,15 +288,23 @@ A `Module<S>` is a reusable collection of bot behavior, not a URL tree:
 ```rust
 fn account_module() -> Module<AppState> {
     Module::new()
-        .command(command("account show"), show_account)
-        .command(command("account delete"), delete_account)
+        .add(command("account show").handle(show_account))
+        .add(command("account delete").handle(delete_account))
 }
 
 fn moderation_module() -> Module<AppState> {
     Module::new()
-        .command(command("admin ban"), ban_member)
-        .command(command("admin mute"), mute_member)
-        .guard(admin_only)
+        .add(
+            command("admin ban")
+                .handle(ban_member)
+                .guard(admin_only)
+                .before(audit_start),
+        )
+        .add(
+            command("admin mute")
+                .handle(mute_member)
+                .guard(admin_only),
+        )
 }
 
 let features = Module::new()
@@ -348,9 +389,12 @@ let equivalent = message![
 ];
 ```
 
-Rich and interactive content uses the same value:
+Rich and interactive content uses the same value. Import the focused message
+prelude when constructing advanced layouts:
 
 ```rust
+use oxidebot::message::prelude::*;
+
 let message = Message::rich_text(
     RichText::plain("Deployment complete")
         .span(0..10, TextStyle::Bold),
@@ -368,40 +412,95 @@ explicit degradations. `Strict` refuses unsupported semantics; `Auto`,
 `ToText`, `Flatten`, and `DropUnsupported` remain observable through
 `DeliveryReport` rather than silently losing content.
 
-Returning a message is the shortest path. Use `Reply` when the workflow needs
-the platform result immediately:
+Returning a message is the shortest path. Use `Messenger` when the workflow
+needs a platform result immediately or an explicit proactive destination:
 
 ```rust
-async fn generate_report(reply: Reply) -> HandlerResult<()> {
-    let progress = reply.send("Generating report…").await?;
-    create_report().await.map_err(|error| HandlerError::internal(error.to_string()))?;
+use oxidebot::delivery::prelude::Address;
+
+async fn generate_report(messenger: Messenger) -> HandlerResult<()> {
+    let progress = messenger.reply("Generating report…").await?;
+    create_report().await.internal("create report")?;
     progress.edit("Report complete").await?;
     progress.react("✅").await?;
+
+    messenger
+        .to(Address::group("operations"))?
+        .send("A report was generated")
+        .await?;
     Ok(())
 }
 ```
 
-A `Receipt` is produced only by a send operation. It tracks every physical
+`Reply` remains the smaller current-conversation primitive and low-level
+escape hatch. A `Receipt` is produced only by a send operation. It tracks every physical
 message ID returned for one logical send and can edit, delete, react to, or
 delay-delete all of them. It is not used as an ambiguous handle for the
 incoming message.
 
-## Bounded dialogues
+## Bounded dialogues and typed forms
+
+One-off questions are retryable and validated without a hand-written loop:
 
 ```rust
 async fn setup(dialogue: Dialogue) -> HandlerResult<String> {
-    let name = dialogue.ask_text("Project name?").await?;
-    let workers: usize = dialogue.ask("Worker count?").await?;
-    let enabled = dialogue.confirm("Enable it now?").await?;
+    let workers = dialogue
+        .named("project-setup")
+        .question::<usize>("Worker count?")
+        .attempts(3)
+        .error("Enter a number between 1 and 64.")
+        .validate(|value| (1..=64).contains(value))
+        .await?;
 
-    Ok(format!("{name}: workers={workers}, enabled={enabled}"))
+    let environment = dialogue
+        .choose(
+            "Environment?",
+            [("Development", "dev"), ("Production", "prod")],
+        )
+        .await?;
+
+    Ok(format!("workers={workers} environment={environment}"))
 }
 ```
 
-`Dialogue` uses the existing bounded session registry and exact bot,
-conversation, actor, and namespace keys. It supports custom timeouts,
-consume-versus-tap policy, typed parsing, confirmation, choices, and complete
-reply events.
+Reusable flows can be declared once:
+
+```rust
+#[derive(DialogueForm)]
+struct ProjectSetup {
+    #[dialogue(prompt = "Project name?", attempts = 3)]
+    name: String,
+
+    #[dialogue(
+        prompt = "Environment?",
+        choice = "Development=dev",
+        choice = "Production=prod"
+    )]
+    environment: String,
+
+    #[dialogue(prompt = "Worker count?", attempts = 3, validate = valid_workers)]
+    workers: usize,
+
+    #[dialogue(prompt = "Create the project?", confirm)]
+    confirmed: bool,
+}
+
+fn valid_workers(value: &usize) -> Result<(), &'static str> {
+    (1..=64)
+        .contains(value)
+        .then_some(())
+        .ok_or("worker count must be between 1 and 64")
+}
+
+async fn wizard(dialogue: Dialogue) -> HandlerResult<String> {
+    let setup = dialogue.named("project-setup").form::<ProjectSetup>().await?;
+    Ok(format!("{}: {} workers", setup.name, setup.workers))
+}
+```
+
+Choice prompts carry buttons in the unified message IR and retain numbered text
+fallbacks for platforms without components. Dialogues use the existing bounded
+session registry and exact bot, conversation, actor, and namespace keys.
 
 ## Alconna-inspired authoring capabilities
 
@@ -418,7 +517,8 @@ canonical parser:
 let roll = RollArgs::command("roll")
     .shortcut(Shortcut::literal("掷骰子", "/roll 1d6"))
     .shortcut(
-        Shortcut::regex(r"^掷(?P<count>\\d+)个骰子$", "/roll {count}d6")?
+        Shortcut::regex(r"^掷(?P<count>\d+)个骰子$", "/roll {count}d6")
+            .expect("valid shortcut pattern")
             .humanized("掷 N 个骰子"),
     );
 ```
@@ -447,18 +547,23 @@ Large command trees do not need one giant `match` expression. The derive macro
 generates branch marker types that reuse the already parsed `CommandMatch`:
 
 ```rust
+#[oxidebot::branch(todo_command_branches::Add)]
 async fn add(
-    BranchArgs(args): BranchArgs<todo_command::Add>,
+    args: AddTodoArgs,
     State(state): State<AppState>,
 ) -> HandlerResult<Message> {
-    // `args` is AddTodoArgs; no second parse occurs.
+    // `args` is taken from the already parsed CommandMatch.
     todo_service::add(&state, args).await
 }
 
+#[oxidebot::branch(todo_command_branches::List, unit)]
+async fn list(State(state): State<AppState>) -> HandlerResult<Message> {
+    todo_service::list(&state).await
+}
+
 let todo = Module::new()
-    .command_branch(todo_command::Add, add)
-    .command_branch(todo_command::Done, done)
-    .command_branch(todo_command::List, list);
+    .add(add)
+    .add(list);
 ```
 
 Small commands may be generated directly from a function signature:
@@ -473,43 +578,75 @@ async fn echo(#[arg(rest)] content: Vec<String>) -> String {
 The attribute macro only treats command-value parameters as schema fields;
 normal `Extract<S>` parameters remain ordinary handler dependencies.
 
-### Dynamic completion
-
-Static choices, command branches, options, and usage are generated from the
-command IR. Fields that depend on application data can attach an asynchronous,
-bounded provider by stable field ID:
+### Dynamic completion next to the owning feature
 
 ```rust
-let deploy = DeployCommand::command();
-let app = OxideBot::with_state(state).completer_for(
-    &deploy,
-    &["start"],
-    "project",
-    |context, input: CompletionInput| async move {
-        let projects = context.state().projects.search(input.partial.as_ref()).await?;
-        let replace = input.replace;
-        let field = input.field;
-        Ok(projects
-            .into_iter()
-            .take(input.limit)
-            .map(|project| {
-                CompletionItem::new(
-                    project.id.to_string(),
-                    CompletionKind::Choice,
-                    replace,
-                )
-                .description(project.name)
-                .field(field)
-            })
-            .collect())
-    },
-)?;
+use oxidebot::commands::prelude::{CompletionInput, CompletionItem, CompletionKind};
+```
+
+Static choices, command branches, options, and usage are generated from the
+command IR. A `CommandArgs` derive also generates stable field marker types, so
+dynamic providers no longer use a command reference, string branch path, and
+string field name in a distant application builder:
+
+```rust
+#[oxidebot::completer]
+async fn complete_projects(
+    context: Context<AppState>,
+    input: CompletionInput,
+) -> HandlerResult<Vec<CompletionItem>> {
+    let projects = context
+        .state()
+        .projects
+        .search(input.partial.as_ref())
+        .await
+        .internal("complete projects")?;
+
+    Ok(projects
+        .into_iter()
+        .take(input.limit)
+        .map(|project| {
+            CompletionItem::new(
+                project.id.to_string(),
+                CompletionKind::Choice,
+                input.replace,
+            )
+            .description(project.name)
+            .field(input.field)
+        })
+        .collect())
+}
+
+#[derive(CommandArgs)]
+struct ProjectDeployArgs {
+    #[arg(complete = complete_projects, prompt = "Which project?")]
+    project: ProjectId,
+}
+
+let deploy = ProjectDeployArgs::feature("deploy", deploy_project)
+    .completion(CompletionConfig::new().max_rounds(3));
+
+let module = Module::new().add(deploy);
+```
+
+For a function-signature command, the provider stays directly on the field:
+
+```rust
+#[oxidebot::command("deploy")]
+async fn deploy(
+    #[arg(complete = complete_projects)] project: ProjectId,
+    State(state): State<AppState>,
+) -> HandlerResult<Message> {
+    // ...
+}
+
+let module = Module::new().add(deploy);
 ```
 
 The same provider serves text suggestions, bounded interactive completion, and
 platform-native autocomplete. It runs only on the completion cold path.
 
-### Configurable output, locale, and translations
+### Configurable output, locale, and resource translations
 
 Help, usage, parse errors, shortcut output, and suggestions first become a
 structured `CommandOutput`. Applications may install a renderer and locale
@@ -522,21 +659,49 @@ OxideBot::with_state(state)
     .include(language_module());
 ```
 
-`TranslationCatalog` and `LocalizedMessage` render structure-preserving message
-templates, so translated values may contain mentions, files, or other canonical
-segments instead of being flattened into text:
+For the common resource-file path, place one JSON object per locale:
 
-```rust
-let template = message_template!("欢迎 {user:mention}，报告：{report:file}");
-let message = template.render(&message_args! {
-    user => TemplateValue::mention(user.id),
-    report => report_file,
-})?;
+```text
+locales/
+  en-US.json
+  zh-CN.json
 ```
 
-`CommandOverlay` is a data-only way to adjust descriptions, translations,
-aliases, prefixes, visibility, and shortcuts regardless of declaration order.
-It never loads executable code from configuration.
+```json
+{
+  "deploy.started": "Deploying {project:text}…",
+  "deploy.finished": "Deployment {project:text} completed",
+  "oxidebot.command.parse_error": "{error:text}\n\nUsage: {usage:text}"
+}
+```
+
+Then install application messages and resource-backed command output together:
+
+```rust
+let app = OxideBot::with_state(state)
+    .localization_from_dir("locales", "en-US", 1_024)
+    .expect("translation resources must be valid");
+```
+
+Handlers request the resolved locale and catalog through one extractor:
+
+```rust
+async fn deploy(
+    i18n: I18n,
+    Args(args): Args<DeployArgs>,
+) -> HandlerResult<Message> {
+    i18n
+        .message("deploy.finished")
+        .arg("project", args.project)
+        .await
+}
+```
+
+Translation values are structure-preserving `MessageTemplate`s, so placeholders
+may produce mentions, files, complete messages, or other canonical segments
+instead of being flattened to text. `CommandOverlay` remains the data-only way
+to adjust command descriptions, aliases, prefixes, visibility, and shortcuts;
+it never loads executable code from configuration.
 
 ### Narrow authoring extensions
 
@@ -566,6 +731,8 @@ global mutable plugin hooks.
 Proactive sends use an explicit `Address` and deterministic bot selection:
 
 ```rust
+use oxidebot::delivery::prelude::{Address, BotSelection, FallbackPolicy};
+
 bot_directory
     .send_address(
         Address::group("ops")
@@ -590,17 +757,23 @@ application services rather than hidden framework I/O.
 The facade includes ordinary reusable modules:
 
 ```rust
+use oxidebot::standard::{echo_module, language_module, AdminTools};
+
 let features = Module::new()
     .include(echo_module())
     .include(language_module())
-    .include(command_admin_module())
-    .include(shortcut_admin_module())
-    .include(diagnostics_module());
+    .include(
+        AdminTools::new()
+            .prefix("oxidebot")
+            .protected(admin_only),
+    );
 ```
 
-Administrative modules must be wrapped in the application's own permission
-guard. Command enable/disable changes update help, completion, dispatch, and
-platform-native command publication through the same bounded registry.
+`AdminTools` can independently enable command management, runtime shortcuts,
+and diagnostics. One application guard protects the complete tool set without
+manually creating several tiny modules. Command enable/disable changes update
+help, completion, dispatch, and platform-native publication through the same
+bounded registry.
 
 ## Complete event and API access
 
@@ -617,7 +790,7 @@ async fn joined(
     )
     .await
     .map(|_| ())
-    .map_err(|error| HandlerError::Api(error.to_string()))
+    .api_context("welcome new group member")
 }
 ```
 
@@ -637,6 +810,20 @@ the runtime. Only an explicitly user-facing error is sent:
 return Err(HandlerError::user("The requested project does not exist."));
 ```
 
+Safe result extensions keep ordinary business code concise without restoring
+unsafe `Display`-to-chat conversion:
+
+```rust
+let project = repository
+    .find(project_id)
+    .await
+    .internal("load project")?;
+
+bot.delete_message(message_id)
+    .await
+    .api_context("delete progress message")?;
+```
+
 Extractor failures are also safe, user-facing errors because they describe a
 handler contract such as “this command requires a group chat” or invalid typed
 arguments. Their replies inherit the matched handler kind's normal propagation
@@ -649,8 +836,8 @@ projects practical:
 
 - `Shortcut` and `CommandRewriter<S>` for bounded literal, regex, legacy, or
   natural-language command rewrites;
-- `Module::command_branch(marker, handler)` and `BranchArgs<Marker>` for
-  separately implemented command-tree branches without reparsing;
+- `#[oxidebot::branch(...)]` for separately implemented command-tree
+  branches without exposing marker plumbing or reparsing;
 - dynamic completion providers shared by text `?` completion, dialogue
   recovery, and platform-native autocomplete;
 - `#[oxidebot::command("name")]` for small function-signature commands;
@@ -667,6 +854,118 @@ projects practical:
 These are all ordinary Rust values or traits attached before `build`; none of
 them introduces a second plugin runtime or a global mutable extension table.
 See [the domain-native Alconna design notes](docs/ALCONNA-DESIGN.md).
+
+## Concise deterministic tests
+
+The high-level test DSL covers ordinary commands and multi-turn dialogues while
+remaining backed by the same finite `ScriptedAdapter`:
+
+```rust
+use oxidebot_testkit::BotTest;
+
+BotTest::feature(ping)
+    .message("/ping")
+    .expect_reply("pong")
+    .run()
+    .await?;
+```
+
+```rust
+BotTest::empty()
+    .add(deploy)
+    .message("/deploy")
+    .expect_reply("Which project?")
+    .message("oxidebot")
+    .expect_reply_contains("deployment started")
+    .run()
+    .await?;
+```
+
+Command parsing can be tested without starting adapters, queues, or workers:
+
+```rust
+let args = oxidebot_testkit::command_test::<DeployArgs>("deploy")
+    .parse("/deploy oxidebot --environment prod")?;
+```
+
+The lower-level `TestFrame`, `ScriptedAdapter`, and `ScriptedApi` remain
+available for admission, retry, scheduling, and byte-budget tests.
+
+## Focused imports
+
+`oxidebot::prelude::*` now contains the normal application path rather than the
+entire framework. Specialized work can opt into focused preludes:
+
+```rust
+use oxidebot::commands::prelude::*;
+use oxidebot::message::prelude::*;
+use oxidebot::delivery::prelude::*;
+use oxidebot::adapter::prelude::*;
+use oxidebot::standard::*;
+```
+
+Framework and migration work that intentionally needs every public type may use
+`oxidebot::all::*`.
+
+## Grouped runtime configuration
+
+Profiles remain the normal choice. When one area needs tuning, grouped builders
+avoid editing a large flat structure:
+
+```rust
+let config = RuntimeConfig::balanced()
+    .configure_ingress(|ingress| {
+        ingress
+            .global(1_024, 32 * 1024 * 1024)
+            .per_bot(256, 8 * 1024 * 1024)
+            .max_frame_events(128);
+    })
+    .configure_execution(|execution| {
+        execution
+            .shards(8)
+            .in_flight_per_shard(32)
+            .handler_timeout(Some(std::time::Duration::from_secs(30)));
+    })
+    .configure_commands(|commands| {
+        commands
+            .retries(3)
+            .attempt_timeout(Some(std::time::Duration::from_secs(10)))
+            .total_timeout(Some(std::time::Duration::from_secs(30)));
+    });
+
+config.validate()?;
+```
+
+## Adapter authoring shortcut
+
+Simple transports no longer need to implement pre-decode indexing and complete
+event construction manually. They may submit the canonical message directly:
+
+```rust
+context
+    .submit_text(
+        event_id,
+        channel_id,
+        user_id,
+        message_id,
+        text,
+    )
+    .await?;
+```
+
+For richer sender/group metadata, build a `MessageFrame`:
+
+```rust
+let frame = MessageFrameBuilder::new(event_id, channel_id, user.id.clone(), message)
+    .sender(user)
+    .group(group)
+    .build();
+
+context.submit(frame).await?;
+```
+
+High-throughput adapters may still implement `InboundFrame` directly to reuse
+wire-format offsets and preserve the earliest possible interest rejection.
 
 ## Runtime performance model
 
@@ -688,12 +987,14 @@ The smaller authoring API still compiles into the existing bounded runtime:
 ## Workspace
 
 - `oxidebot-core`: complete 0.1.8 events, messages, content models, and API;
-- `oxidebot-macros`: `CommandArgs`, `BotCommand`, and function-command macros;
+- `oxidebot-macros`: command, branch, state, and typed dialogue-form macros;
 - `oxidebot-runtime`: modules, extractors, commands, compiled dispatch, bounded
   queues, sessions, and supervision;
 - `oxidebot`: batteries-included facade and prelude;
-- `oxidebot-testkit`: deterministic adapter and API fixtures;
-- `examples/minimal`: a finite runnable example.
+- `oxidebot-testkit`: concise `BotTest`/`CommandTest` APIs plus lower-level deterministic fixtures;
+- `oxidebot-adapter-console`: a real stdin/stdout adapter for local development;
+- `examples/minimal`: a finite scripted example;
+- `examples/console-bot`: an immediately runnable interactive bot.
 
 Additional documentation:
 

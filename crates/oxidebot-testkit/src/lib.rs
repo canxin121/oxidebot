@@ -12,10 +12,12 @@ use oxidebot_core::{
     BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
 };
 use oxidebot_runtime::{
-    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, DecodeError,
-    FrameIndex, IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
+    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, Command,
+    CommandArgs, CommandParseError, CommandTree, DecodeError, FrameIndex, FromCommandMatch,
+    IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
 };
 use std::{
+    marker::PhantomData,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -171,6 +173,10 @@ impl InboundFrame for TestFrame {
 pub enum ScriptStep {
     Frame(TestFrame),
     Pause(Duration),
+    /// Waits until the scripted API has observed at least `count` successful
+    /// sends. This is a deterministic synchronization point for multi-turn
+    /// dialogue tests and does not rely on arbitrary sleeps.
+    WaitForSent { count: usize, timeout: Duration },
 }
 
 /// Successfully sent message recorded by the scripted API.
@@ -185,6 +191,7 @@ struct ServiceState {
     sent: Mutex<Vec<SentMessage>>,
     attempts: AtomicUsize,
     temporary_failures: AtomicUsize,
+    sent_notify: tokio::sync::Notify,
 }
 
 /// Clone-cheap bot API fixture with deterministic temporary failures.
@@ -208,6 +215,31 @@ impl ScriptedApi {
     #[must_use]
     pub fn attempts(&self) -> usize {
         self.0.attempts.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn sent_count(&self) -> usize {
+        self.0
+            .sent
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+
+    async fn wait_for_sent(&self, count: usize, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.sent_count() >= count {
+                return true;
+            }
+            let notified = self.0.sent_notify.notified();
+            if self.sent_count() >= count {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.sent_count() >= count;
+            }
+        }
     }
 }
 
@@ -236,6 +268,7 @@ impl ScriptedApi {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(SentMessage { target, message });
+        self.0.sent_notify.notify_one();
         Ok(attempt)
     }
 }
@@ -310,8 +343,291 @@ impl Adapter for ScriptedAdapter {
                         () = context.shutdown().cancelled() => break,
                     }
                 }
+                ScriptStep::WaitForSent { count, timeout } => {
+                    tokio::select! {
+                        reached = self.service.wait_for_sent(count, timeout) => {
+                            if !reached {
+                                return Err(AdapterError::new(format!(
+                                    "timed out waiting for {count} sent messages; observed {}",
+                                    self.service.sent_count(),
+                                )));
+                            }
+                        }
+                        () = context.shutdown().cancelled() => break,
+                    }
+                }
             }
         }
         Ok(())
     }
+}
+
+/// One high-level expectation in a [`BotTest`] script.
+#[derive(Clone, Debug)]
+pub enum ReplyExpectation {
+    Exact(String),
+    Contains(String),
+    Message(Message),
+}
+
+/// Result of a completed high-level Bot test.
+#[derive(Clone, Debug)]
+pub struct BotTestReport {
+    pub sent: Vec<SentMessage>,
+    pub attempts: usize,
+}
+
+/// Concise deterministic test harness layered over [`ScriptedAdapter`].
+///
+/// It is intentionally a convenience API: the lower-level frame and adapter
+/// fixtures remain available for admission, retry, and scheduling tests.
+pub struct BotTest<S = ()>
+where
+    S: Send + Sync + 'static,
+{
+    state: S,
+    module: oxidebot_runtime::Module<S>,
+    steps: Vec<ScriptStep>,
+    expectations: Vec<ReplyExpectation>,
+    next_event: u64,
+    pause: Duration,
+    expectation_timeout: Duration,
+    conversation: Arc<str>,
+    actor: Arc<str>,
+}
+
+impl BotTest<()> {
+    /// Creates an empty test application. Add generated commands or configured
+    /// features with [`BotTest::add`].
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::with_state((), oxidebot_runtime::Module::new())
+    }
+
+    #[must_use]
+    pub fn new(module: oxidebot_runtime::Module<()>) -> Self {
+        Self::with_state((), module)
+    }
+
+    #[must_use]
+    pub fn feature<F>(feature: F) -> Self
+    where
+        F: oxidebot_runtime::IntoFeature<()>,
+    {
+        Self::empty().add(feature)
+    }
+}
+
+impl<S> BotTest<S>
+where
+    S: Send + Sync + 'static,
+{
+    #[must_use]
+    pub fn with_state(state: S, module: oxidebot_runtime::Module<S>) -> Self {
+        Self {
+            state,
+            module,
+            steps: Vec::new(),
+            expectations: Vec::new(),
+            next_event: 1,
+            pause: Duration::ZERO,
+            expectation_timeout: Duration::from_secs(2),
+            conversation: Arc::from("test-room"),
+            actor: Arc::from("test-user"),
+        }
+    }
+
+    /// Adds one generated command, locally configured feature, or module.
+    #[must_use]
+    pub fn add<F>(mut self, feature: F) -> Self
+    where
+        F: oxidebot_runtime::IntoFeature<S>,
+    {
+        self.module = self.module.add(feature);
+        self
+    }
+
+    #[must_use]
+    pub fn include(mut self, module: oxidebot_runtime::Module<S>) -> Self {
+        self.module = self.module.include(module);
+        self
+    }
+
+    #[must_use]
+    pub fn settle_for(mut self, duration: Duration) -> Self {
+        self.pause = duration;
+        self
+    }
+
+    /// Sets the timeout used by reply expectations as deterministic transport
+    /// barriers. The default is two seconds.
+    #[must_use]
+    pub fn expect_within(mut self, duration: Duration) -> Self {
+        self.expectation_timeout = duration;
+        self
+    }
+
+    #[must_use]
+    pub fn in_conversation(mut self, conversation: impl Into<Arc<str>>) -> Self {
+        self.conversation = conversation.into();
+        self
+    }
+
+    #[must_use]
+    pub fn as_user(mut self, actor: impl Into<Arc<str>>) -> Self {
+        self.actor = actor.into();
+        self
+    }
+
+    #[must_use]
+    pub fn message(mut self, text: impl Into<Arc<str>>) -> Self {
+        let sequence = self.next_event;
+        self.next_event = self.next_event.saturating_add(1);
+        let id = EventId::new(format!("test-event-{sequence}"))
+            .expect("generated test event id is valid");
+        self.steps.push(ScriptStep::Frame(TestFrame::message(
+            id,
+            self.conversation.as_ref(),
+            self.actor.as_ref(),
+            sequence,
+            text,
+        )));
+        if !self.pause.is_zero() {
+            self.steps.push(ScriptStep::Pause(self.pause));
+        }
+        self
+    }
+
+    /// Adds an explicit pause to a scenario without changing the default
+    /// settling delay used after each message.
+    #[must_use]
+    pub fn pause(mut self, duration: Duration) -> Self {
+        self.steps.push(ScriptStep::Pause(duration));
+        self
+    }
+
+    fn push_expectation(mut self, expectation: ReplyExpectation) -> Self {
+        self.expectations.push(expectation);
+        self.steps.push(ScriptStep::WaitForSent {
+            count: self.expectations.len(),
+            timeout: self.expectation_timeout,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn expect_reply(self, text: impl Into<String>) -> Self {
+        self.push_expectation(ReplyExpectation::Exact(text.into()))
+    }
+
+    #[must_use]
+    pub fn expect_reply_contains(self, text: impl Into<String>) -> Self {
+        self.push_expectation(ReplyExpectation::Contains(text.into()))
+    }
+
+    #[must_use]
+    pub fn expect_message(self, message: Message) -> Self {
+        self.push_expectation(ReplyExpectation::Message(message))
+    }
+
+    /// Explicitly documents that a scenario must not send any messages.
+    #[must_use]
+    pub fn expect_no_reply(self) -> Self {
+        assert!(
+            self.expectations.is_empty(),
+            "expect_no_reply cannot follow reply expectations",
+        );
+        self
+    }
+
+    pub async fn run(self) -> Result<BotTestReport, String> {
+        let platform = PlatformId::new("test").expect("static test platform id is valid");
+        let bot = BotId::new("bot").expect("static test bot id is valid");
+        let (adapter, api) = ScriptedAdapter::new(platform, bot, self.steps);
+        oxidebot_runtime::OxideBot::with_state(self.state)
+            .adapter(adapter)
+            .include(self.module)
+            .run_to_completion()
+            .await
+            .map_err(|error| error.to_string())?;
+        let sent = api.sent();
+        if sent.len() != self.expectations.len() {
+            return Err(format!(
+                "expected {} replies, observed {}: {:?}",
+                self.expectations.len(),
+                sent.len(),
+                sent,
+            ));
+        }
+        for (index, (actual, expected)) in sent.iter().zip(&self.expectations).enumerate() {
+            let actual_message = Message::from(actual.message.clone());
+            let actual_text = actual_message.get_raw_text();
+            let matches = match expected {
+                ReplyExpectation::Exact(expected) => actual_text == *expected,
+                ReplyExpectation::Contains(expected) => actual_text.contains(expected),
+                ReplyExpectation::Message(expected) => &actual_message == expected,
+            };
+            if !matches {
+                return Err(format!(
+                    "reply {} did not match {:?}; actual message was {:?}",
+                    index + 1,
+                    expected,
+                    actual_message,
+                ));
+            }
+        }
+        Ok(BotTestReport {
+            sent,
+            attempts: api.attempts(),
+        })
+    }
+}
+
+
+/// Focused parser harness that exercises the same immutable command IR without
+/// starting adapters, queues, or the executor.
+pub struct CommandTest<T> {
+    command: Command,
+    _value: PhantomData<fn() -> T>,
+}
+
+impl<T> CommandTest<T>
+where
+    T: FromCommandMatch,
+{
+    #[must_use]
+    pub fn new(command: Command) -> Self {
+        Self {
+            command,
+            _value: PhantomData,
+        }
+    }
+
+    pub fn parse(&self, input: impl Into<String>) -> Result<T, CommandParseError> {
+        let matched = self.command.parse_message(&Message::text(input.into()))?;
+        T::from_match(&matched)
+    }
+
+    #[must_use]
+    pub fn command(&self) -> &Command {
+        &self.command
+    }
+}
+
+/// Builds a focused parser harness for one flat `CommandArgs` type.
+#[must_use]
+pub fn command_test<T>(name: impl Into<Arc<str>>) -> CommandTest<T>
+where
+    T: CommandArgs,
+{
+    CommandTest::new(T::command(name))
+}
+
+/// Builds a focused parser harness for one derived command tree.
+#[must_use]
+pub fn command_tree_test<T>() -> CommandTest<T>
+where
+    T: CommandTree,
+{
+    CommandTest::new(T::command())
 }

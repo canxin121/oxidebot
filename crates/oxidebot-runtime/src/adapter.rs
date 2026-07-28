@@ -5,12 +5,18 @@ use crate::{
     ShutdownSignal,
 };
 use async_trait::async_trait;
-use oxidebot_core::event::kernel::{DispatchBatch, DispatchIndex, DispatchKind};
-use oxidebot_core::event::EventTypeSet;
-use oxidebot_core::{BotIdentity, BotSlot, PlatformId, RetainedSize};
+use oxidebot_core::event::kernel::{
+    DispatchBatch, DispatchDraft, DispatchIndex, DispatchKind,
+};
+use oxidebot_core::event::{EventType, EventTypeSet, MessageEvent};
+use oxidebot_core::{
+    source::{group::Group, message::Message, user::User}, BotIdentity, BotSlot, CompactId,
+    ConversationKey, Event, EventId, PlatformId, RetainedSize, UserKey,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::SystemTime,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +71,243 @@ pub trait InboundFrame: Send + 'static {
         Self: Sized,
     {
         self.decode(bot, platform)
+    }
+}
+
+/// Canonical message frame for simple adapters, importers, console transports,
+/// and tests. High-throughput adapters may still implement [`InboundFrame`]
+/// directly to reuse offsets from their wire format.
+pub struct MessageFrame {
+    id: EventId,
+    conversation: CompactId,
+    subspace: Option<CompactId>,
+    actor: CompactId,
+    sender: User,
+    group: Option<Group>,
+    message: Message,
+    occurred_at: Option<SystemTime>,
+}
+
+impl MessageFrame {
+    #[must_use]
+    pub fn new(
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        message: Message,
+    ) -> Self {
+        Self {
+            id,
+            conversation: conversation.into(),
+            subspace: None,
+            actor: actor.into(),
+            sender: User::default(),
+            group: None,
+            message,
+            occurred_at: Some(SystemTime::now()),
+        }
+        .with_default_sender()
+    }
+
+    #[must_use]
+    pub fn text(
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        message_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let mut message = Message::text(text);
+        message.id = message_id.into();
+        Self::new(id, conversation, actor, message)
+    }
+
+    #[must_use]
+    pub fn in_subspace(mut self, subspace: impl Into<CompactId>) -> Self {
+        self.subspace = Some(subspace.into());
+        self
+    }
+
+    /// Preserves adapter-provided sender profile data while keeping routing
+    /// identity consistent with `sender.id`.
+    #[must_use]
+    pub fn sender(mut self, sender: User) -> Self {
+        self.actor = CompactId::from(sender.id.clone());
+        self.sender = sender;
+        self
+    }
+
+    /// Marks this as a group/channel-style message and preserves the portable
+    /// group profile in the public event.
+    #[must_use]
+    pub fn group(mut self, group: Group) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    #[must_use]
+    pub fn occurred_at(mut self, occurred_at: SystemTime) -> Self {
+        self.occurred_at = Some(occurred_at);
+        self
+    }
+
+    fn with_default_sender(mut self) -> Self {
+        self.sender.id = self.actor.to_string();
+        self
+    }
+
+    fn dispatch_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
+        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
+        let mut conversation = ConversationKey::new(bot, self.conversation.clone());
+        if let Some(subspace) = &self.subspace {
+            conversation = conversation.in_subspace(subspace.clone());
+        }
+        index.conversation = Some(conversation);
+        index.actor = Some(UserKey::new(bot, self.actor.clone()));
+        index.command = self
+            .message
+            .get_raw_text()
+            .strip_prefix('/')
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.split('@').next())
+            .filter(|value| !value.is_empty())
+            .map(Arc::from);
+        index
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.id
+            .estimated_bytes()
+            .saturating_add(self.conversation.estimated_bytes())
+            .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
+            .saturating_add(self.actor.estimated_bytes())
+            .saturating_add(self.sender.id.len())
+            .saturating_add(if self.sender.profile.is_some() { 512 } else { 0 })
+            .saturating_add(if self.sender.group_info.is_some() { 256 } else { 0 })
+            .saturating_add(self.group.as_ref().map_or(0, |group| {
+                group
+                    .id
+                    .len()
+                    .saturating_add(if group.profile.is_some() { 512 } else { 0 })
+            }))
+            .saturating_add(self.message.estimated_bytes())
+            .saturating_add(2_048)
+    }
+}
+
+impl InboundFrame for MessageFrame {
+    fn index(
+        &self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<FrameIndex, DecodeError> {
+        self.id
+            .validate()
+            .map_err(|error| DecodeError::new(format!("invalid message event id: {error}")))?;
+        self.conversation
+            .validate()
+            .map_err(|error| DecodeError::new(format!("invalid conversation id: {error}")))?;
+        self.actor
+            .validate()
+            .map_err(|error| DecodeError::new(format!("invalid actor id: {error}")))?;
+        if let Some(subspace) = &self.subspace {
+            subspace
+                .validate()
+                .map_err(|error| DecodeError::new(format!("invalid subspace id: {error}")))?;
+        }
+        if self.message.id.is_empty() {
+            return Err(DecodeError::new("message id must not be empty"));
+        }
+        Ok(FrameIndex::one(
+            self.dispatch_index(bot, platform),
+            self.retained_bytes().saturating_add(2_048),
+        ))
+    }
+
+    fn decode(
+        self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        let indexed = FrameIndex::one(self.dispatch_index(bot, platform), 0);
+        self.decode_indexed(bot, platform, &indexed)
+    }
+
+    fn decode_indexed(
+        self,
+        _bot: BotSlot,
+        _platform: &PlatformId,
+        indexed: &FrameIndex,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        let index = indexed
+            .events
+            .first()
+            .cloned()
+            .ok_or_else(|| DecodeError::new("message frame index is empty"))?;
+        index
+            .conversation
+            .as_ref()
+            .ok_or_else(|| DecodeError::new("message frame has no conversation"))?;
+        let retained = self.retained_bytes();
+        let event = Event::MessageEvent(MessageEvent {
+            id: self.id.as_str().to_owned(),
+            time: None,
+            sender: self.sender,
+            group: self.group,
+            message: self.message,
+        });
+        let mut draft = DispatchDraft::new(self.id, index, event, retained);
+        draft.occurred_at = self.occurred_at;
+        Ok(DispatchBatch::new([draft]))
+    }
+}
+
+/// Builder for adapters that receive a canonical message but want named setup
+/// methods rather than implementing the two-stage frame contract manually.
+pub struct MessageFrameBuilder {
+    frame: MessageFrame,
+}
+
+impl MessageFrameBuilder {
+    #[must_use]
+    pub fn new(
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        message: Message,
+    ) -> Self {
+        Self {
+            frame: MessageFrame::new(id, conversation, actor, message),
+        }
+    }
+
+    #[must_use]
+    pub fn subspace(mut self, subspace: impl Into<CompactId>) -> Self {
+        self.frame = self.frame.in_subspace(subspace);
+        self
+    }
+
+    #[must_use]
+    pub fn sender(mut self, sender: User) -> Self {
+        self.frame = self.frame.sender(sender);
+        self
+    }
+
+    #[must_use]
+    pub fn group(mut self, group: Group) -> Self {
+        self.frame = self.frame.group(group);
+        self
+    }
+
+    #[must_use]
+    pub fn occurred_at(mut self, occurred_at: SystemTime) -> Self {
+        self.frame = self.frame.occurred_at(occurred_at);
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> MessageFrame {
+        self.frame
     }
 }
 
@@ -323,6 +566,39 @@ impl AdapterContext {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
+    }
+
+    /// Submits one already-canonical portable message without requiring a
+    /// simple adapter to implement the two-stage [`InboundFrame`] contract.
+    pub async fn submit_message(
+        &self,
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        message: Message,
+    ) -> std::result::Result<Submission, AdapterError> {
+        self.submit(MessageFrame::new(id, conversation, actor, message))
+            .await
+    }
+
+    /// Convenience form of [`AdapterContext::submit_message`] for transports
+    /// whose input unit is a text line.
+    pub async fn submit_text(
+        &self,
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        message_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> std::result::Result<Submission, AdapterError> {
+        self.submit(MessageFrame::text(
+            id,
+            conversation,
+            actor,
+            message_id,
+            text,
+        ))
+        .await
     }
 
     async fn reserve_ingress(

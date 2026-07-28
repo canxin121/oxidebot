@@ -1,0 +1,9 @@
+{
+  "hello": "你好 {user:mention}！这是来自统一 Message IR 的本地化消息。",
+  "setup.complete": "项目 {name} 已配置：环境={environment}，确认={confirmed}",
+  "oxidebot.command.catalog": "{body:message}",
+  "oxidebot.command.help": "{body:message}",
+  "oxidebot.command.not_found": "{body:message}",
+  "oxidebot.command.parse_error": "{body:message}",
+  "oxidebot.command.suggestions": "{body:message}"
+}

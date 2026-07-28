@@ -2,10 +2,115 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream}, parse_macro_input, spanned::Spanned, Attribute, Data,
-    DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn, LitChar, LitStr,
+    DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn, LitChar, LitInt, LitStr,
     Meta, Pat, Path, PathArguments, Token, Type,
 };
 
+/// Turns one state-aware completion function into a statically typed provider.
+///
+/// The function must be `async fn(Context<State>, CompletionInput) ->
+/// HandlerResult<Vec<CompletionItem>>`. The generated unit value can be used by
+/// `#[arg(complete = provider)]` without a global registry or dynamic state map.
+#[proc_macro_attribute]
+pub fn completer(attribute: TokenStream, input: TokenStream) -> TokenStream {
+    if !attribute.is_empty() {
+        return syn::Error::new(proc_macro2::Span::call_site(), "#[oxidebot::completer] does not accept arguments")
+            .into_compile_error()
+            .into();
+    }
+    match expand_completer_function(parse_macro_input!(input as ItemFn)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    if function.sig.asyncness.is_none() {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "#[oxidebot::completer] requires an async function",
+        ));
+    }
+    if !function.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            function.sig.generics.span(),
+            "#[oxidebot::completer] does not support generic functions",
+        ));
+    }
+    if function.sig.inputs.len() != 2 {
+        return Err(syn::Error::new(
+            function.sig.inputs.span(),
+            "a completer must accept Context<State> and CompletionInput",
+        ));
+    }
+
+    let mut inputs = function.sig.inputs.iter();
+    let Some(FnArg::Typed(context)) = inputs.next() else {
+        return Err(syn::Error::new(function.sig.inputs.span(), "methods are not supported"));
+    };
+    let Some(state) = type_argument(context.ty.as_ref(), "Context") else {
+        return Err(syn::Error::new(
+            context.ty.span(),
+            "the first completer parameter must be Context<State>",
+        ));
+    };
+    let Some(FnArg::Typed(input)) = inputs.next() else {
+        return Err(syn::Error::new(function.sig.inputs.span(), "methods are not supported"));
+    };
+    if !is_type(input.ty.as_ref(), "CompletionInput") {
+        return Err(syn::Error::new(
+            input.ty.span(),
+            "the second completer parameter must be CompletionInput",
+        ));
+    }
+
+    let provider_ident = function.sig.ident.clone();
+    let implementation_ident = format_ident!("__oxidebot_{}_implementation", provider_ident);
+    let visibility = function.vis.clone();
+    let outer_attributes = function.attrs.clone();
+    let implementation_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let feature_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("doc")
+                || attribute.path().is_ident("cfg")
+                || attribute.path().is_ident("cfg_attr")
+                || attribute.path().is_ident("deprecated")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    function.attrs = outer_attributes.clone();
+    function.vis = syn::Visibility::Inherited;
+    function.sig.ident = implementation_ident.clone();
+
+    Ok(quote! {
+        #[doc(hidden)]
+        #function
+
+        #(#feature_attributes)*
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, Debug, Default)]
+        #visibility struct #provider_ident;
+
+        #(#implementation_attributes)*
+        #[::oxidebot::runtime::__private::async_trait]
+        impl ::oxidebot::DynamicCompleter<#state> for #provider_ident {
+            async fn complete(
+                &self,
+                context: &::oxidebot::Context<#state>,
+                input: ::oxidebot::CompletionInput,
+            ) -> ::oxidebot::HandlerResult<::std::vec::Vec<::oxidebot::CompletionItem>> {
+                #implementation_ident(context.clone(), input).await
+            }
+        }
+    })
+}
 
 struct BranchAttribute {
     path: Path,
@@ -78,7 +183,17 @@ fn expand_branch_function(
         })
         .cloned()
         .collect::<Vec<_>>();
-    function.attrs = implementation_attributes.clone();
+    let feature_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("doc")
+                || attribute.path().is_ident("cfg")
+                || attribute.path().is_ident("cfg_attr")
+                || attribute.path().is_ident("deprecated")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    function.attrs = outer_attributes.clone();
     function.vis = syn::Visibility::Inherited;
     function.sig.ident = implementation_ident.clone();
 
@@ -99,32 +214,20 @@ fn expand_branch_function(
     let mut wrapper_types = vec![quote! { ::oxidebot::BranchArgs<#path> }];
     let mut call_arguments = Vec::new();
     if let Some(argument) = branch_argument {
-        let FnArg::Typed(typed) = argument else {
+        let FnArg::Typed(_) = argument else {
             return Err(syn::Error::new(argument.span(), "methods are not supported"));
         };
-        let Pat::Ident(pattern) = typed.pat.as_ref() else {
-            return Err(syn::Error::new(
-                typed.pat.span(),
-                "branch argument parameters must use a simple identifier pattern",
-            ));
-        };
-        let ident = pattern.ident.clone();
-        call_arguments.push(quote! { #ident });
+        call_arguments.push(quote! { __oxidebot_branch_value });
     }
 
-    for argument in inputs {
+    for (index, argument) in inputs.into_iter().enumerate() {
         let FnArg::Typed(typed) = argument else {
             return Err(syn::Error::new(argument.span(), "methods are not supported"));
         };
-        let Pat::Ident(pattern) = typed.pat.as_ref() else {
-            return Err(syn::Error::new(
-                typed.pat.span(),
-                "branch handler extractor parameters must use simple identifier patterns",
-            ));
-        };
-        let ident = pattern.ident.clone();
+        let ident = format_ident!("__oxidebot_extractor_{index}");
         let ty = typed.ty.clone();
-        wrapper_inputs.push(quote! { #typed });
+        let attributes = typed.attrs.clone();
+        wrapper_inputs.push(quote! { #(#attributes)* #ident: #ty });
         wrapper_types.push(quote! { #ty });
         call_arguments.push(quote! { #ident });
     }
@@ -132,26 +235,20 @@ fn expand_branch_function(
     let branch_input = if unit {
         quote! { _: ::oxidebot::BranchArgs<#path>, }
     } else {
-        let FnArg::Typed(typed) = function
-            .sig
-            .inputs
-            .first()
-            .expect("non-unit branch input checked")
-        else {
-            unreachable!()
-        };
-        let Pat::Ident(pattern) = typed.pat.as_ref() else {
-            unreachable!()
-        };
-        let ident = &pattern.ident;
-        quote! { ::oxidebot::BranchArgs(#ident): ::oxidebot::BranchArgs<#path>, }
+        quote! {
+            ::oxidebot::BranchArgs(__oxidebot_branch_value): ::oxidebot::BranchArgs<#path>,
+        }
     };
-    let extractor_bounds = wrapper_types.iter().map(|ty| {
-        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
-    }).collect::<Vec<_>>();
+    let extractor_bounds = wrapper_types
+        .iter()
+        .map(|ty| {
+            quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+        })
+        .collect::<Vec<_>>();
+    let extractor_bounds_for_install = extractor_bounds.clone();
+    let extractor_bounds_for_generated = extractor_bounds.clone();
 
     Ok(quote! {
-        #(#implementation_attributes)*
         #[doc(hidden)]
         #function
 
@@ -164,7 +261,7 @@ fn expand_branch_function(
             #implementation_ident(#(#call_arguments),*).await
         }
 
-        #(#outer_attributes)*
+        #(#feature_attributes)*
         #[allow(non_camel_case_types)]
         #[derive(Clone, Copy, Debug, Default)]
         #visibility struct #feature_ident;
@@ -185,7 +282,7 @@ fn expand_branch_function(
         impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
-            #(#extractor_bounds,)*
+            #(#extractor_bounds_for_install,)*
         {
             fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
                 <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
@@ -199,7 +296,7 @@ fn expand_branch_function(
         impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
-            #(#extractor_bounds,)*
+            #(#extractor_bounds_for_generated,)*
         {
             fn into_feature(self) -> ::oxidebot::Feature<S> {
                 self.feature()
@@ -269,12 +366,23 @@ fn expand_command_function(
         })
         .cloned()
         .collect::<Vec<_>>();
-    function.attrs = implementation_attributes.clone();
+    let feature_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("doc")
+                || attribute.path().is_ident("cfg")
+                || attribute.path().is_ident("cfg_attr")
+                || attribute.path().is_ident("deprecated")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    function.attrs = outer_attributes.clone();
     function.vis = syn::Visibility::Inherited;
     function.sig.ident = implementation_ident.clone();
 
     let mut command_fields = Vec::new();
     let mut completer_bindings = Vec::new();
+    let mut completer_providers = Vec::<Path>::new();
     let generated_field_module = format_ident!(
         "{}_fields",
         ident_to_module_name(&args_ident.to_string()),
@@ -283,20 +391,13 @@ fn expand_command_function(
     let mut wrapper_types = Vec::new();
     let mut call_arguments = Vec::new();
 
-    for argument in function.sig.inputs.iter_mut() {
+    for (index, argument) in function.sig.inputs.iter_mut().enumerate() {
         let FnArg::Typed(typed) = argument else {
             return Err(syn::Error::new(
                 argument.span(),
                 "methods are not supported",
             ));
         };
-        let Pat::Ident(pattern) = typed.pat.as_ref() else {
-            return Err(syn::Error::new(
-                typed.pat.span(),
-                "command function parameters must use simple identifier patterns",
-            ));
-        };
-        let ident = pattern.ident.clone();
         let ty = typed.ty.clone();
         let (arg_attributes, other_attributes): (Vec<_>, Vec<_>) = typed
             .attrs
@@ -304,13 +405,20 @@ fn expand_command_function(
             .partition(|attribute| attribute.path().is_ident("arg"));
         typed.attrs = other_attributes.clone();
         if arg_attributes.is_empty() {
-            let mut wrapper = typed.clone();
-            wrapper.attrs = other_attributes;
-            wrapper_inputs.push(quote! { #wrapper });
+            let ident = format_ident!("__oxidebot_extractor_{index}");
+            wrapper_inputs.push(quote! { #(#other_attributes)* #ident: #ty });
             wrapper_types.push(quote! { #ty });
             call_arguments.push(quote! { #ident });
         } else {
+            let Pat::Ident(pattern) = typed.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    typed.pat.span(),
+                    "command arguments declared with #[arg(...)] must use simple identifier patterns",
+                ));
+            };
+            let ident = pattern.ident.clone();
             if let Some(provider) = arg_path_option(&arg_attributes, "complete")? {
+                completer_providers.push(provider.clone());
                 let marker = format_ident!(
                     "{}",
                     to_pascal_case(ident.to_string().trim_start_matches("r#")),
@@ -357,12 +465,20 @@ fn expand_command_function(
     if let Some(description) = doc_string(&outer_attributes) {
         command_builder = quote! { #command_builder.description(#description) };
     }
-    let extractor_bounds = wrapper_types.iter().map(|ty| {
-        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
-    });
-    let extractor_bounds_for_install = wrapper_types.iter().map(|ty| {
-        quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
-    });
+    let extractor_bounds = wrapper_types
+        .iter()
+        .map(|ty| {
+            quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+        })
+        .collect::<Vec<_>>();
+    let extractor_bounds_for_install = extractor_bounds.clone();
+    let extractor_bounds_for_generated = extractor_bounds.clone();
+    let completer_bounds = completer_providers
+        .iter()
+        .map(|provider| quote! { #provider: ::oxidebot::DynamicCompleter<S> })
+        .collect::<Vec<_>>();
+    let completer_bounds_for_install = completer_bounds.clone();
+    let completer_bounds_for_generated = completer_bounds.clone();
 
     Ok(quote! {
         #args_declaration
@@ -379,7 +495,7 @@ fn expand_command_function(
             #implementation_ident(#(#call_arguments),*).await
         }
 
-        #(#outer_attributes)*
+        #(#feature_attributes)*
         #[allow(non_camel_case_types)]
         #[derive(Clone, Copy, Debug, Default)]
         #visibility struct #feature_ident;
@@ -396,6 +512,7 @@ fn expand_command_function(
             where
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
                 #(#extractor_bounds,)*
+                #(#completer_bounds,)*
             {
                 let mut feature = ::oxidebot::Feature::command(Self::command(), #handler_ident);
                 #(#completer_bindings)*
@@ -408,6 +525,7 @@ fn expand_command_function(
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#extractor_bounds_for_install,)*
+            #(#completer_bounds_for_install,)*
         {
             fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
                 <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
@@ -421,7 +539,8 @@ fn expand_command_function(
         impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
-            #(#extractor_bounds_for_install,)*
+            #(#extractor_bounds_for_generated,)*
+            #(#completer_bounds_for_generated,)*
         {
             fn into_feature(self) -> ::oxidebot::Feature<S> {
                 self.feature()
@@ -502,6 +621,187 @@ pub fn derive_bot_state(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives a bounded, typed sequence of dialogue questions for a named struct.
+///
+/// Fields accept `#[dialogue(prompt = "...", attempts = 3, error = "...")]`,
+/// `#[dialogue(confirm)]`, repeated `choice = "Label=value"`, and
+/// `validate = path`.
+#[proc_macro_derive(DialogueForm, attributes(dialogue))]
+pub fn derive_dialogue_form(input: TokenStream) -> TokenStream {
+    match expand_dialogue_form(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+#[derive(Default)]
+struct DialogueFieldOptions {
+    prompt: Option<String>,
+    error: Option<String>,
+    confirm: bool,
+    attempts: Option<usize>,
+    choices: Vec<(String, String)>,
+    validate: Option<Path>,
+}
+
+impl DialogueFieldOptions {
+    fn parse(field: &Field) -> syn::Result<Self> {
+        let mut output = Self::default();
+        for attribute in field
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("dialogue"))
+        {
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("prompt") {
+                    output.prompt = Some(meta.value()?.parse::<LitStr>()?.value());
+                } else if meta.path.is_ident("error") {
+                    output.error = Some(meta.value()?.parse::<LitStr>()?.value());
+                } else if meta.path.is_ident("confirm") {
+                    output.confirm = if meta.input.peek(Token![=]) {
+                        meta.value()?.parse::<syn::LitBool>()?.value()
+                    } else {
+                        true
+                    };
+                } else if meta.path.is_ident("attempts") {
+                    output.attempts = Some(meta.value()?.parse::<LitInt>()?.base10_parse()?);
+                } else if meta.path.is_ident("retry") {
+                    let retries: usize = meta.value()?.parse::<LitInt>()?.base10_parse()?;
+                    output.attempts = Some(retries.saturating_add(1));
+                } else if meta.path.is_ident("choice") {
+                    let value = meta.value()?.parse::<LitStr>()?.value();
+                    let Some((label, stored)) = value.split_once('=') else {
+                        return Err(meta.error("dialogue choice must use `Label=value`"));
+                    };
+                    let label = label.trim();
+                    let stored = stored.trim();
+                    if label.is_empty() || stored.is_empty() {
+                        return Err(meta.error("dialogue choice label and value must be non-empty"));
+                    }
+                    output.choices.push((label.to_owned(), stored.to_owned()));
+                } else if meta.path.is_ident("validate") {
+                    output.validate = Some(meta.value()?.parse::<Path>()?);
+                } else {
+                    return Err(meta.error("unknown #[dialogue(...)] option"));
+                }
+                Ok(())
+            })?;
+        }
+        Ok(output)
+    }
+}
+
+fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "DialogueForm does not support generic structs",
+        ));
+    }
+    let name = input.ident;
+    let Data::Struct(data) = input.data else {
+        return Err(syn::Error::new(name.span(), "DialogueForm can only be derived for a struct"));
+    };
+    let Fields::Named(fields) = data.fields else {
+        return Err(syn::Error::new(name.span(), "DialogueForm requires named fields"));
+    };
+
+    let mut initializers = Vec::new();
+    for field in fields.named {
+        let ident = field.ident.clone().ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
+        let ty = field.ty.clone();
+        let options = DialogueFieldOptions::parse(&field)?;
+        let prompt = options
+            .prompt
+            .or_else(|| doc_string(&field.attrs))
+            .unwrap_or_else(|| format!("请输入 {}：", ident.to_string().trim_start_matches("r#")));
+        let attempts = options.attempts.unwrap_or(3).max(1);
+
+        let expression = if options.confirm {
+            if !is_type(&ty, "bool") {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "#[dialogue(confirm)] requires a bool field",
+                ));
+            }
+            if !options.choices.is_empty() || options.validate.is_some() {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "confirmation fields cannot also declare choices or a validator",
+                ));
+            }
+            let words = options.error.map_or_else(
+                || quote! { ::oxidebot::ConfirmationWords::default() },
+                |error| quote! {
+                    ::oxidebot::ConfirmationWords::default().retry_message(#error)
+                },
+            );
+            quote! {
+                dialogue
+                    .confirm_with(#prompt, #words, #attempts)
+                    .await?
+            }
+        } else if !options.choices.is_empty() {
+            let labels = options.choices.iter().map(|(label, _)| label);
+            let values = options.choices.iter().map(|(_, value)| value);
+            let error = options
+                .error
+                .unwrap_or_else(|| "未知选项，请输入编号、选项名称或使用按钮。".to_owned());
+            let selected = quote! {
+                dialogue
+                    .choose_with_error(
+                        #prompt,
+                        [
+                            #(
+                                (
+                                    #labels,
+                                    <#ty as ::core::str::FromStr>::from_str(#values)
+                                        .map_err(|_| ::oxidebot::HandlerError::internal(
+                                            format!("invalid static dialogue choice for {}", stringify!(#ident)),
+                                        ))?,
+                                )
+                            ),*
+                        ],
+                        #attempts,
+                        #error,
+                    )
+                    .await?
+            };
+            if let Some(validate) = options.validate {
+                quote! {{
+                    let value: #ty = #selected;
+                    #validate(&value).map_err(|error| ::oxidebot::HandlerError::user(error.to_string()))?;
+                    value
+                }}
+            } else {
+                selected
+            }
+        } else {
+            let error = options.error.map(|value| quote! { question = question.error(#value); });
+            let validate = options.validate.map(|path| quote! { question = question.try_validate(#path); });
+            quote! {{
+                let mut question = dialogue.question::<#ty>(#prompt).attempts(#attempts);
+                #error
+                #validate
+                question.await?
+            }}
+        };
+        initializers.push(quote! { #ident: #expression });
+    }
+
+    Ok(quote! {
+        impl ::oxidebot::DialogueForm for #name {
+            fn collect(dialogue: ::oxidebot::Dialogue) -> ::oxidebot::DialogueFormFuture<Self> {
+                ::std::boxed::Box::pin(async move {
+                    ::core::result::Result::Ok(Self {
+                        #(#initializers,)*
+                    })
+                })
+            }
+        }
+    })
+}
+
 fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
@@ -544,6 +844,12 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 quote! { #field_ty: ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static },
             )
         };
+        if is_type(&selected_ty, &name.to_string()) {
+            return Err(syn::Error::new(
+                selected_ty.span(),
+                "BotState cannot expose the root state as a #[state] field because State<Root> is already available",
+            ));
+        }
         let key = selected_ty.to_token_stream().to_string();
         if !selected_types.insert(key) {
             return Err(syn::Error::new(
@@ -606,6 +912,8 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut schema_fields = Vec::new();
     let mut initializers = Vec::new();
     let mut field_markers = Vec::new();
+    let mut completer_bindings = Vec::new();
+    let mut completer_providers = Vec::<Path>::new();
     let mut inferred_bounds = Vec::<syn::WherePredicate>::new();
 
     for field in fields.named {
@@ -614,7 +922,10 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             .ident
             .clone()
             .ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
-        let rust_name = ident.to_string();
+        let rust_name = ident
+            .to_string()
+            .trim_start_matches("r#")
+            .to_owned();
         let argument_name = options.name.clone().unwrap_or_else(|| rust_name.clone());
         let field_kind = FieldKind::of(&field.ty);
         let value_ty = match &field_kind {
@@ -688,6 +999,15 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 const NAME: &'static str = #argument_name;
             }
         });
+        if let Some(provider) = options.complete.clone() {
+            completer_providers.push(provider.clone());
+            completer_bindings.push(quote! {
+                feature = feature.complete(
+                    #field_module::#marker_ident,
+                    #provider,
+                );
+            });
+        }
         if action_is_count && !is_integer {
             return Err(syn::Error::new(
                 field.ty.span(),
@@ -911,6 +1231,10 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     predicates.extend(inferred_bounds);
     predicates.push(syn::parse_quote!(Self: ::core::marker::Send + 'static));
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let completer_bounds = completer_providers
+        .iter()
+        .map(|provider| quote! { #provider: ::oxidebot::DynamicCompleter<S> })
+        .collect::<Vec<_>>();
 
     Ok(quote! {
         #visibility mod #field_module {
@@ -937,6 +1261,27 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             ) -> ::oxidebot::Command {
                 let command = ::oxidebot::Command::new(name).schema(Self::schema());
                 #command_builder
+            }
+        }
+
+        impl #impl_generics #name #type_generics #where_clause {
+            /// Defines this command and binds all field-local completers.
+            #[must_use]
+            #visibility fn feature<S, H, T>(
+                name: impl ::core::convert::Into<::std::sync::Arc<str>>,
+                handler: H,
+            ) -> ::oxidebot::Feature<S>
+            where
+                S: ::core::marker::Send + ::core::marker::Sync + 'static,
+                H: ::oxidebot::IntoHandler<T, S>,
+                #(#completer_bounds,)*
+            {
+                let mut feature = ::oxidebot::Feature::command(
+                    <Self as ::oxidebot::CommandArgs>::command(name),
+                    handler,
+                );
+                #(#completer_bindings)*
+                feature
             }
         }
     })

@@ -5,7 +5,9 @@ members = [
     "crates/oxidebot-runtime",
     "crates/oxidebot",
     "crates/oxidebot-testkit",
+    "crates/oxidebot-adapter-console",
     "examples/minimal",
+    "examples/console-bot",
 ]
 resolver = "2"
 

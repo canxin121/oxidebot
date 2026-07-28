@@ -49,9 +49,19 @@ pub use hooks::{After, Before, Guard, GuardDecision, GuardResult};
 pub use hooks::{AfterOutput, BeforeOutput, Endpoint, GuardOutput};
 pub use messenger::*;
 pub use metrics::*;
-pub use module::{Feature, IntoFeature, Module};
+pub use module::{Feature, FeatureExt, GeneratedFeature, IntoFeature, Module};
 pub use outcome::{IntoOutcome, Outcome, Propagation};
 pub use reply::*;
 pub use service::*;
 pub use session::{AskOptions, SessionEvent, SessionKey, SessionPolicy, SessionRegistry};
 pub use standard::*;
+
+/// Implementation details used by the facade macros.
+///
+/// This module is deliberately hidden from ordinary API documentation. It
+/// gives proc-macro expansions a stable path without forcing applications to
+/// depend on `async-trait` directly.
+#[doc(hidden)]
+pub mod __private {
+    pub use async_trait::async_trait;
+}

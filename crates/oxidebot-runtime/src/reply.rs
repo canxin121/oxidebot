@@ -75,7 +75,7 @@ impl Reply {
 
     pub(crate) fn rebind(&self, api: BotObject, target: MessageTarget) -> Self {
         Self {
-            api: Arc::new(api),
+            api,
             target,
             reply_to: None,
             fallback: self.fallback,

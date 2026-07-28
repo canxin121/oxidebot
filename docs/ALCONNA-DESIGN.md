@@ -15,7 +15,7 @@ platform Event
 -> one Command tree parse
 -> CommandMiddleware
 -> static and dynamic completion
--> synchronous Extract / Args / BranchArgs
+-> synchronous Extract / Args / generated branch extraction
 -> ordinary async handler
 -> Outcome / CommandOutput
 -> CommandOutputMiddleware / CommandRenderer
@@ -44,7 +44,7 @@ async fn echo(
     format!("{}: {}", user.id, text.join(" "))
 }
 
-let module = Module::new().command(echo_command(), echo);
+let module = Module::new().add(echo);
 ```
 
 Use `CommandArgs` and `BotCommand` when a schema is shared, nested, or large.
@@ -65,17 +65,19 @@ enum TodoCommand {
     List,
 }
 
-async fn add(BranchArgs(args): BranchArgs<todo_command_branches::Add>) -> String {
+#[oxidebot::branch(todo_command_branches::Add)]
+async fn add(args: AddArgs) -> String {
     args.text.join(" ")
 }
 
-async fn list(_: BranchArgs<todo_command_branches::List>) -> &'static str {
+#[oxidebot::branch(todo_command_branches::List, unit)]
+async fn list() -> &'static str {
     "no todos"
 }
 
 let module = Module::new()
-    .command_branch(todo_command_branches::Add, add)
-    .command_branch(todo_command_branches::List, list);
+    .add(add)
+    .add(list);
 ```
 
 A command is parsed once. Branch selection uses the stable command-tree path;
@@ -85,9 +87,11 @@ preserve their descendant path.
 For data-dependent conditions, use generated field IDs with a guard:
 
 ```rust
-let urgent = Module::new()
-    .command(TodoCommand::command(), urgent_handler)
-    .guard(when_field_equals(todo_field_id, 1_u8));
+let urgent = Module::new().add(
+    TodoCommand::command()
+        .handle(urgent_handler)
+        .guard(when_field_equals(todo_field_id, 1_u8)),
+);
 ```
 
 ## Static shortcuts and command rewriting
@@ -100,7 +104,8 @@ let command = TodoCommand::command()
     .shortcut(Shortcut::regex(
         r"^添加(?P<text>.+)$",
         "/todo add {text}",
-    )?);
+    )
+    .expect("valid shortcut pattern"));
 ```
 
 Replacement templates support numbered captures, named captures, and `{*}`
@@ -131,13 +136,20 @@ Static choices, subcommands, and options come from the command IR. A dynamic
 provider can query application state for one stable field ID:
 
 ```rust
+#[oxidebot::completer]
 async fn complete_projects(
     context: Context<AppState>,
     input: CompletionInput,
 ) -> HandlerResult<Vec<CompletionItem>> {
-    let projects = context.state().projects.search(&input.partial).await?;
+    let projects = context
+        .state()
+        .projects
+        .search(&input.partial)
+        .await
+        .internal("complete projects")?;
     Ok(projects
         .into_iter()
+        .take(input.limit)
         .map(|project| {
             CompletionItem::new(
                 project.id,
@@ -145,14 +157,19 @@ async fn complete_projects(
                 input.replace,
             )
             .description(project.name)
+            .field(input.field)
         })
         .collect())
 }
 
-let command = DeployArgs::command("deploy");
+#[derive(CommandArgs)]
+struct DeployArgs {
+    #[arg(complete = complete_projects)]
+    project: String,
+}
+
 let app = OxideBot::with_state(state)
-    .completer_for(&command, &[], "project", complete_projects)?
-    .include(Module::new().command(command, deploy));
+    .add(DeployArgs::feature("deploy", deploy));
 ```
 
 The same provider is used by text `?` completion, interactive missing-argument
@@ -176,13 +193,15 @@ values. It falls back from a full locale to the language and then to the
 configured default locale.
 
 ```rust
-let translations = TranslationCatalog::bounded(1_024, "en-US");
-translations.insert("en-US", "todo.created", "Created {id:text}")?;
-translations.insert("zh-CN", "todo.created", "已创建 {id:text}")?;
+let app = OxideBot::with_state(state)
+    .localization_from_dir("locales", "en-US", 1_024)
+    .expect("valid locale resources");
 
-let message = LocalizedMessage::new("todo.created")
-    .arg("id", 42_u64)
-    .render(&translations, Some("zh-CN"))?;
+async fn created(i18n: I18n) -> HandlerResult<Message> {
+    i18n.message("todo.created")
+        .arg("id", 42_u64)
+        .await
+}
 ```
 
 `language_module` and `StoredLocaleResolver` use a user-provided
@@ -264,17 +283,17 @@ definitions.
 Standard capabilities are ordinary modules:
 
 ```rust
+use oxidebot::standard::{echo_module, language_module, AdminTools};
+
 let features = Module::new()
     .include(echo_module())
     .include(language_module())
-    .include(shortcut_admin_module())
-    .include(command_admin_module())
-    .include(diagnostics_module())
+    .include(AdminTools::new().protected(admin_only))
     .help();
 ```
 
-Administration modules deliberately ship without a permission policy. An
-application must wrap them in an administrator guard.
+`AdminTools` groups command management, bounded shortcuts, and diagnostics,
+then returns an ordinary protected module.
 
 ## Deliberately not copied
 

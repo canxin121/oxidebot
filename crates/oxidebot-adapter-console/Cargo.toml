@@ -1,0 +1,17 @@
+[package]
+name = "oxidebot-adapter-console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runnable stdin/stdout adapter for OxideBot examples, local bots, and development"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync"] }

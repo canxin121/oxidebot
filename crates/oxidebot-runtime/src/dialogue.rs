@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 use oxidebot_core::{
     conversation::MessageTarget,
     event::Event,
-    source::message::Message,
+    source::message::{Message, MessageSegment},
     BotObject, ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
 };
 use std::{
@@ -148,6 +148,15 @@ impl Dialogue {
         self.question(prompt).attempts(1).run().await
     }
 
+    /// Collects a reusable typed form generated with
+    /// `#[derive(oxidebot::DialogueForm)]` or implemented manually.
+    pub async fn form<T>(&self) -> Result<T, HandlerError>
+    where
+        T: DialogueForm,
+    {
+        T::collect(self.clone()).await
+    }
+
     pub async fn confirm(&self, prompt: impl Into<Message>) -> Result<bool, HandlerError> {
         self.confirm_with(prompt, ConfirmationWords::default(), 3)
             .await
@@ -162,7 +171,7 @@ impl Dialogue {
         let mut prompt = prompt.into();
         let attempts = attempts.max(1);
         for attempt in 0..attempts {
-            let answer = self.ask_text(prompt).await?;
+            let answer = self.ask_text(words.decorate(prompt)).await?;
             if let Some(value) = words.parse(&answer) {
                 return Ok(value);
             }
@@ -171,9 +180,7 @@ impl Dialogue {
             }
             prompt = Message::text(words.retry_message.as_ref());
         }
-        Err(HandlerError::Parse(
-            "expected a yes/no confirmation".into(),
-        ))
+        Err(HandlerError::user(words.retry_message.as_ref()))
     }
 
     pub async fn choose<T, I, L>(
@@ -200,6 +207,27 @@ impl Dialogue {
         I: IntoIterator<Item = (L, T)>,
         L: Into<String>,
     {
+        self.choose_with_error(
+            prompt,
+            choices,
+            attempts,
+            Message::text("未知选项，请输入编号、选项名称或使用按钮。"),
+        )
+        .await
+    }
+
+    pub async fn choose_with_error<T, I, L>(
+        &self,
+        prompt: impl Into<Message>,
+        choices: I,
+        attempts: usize,
+        error_prompt: impl Into<Message>,
+    ) -> Result<T, HandlerError>
+    where
+        T: Clone,
+        I: IntoIterator<Item = (L, T)>,
+        L: Into<String>,
+    {
         let choices = choices
             .into_iter()
             .map(|(label, value)| (label.into(), value))
@@ -219,6 +247,7 @@ impl Dialogue {
         }));
 
         let attempts = attempts.max(1);
+        let error_prompt = error_prompt.into();
         let mut current_prompt = rendered;
         for attempt in 0..attempts {
             let answer = self.ask_text(current_prompt).await?;
@@ -236,10 +265,26 @@ impl Dialogue {
             if attempt + 1 == attempts {
                 break;
             }
-            current_prompt = Message::text("未知选项，请输入编号或选项名称。");
+            current_prompt = rendered_with_prefix(&error_prompt, &choices);
         }
-        Err(HandlerError::Parse("unknown choice".into()))
+        let message = error_prompt.get_raw_text();
+        Err(HandlerError::user(if message.trim().is_empty() {
+            "No valid choice was selected."
+        } else {
+            message.as_str()
+        }))
     }
+}
+
+
+/// Boxed future used by [`DialogueForm`] implementations. Form collection is
+/// a cold, explicitly interactive path, so boxing here does not affect normal
+/// message or command dispatch.
+pub type DialogueFormFuture<T> = BoxFuture<'static, Result<T, HandlerError>>;
+
+/// A reusable, strongly typed multi-question dialogue form.
+pub trait DialogueForm: Sized + Send + 'static {
+    fn collect(dialogue: Dialogue) -> DialogueFormFuture<Self>;
 }
 
 impl std::fmt::Debug for Dialogue {
@@ -297,6 +342,31 @@ impl ConfirmationWords {
                     .then_some(false)
             })
     }
+
+    fn decorate(&self, prompt: Message) -> Message {
+        let yes = self
+            .yes
+            .first()
+            .map_or_else(|| "yes".to_owned(), ToString::to_string);
+        let no = self
+            .no
+            .first()
+            .map_or_else(|| "no".to_owned(), ToString::to_string);
+        prompt.buttons([
+            oxidebot_core::Button::send_text(yes.clone(), yes),
+            oxidebot_core::Button::send_text(no.clone(), no),
+        ])
+    }
+}
+
+fn rendered_with_prefix<T>(error: &Message, choices: &[(String, T)]) -> Message {
+    let mut message = error.clone();
+    for (index, (label, _)) in choices.iter().enumerate() {
+        message.push(MessageSegment::text(format!("\n{}. {label}", index + 1)));
+    }
+    message.buttons(choices.iter().enumerate().map(|(index, (label, _))| {
+        oxidebot_core::Button::send_text(label.clone(), (index + 1).to_string())
+    }))
 }
 
 impl Default for ConfirmationWords {
@@ -414,7 +484,7 @@ where
             }
             prompt = self.error_prompt.clone();
         }
-        Err(HandlerError::Parse(final_error))
+        Err(HandlerError::user(final_error))
     }
 }
 

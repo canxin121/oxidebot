@@ -427,6 +427,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidebot-adapter-console"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "oxidebot-core",
+ "oxidebot-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "oxidebot-core"
 version = "1.0.0-alpha.1"
 dependencies = [
@@ -438,6 +449,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "oxidebot-console-example"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "oxidebot",
+ "oxidebot-adapter-console",
  "tokio",
 ]
 

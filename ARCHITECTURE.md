@@ -18,18 +18,18 @@ The public pipeline is:
 ```text
 Module candidate match
 -> Context<S>
--> MessageNormalizer / CommandRewriter
--> one command-tree parse
--> guards
--> CommandMiddleware / optional static or dynamic completion
--> before hooks
--> synchronous Extract<S> / Args<T> / BranchArgs<B>
+-> MessageNormalizer / bounded Shortcut / CommandRewriter
+-> one command-tree parse into CommandMatch
+-> feature-local and module guards
+-> CommandMiddleware / static, dynamic, or interactive completion
+-> feature-local and module before hooks
+-> synchronous Extract<S> / Args<T> / generated branch wrapper
 -> ordinary async function
 -> IntoOutcome
--> after hooks
--> CommandOutputMiddleware / CommandRenderer where applicable
+-> feature-local and module after hooks
+-> CommandOutputMiddleware / localized CommandRenderer where applicable
 -> handler-kind blocking default
--> DeliveryMiddleware
+-> Messenger / DeliveryMiddleware
 -> capability-aware DeliveryPlan
 -> adapter transport / DeliveryReport
 ```
@@ -54,6 +54,13 @@ State remains an explicit `State<S>` or `Context<S>` handler argument.
 `Module<S>` is a build-time collection of handler definitions, guards, and
 hooks. `include` flattens another module in registration order. It does not
 construct a path tree or another runtime.
+
+`Feature<S>` is the single-handler authoring unit. A generated command value,
+manual command, event, interaction, or native handler can keep its guard, hooks,
+platform/bot scope, propagation override, shortcuts, interactive completion,
+and typed dynamic completers together before being installed with
+`Module::add`. This prevents configuration for one behavior from being spread
+across the application builder and several small modules.
 
 Module-wide guards and before hooks are prepended to included handlers. Module
 `after` hooks are appended, so child after hooks run before parent after hooks.
@@ -89,7 +96,9 @@ temporary candidate vector.
 
 `Extract<S>` is synchronous and monomorphized. Built-in extraction consists of
 matching or borrowing the canonical event and cloning only small owned values
-or clone-cheap handles requested by the handler.
+or clone-cheap handles requested by the handler. `#[derive(BotState)]` generates
+static `FromState<Root>` mappings, so handlers can request `State<Service>`
+without a runtime type map or repetitive extractor implementations.
 
 No extractor runs before a handler matches. Interactive completion is not an
 extractor: the command endpoint performs that workflow once, then `Args<T>`
@@ -106,8 +115,12 @@ segments. Text segments use a shell-like tokenizer; mentions, files, media, and
 other segments remain typed `CommandValue` variants.
 
 `CommandSchema` is shared by parsing, validation, automatic help, usage output,
-and interactive completion. `#[derive(CommandArgs)]` generates schema and
-conversion code rather than a parallel parser.
+interactive completion, and platform-native publication. `#[derive(CommandArgs)]`
+generates schema and conversion code rather than a parallel parser.
+`#[oxidebot::command]` and `#[oxidebot::branch]` generate installable feature
+values, so a command or branch is declared once and added with `Module::add`.
+`#[oxidebot::completer]` gives a state-aware completion function a static provider
+type; `#[arg(complete = provider)]` binds it beside the owning field.
 
 Completion is entered only for `MissingArgument`, after module guards. It
 registers an exact bounded session before sending a prompt, preventing a fast
@@ -133,9 +146,12 @@ message still continues naturally. Explicit `Outcome::stop()` and
 The compiled dispatcher enforces the configured deferred-reply count and sends
 messages through the same `CallApiTrait` object exposed to handlers.
 
-`Reply` bypasses deferred effects for workflows that need platform results
-immediately. It returns a `Receipt` over every `SendMessageResponse`, preserving
-platform message splitting.
+`Messenger` is the ordinary immediate-send facade. It unifies natural replies,
+current-conversation sends, explicit proactive `Address` targets, deterministic
+bot selection, fallback policy, and receipts. `Reply` remains the smaller
+current-conversation primitive used internally and as an advanced extractor.
+Both return a `Receipt` over every `SendMessageResponse`, preserving platform
+message splitting.
 
 ## Guards and hooks
 
@@ -207,6 +223,11 @@ freezes them before adapters start. Ordinary async functions implement these
 traits through ownership-based blanket implementations, so extension code does
 not borrow a transient request object or require dynamic parameter injection.
 
+`TranslationCatalog` loads bounded structure-preserving JSON resources
+atomically. The same catalog may back handler-local `I18n` messages and the
+catalog-aware command renderer. Missing framework templates fall back to the
+built-in renderer rather than making command errors or help delivery fallible.
+
 Runtime shortcuts and command enablement live in a bounded `CommandRegistry`.
 Its revision is explicit, and native command publication is refreshed after an
 enablement change. Static shortcuts opt only matching command IDs into dynamic
@@ -225,3 +246,26 @@ Media access is explicit. `LocalMediaResolver` reads bounded local/base64 data;
 network fetching and hosting are caller-supplied `MediaFetcher` and `MediaHost`
 services. This keeps network access, credentials, file retention, and byte
 budgets outside the core parser and dispatcher.
+
+## Authoring and adapter conveniences
+
+The convenience layer is intentionally compile-time or cold-path only:
+
+- `#[derive(DialogueForm)]` compiles bounded questions, retries, validation,
+  choices, and confirmation into the existing session registry;
+- `DialogueQuestion<T>` validates and retries without changing normal dispatch;
+- `ResultExt` and `OptionExt` preserve the explicit user/internal/API error
+  boundary while removing repetitive `map_err` blocks;
+- focused preludes keep ordinary IDE completion small while retaining an
+  explicit `oxidebot::all::*` compatibility surface;
+- `MessageFrame` and `AdapterContext::submit_text` provide a conservative
+  canonical-frame path for simple transports, while high-throughput adapters
+  retain direct `InboundFrame` control;
+- `BotTest` adds deterministic send barriers over `ScriptedAdapter`, and
+  `CommandTest` parses the same immutable command IR without starting runtime
+  workers.
+
+The workspace console adapter is a real finite stdin/stdout transport used by a
+copyable interactive example. It exercises the same event, command, message,
+delivery, and receipt paths as network adapters rather than providing a second
+mock authoring API.

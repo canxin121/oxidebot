@@ -1,7 +1,9 @@
+use oxidebot::commands::{CommandOverlay, Shortcut};
 use oxidebot::prelude::*;
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};
 
 #[oxidebot::command("ping")]
+/// Check whether the bot is alive.
 async fn ping() -> &'static str {
     "pong"
 }
@@ -37,7 +39,8 @@ enum ToolsCommand {
     Add(AddArgs),
 }
 
-async fn echo(BranchArgs(args): BranchArgs<tools_command_branches::Echo>) -> Message {
+#[oxidebot::branch(tools_command_branches::Echo)]
+async fn echo(args: EchoArgs) -> Message {
     Message::text(
         std::iter::repeat_n(args.text.join(" "), args.times)
             .collect::<Vec<_>>()
@@ -45,7 +48,8 @@ async fn echo(BranchArgs(args): BranchArgs<tools_command_branches::Echo>) -> Mes
     )
 }
 
-async fn add(BranchArgs(args): BranchArgs<tools_command_branches::Add>) -> Message {
+#[oxidebot::branch(tools_command_branches::Add)]
+async fn add(args: AddArgs) -> Message {
     Message::text(format!("added: {}", args.text.join(" ")))
 }
 
@@ -75,14 +79,9 @@ async fn main() -> oxidebot::Result<()> {
     );
 
     let features = Module::new()
-        .command(
-            ping_command()
-                .description("Check whether the bot is alive")
-                .description_translation("zh-CN", "检查机器人是否在线"),
-            ping,
-        )
-        .command_branch(tools_command_branches::Echo, echo)
-        .command_branch(tools_command_branches::Add, add)
+        .add(ping)
+        .add(echo)
+        .add(add)
         .command_overlay(
             CommandOverlay::new("tools").shortcut(Shortcut::literal("repeat", "/tools echo")),
         )

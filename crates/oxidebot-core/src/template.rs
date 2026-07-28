@@ -2,8 +2,9 @@
 
 use crate::{File, Message, MessageSegment, SegmentKind};
 use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt, fs,
+    path::Path,
     sync::{Arc, RwLock},
 };
 
@@ -401,6 +402,18 @@ struct TranslationCatalogState {
 }
 
 impl TranslationCatalog {
+    /// Creates a bounded catalog and loads every `<locale>.json` resource in
+    /// one directory.
+    pub fn from_dir(
+        capacity: usize,
+        default_locale: impl Into<Arc<str>>,
+        directory: impl AsRef<Path>,
+    ) -> Result<Self, TranslationError> {
+        let catalog = Self::bounded(capacity, default_locale);
+        catalog.load_dir(directory)?;
+        Ok(catalog)
+    }
+
     #[must_use]
     pub fn bounded(capacity: usize, default_locale: impl Into<Arc<str>>) -> Self {
         Self {
@@ -431,6 +444,80 @@ impl TranslationCatalog {
         }
         state.templates.insert(map_key, template);
         Ok(())
+    }
+
+    /// Loads one JSON object whose keys are translation keys and whose values
+    /// are structure-preserving message templates. Parsing and capacity
+    /// validation finish before the catalog is mutated, so a malformed file
+    /// cannot leave a partially loaded locale behind.
+    pub fn load_json_file(
+        &self,
+        locale: impl Into<Arc<str>>,
+        path: impl AsRef<Path>,
+    ) -> Result<usize, TranslationError> {
+        let entries = parse_translation_file(locale.into(), path.as_ref())?;
+        self.insert_parsed(entries)
+    }
+
+    /// Loads every `<locale>.json` file from a directory in deterministic file
+    /// name order. The entire directory is parsed and capacity-checked before
+    /// any entry is committed.
+    pub fn load_dir(&self, directory: impl AsRef<Path>) -> Result<usize, TranslationError> {
+        let directory = directory.as_ref();
+        let mut files = fs::read_dir(directory)
+            .map_err(|error| {
+                TranslationError::Io(format!(
+                    "could not read translation directory {}: {error}",
+                    directory.display(),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TranslationError::Io(error.to_string()))?;
+        files.sort_by_key(|entry| entry.file_name());
+
+        let mut entries = Vec::new();
+        for entry in files {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let locale = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    TranslationError::Document(format!(
+                        "translation file {} has no locale file stem",
+                        path.display(),
+                    ))
+                })?;
+            entries.extend(parse_translation_file(Arc::<str>::from(locale), &path)?);
+        }
+        self.insert_parsed(entries)
+    }
+
+    fn insert_parsed(
+        &self,
+        entries: Vec<((Arc<str>, Arc<str>), MessageTemplate)>,
+    ) -> Result<usize, TranslationError> {
+        let mut state = self
+            .inner
+            .write()
+            .expect("translation catalog lock poisoned");
+        let mut new_keys = HashSet::new();
+        for (key, _) in &entries {
+            if !state.templates.contains_key(key) {
+                new_keys.insert(key.clone());
+            }
+        }
+        if state.templates.len().saturating_add(new_keys.len()) > state.capacity {
+            return Err(TranslationError::CapacityExceeded);
+        }
+        let count = entries.len();
+        for (key, template) in entries {
+            state.templates.insert(key, template);
+        }
+        Ok(count)
     }
 
     #[must_use]
@@ -481,6 +568,29 @@ impl TranslationCatalog {
     }
 }
 
+fn parse_translation_file(
+    locale: Arc<str>,
+    path: &Path,
+) -> Result<Vec<((Arc<str>, Arc<str>), MessageTemplate)>, TranslationError> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        TranslationError::Io(format!("could not read {}: {error}", path.display()))
+    })?;
+    let values: BTreeMap<String, String> = serde_json::from_str(&source).map_err(|error| {
+        TranslationError::Document(format!(
+            "invalid translation JSON {}: {error}",
+            path.display(),
+        ))
+    })?;
+    let locale = normalize_locale(locale);
+    values
+        .into_iter()
+        .map(|(key, template)| {
+            let template = MessageTemplate::parse(template).map_err(TranslationError::Template)?;
+            Ok(((Arc::clone(&locale), Arc::<str>::from(key)), template))
+        })
+        .collect()
+}
+
 fn normalize_locale(locale: Arc<str>) -> Arc<str> {
     Arc::from(locale.trim().replace('_', "-"))
 }
@@ -506,6 +616,16 @@ impl LocalizedMessage {
         self
     }
 
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &BTreeMap<Arc<str>, TemplateValue> {
+        &self.values
+    }
+
     pub fn render(
         &self,
         catalog: &TranslationCatalog,
@@ -519,6 +639,8 @@ impl LocalizedMessage {
 pub enum TranslationError {
     CapacityExceeded,
     MissingKey { locale: String, key: String },
+    Io(String),
+    Document(String),
     Template(TemplateError),
 }
 
@@ -532,6 +654,7 @@ impl fmt::Display for TranslationError {
                     "missing translation `{key}` for locale `{locale}`"
                 )
             }
+            Self::Io(error) | Self::Document(error) => formatter.write_str(error),
             Self::Template(error) => error.fmt(formatter),
         }
     }

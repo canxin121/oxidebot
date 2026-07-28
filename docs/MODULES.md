@@ -15,6 +15,7 @@ routing, and no Tower continuation chain.
 A handler is an async function with zero to twelve typed arguments:
 
 ```rust
+#[oxidebot::command("ping")]
 async fn ping() -> &'static str {
     "pong"
 }
@@ -31,7 +32,7 @@ async fn inspect(
     state
         .inspect(user.id, group.0)
         .await
-        .map_err(|error| HandlerError::internal(error.to_string()))
+        .internal("inspect account")
 }
 ```
 
@@ -42,7 +43,7 @@ handler has matched and after module admission and command validation/completion
 
 ```rust
 let features = Module::new()
-    .command(command("ping"), ping)
+    .add(ping)
     .message(observe_message)
     .on(tags::FriendAdd, friend_request)
     .interaction("settings.save", save_settings)
@@ -72,8 +73,8 @@ async fn send_with_return() -> &'static str {
     "done"
 }
 
-async fn send_immediately(reply: Reply) -> HandlerResult<()> {
-    reply.send("done").await?;
+async fn send_immediately(messenger: Messenger) -> HandlerResult<()> {
+    messenger.send("done").await?;
     Ok(())
 }
 ```
@@ -152,6 +153,30 @@ impl Extract<AppState> for Tenant {
 Asynchronous authorization or lookup belongs in a guard or in the handler's
 business logic, rather than a hidden asynchronous argument pipeline.
 
+## One immediate-send facade
+
+Returning `Message` is the simplest reply path. When a handler needs an
+immediate receipt, proactive target, or progress edit, request `Messenger`:
+
+```rust
+use oxidebot::delivery::prelude::Address;
+
+async fn deploy(messenger: Messenger) -> HandlerResult<()> {
+    let progress = messenger.reply("Deploying...").await?;
+    progress.edit("Deployment complete").await?;
+
+    messenger
+        .to(Address::group("operations"))?
+        .send("A deployment completed")
+        .await?;
+    Ok(())
+}
+```
+
+`Messenger` unifies current-target send/reply, explicit `Address` delivery,
+fallback policy, deterministic bot selection, delivery middleware, and
+`Receipt`. `Bot` remains the full low-level API escape hatch.
+
 ## Typed full-event access
 
 ```rust
@@ -173,14 +198,16 @@ payload. Ask for `State<S>` or `Context<S>` separately when state is needed.
 ```rust
 fn todo_module() -> Module<AppState> {
     Module::new()
-        .command(command("todo add"), add_todo)
-        .command(command("todo list"), list_todos)
+        .add(command("todo add").handle(add_todo))
+        .add(command("todo list").handle(list_todos))
 }
 
 fn admin_module() -> Module<AppState> {
-    Module::new()
-        .command(command("admin stats"), admin_stats)
-        .guard(admin_only)
+    Module::new().add(
+        command("admin stats")
+            .handle(admin_stats)
+            .guard(admin_only),
+    )
 }
 
 let application = Module::new()
@@ -219,9 +246,11 @@ async fn group_admin(context: Context<AppState>) -> GuardDecision {
     }
 }
 
-let admin = Module::new()
-    .command(command("admin purge"), purge)
-    .guard(group_admin);
+let admin = Module::new().add(
+    command("admin purge")
+        .handle(purge)
+        .guard(group_admin),
+);
 ```
 
 Decisions are:
@@ -290,18 +319,31 @@ the application build with an explicit route error.
 
 ## State
 
-`State<S>` exposes the root `Arc<S>`:
+`#[derive(BotState)]` generates static, monomorphized projections for selected
+services. There is no runtime type map:
 
 ```rust
-async fn handler(State(state): State<AppState>) {
-    state.database.query().await;
+#[derive(BotState)]
+struct AppState {
+    #[state]
+    database: Database,
+
+    #[state]
+    projects: std::sync::Arc<ProjectStore>,
+}
+
+async fn handler(
+    State(database): State<Database>,
+    State(projects): State<ProjectStore>,
+) {
+    database.query().await;
+    projects.refresh().await;
 }
 ```
 
-OxideBot does not maintain a `FromRef` projection registry. Put focused service
-methods on the root state, keep clone-cheap service handles as fields, or define
-a transparent custom extractor when a synchronous projection improves a public
-module API.
+Requesting `State<AppState>` still exposes the root `Arc<AppState>`. A custom
+`Extract<AppState>` remains appropriate for event-derived values rather than
+state fields.
 
 ## Error semantics
 
@@ -357,17 +399,18 @@ The built-in conveniences are ordinary modules and share the same state,
 command IR, scheduler, and delivery pipeline:
 
 ```rust
-let admin = Module::new()
-    .include(command_admin_module())
-    .include(shortcut_admin_module())
-    .include(diagnostics_module())
-    .guard(admin_only);
+use oxidebot::standard::{echo_module, language_module, AdminTools};
 
 let features = Module::new()
     .include(echo_module())
     .include(language_module())
-    .include(admin)
+    .include(
+        AdminTools::new()
+            .prefix("oxidebot")
+            .protected(admin_only),
+    )
     .help();
 ```
 
-Administrative modules intentionally have no implicit permission policy.
+`AdminTools` can independently enable command management, shortcut management,
+and diagnostics. Its commands remain an ordinary protected `Module`.

@@ -19,7 +19,7 @@ two competing mental models.
 | `FromRequest<S>` | synchronous `Extract<S>` |
 | `Parsed<T>` | `Args<T>` |
 | `Extensions` / `Extension<T>` | root `State<S>`, explicit arguments, or custom `Extract` |
-| `FromRef<S>` | root `State<S>` or custom `Extract` |
+| `FromRef<S>` | `#[derive(BotState)]` + focused `State<Service>` |
 | `layer(from_fn(...))` | `guard`, `before`, and `after` |
 | `Next<S>` | removed; hooks have direct Bot-domain phases |
 | `route_layer` | removed; module hooks are order-independent |
@@ -47,17 +47,18 @@ OxideBot::new()
 After:
 
 ```rust
+#[oxidebot::command("ping")]
 async fn ping() -> &'static str {
     "pong"
 }
 
-let features = Module::new()
-    .command(command("ping"), ping);
-
 OxideBot::new()
     .adapter(adapter)
-    .include(features);
+    .add(ping);
 ```
+
+The generated feature carries the schema and handler together; no separate
+`ping_command()` value must be paired with `ping`.
 
 ## Replace nested-route vocabulary
 
@@ -74,8 +75,8 @@ After:
 
 ```rust
 let features = Module::new()
-    .command(command("admin ban"), ban)
-    .command(command("admin mute"), mute);
+    .add(command("admin ban").handle(ban))
+    .add(command("admin mute").handle(mute));
 ```
 
 The old `mount` only rewrote command strings and did nothing meaningful to
@@ -98,23 +99,27 @@ async fn handler(
 After:
 
 ```rust
+#[derive(BotState)]
+struct AppState {
+    #[state]
+    database: Database,
+}
+
 async fn handler(
     Args(args): Args<MyArgs>,
-    State(state): State<AppState>,
+    State(database): State<Database>,
     Sender(user): Sender,
 ) -> HandlerResult<String> {
-    state
-        .database
+    database
         .run(identity_for(&user), args)
         .await
-        .map_err(|error| HandlerError::internal(error.to_string()))
+        .internal("run command")
 }
 ```
 
-`State<S>` now always exposes the root `Arc<S>`. For a reusable synchronous
-domain projection, implement `Extract<AppState>` explicitly. For asynchronous
-authorization, use a module guard or ordinary business logic instead of a
-hidden request-local type map.
+`BotState` generates static projections; there is no runtime extension or
+substate map. Ask for `State<AppState>` when the complete root is genuinely
+needed. For asynchronous authorization, use a guard or ordinary business logic.
 
 ## Replace middleware
 
@@ -220,7 +225,7 @@ Map internal failures to an internal variant:
 ```rust
 operation()
     .await
-    .map_err(|error| HandlerError::internal(error.to_string()))?;
+    .internal("perform operation")?;
 ```
 
 Only `HandlerError::User` is replied to. Other variants are logged.
@@ -241,6 +246,7 @@ OxideBot::new().handler(on(
 After:
 
 ```rust
+#[oxidebot::command("ping")]
 async fn ping(context: MessageContext) -> &'static str {
     assert_eq!(context.text(), "/ping");
     "pong"
@@ -248,7 +254,7 @@ async fn ping(context: MessageContext) -> &'static str {
 
 OxideBot::new()
     .adapter(adapter)
-    .include(Module::new().command(command("ping"), ping));
+    .add(ping);
 ```
 
 The complete event remains available through `EventContext<Tag>`. Removing the

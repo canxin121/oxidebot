@@ -1,0 +1,9 @@
+{
+  "hello": "Hello {user:mention}! This localized message uses the unified Message IR.",
+  "setup.complete": "Project {name} configured: environment={environment}, confirmed={confirmed}",
+  "oxidebot.command.catalog": "{body:message}",
+  "oxidebot.command.help": "{body:message}",
+  "oxidebot.command.not_found": "{body:message}",
+  "oxidebot.command.parse_error": "{body:message}",
+  "oxidebot.command.suggestions": "{body:message}"
+}

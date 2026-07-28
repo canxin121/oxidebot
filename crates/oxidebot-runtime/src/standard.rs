@@ -2,12 +2,103 @@
 
 use crate::{
     command, Args, ArgumentSpec, CommandArgs, CommandParseError, CommandRegistry, CommandSchema,
-    Context, EventLocaleResolver, HandlerError, HandlerResult, LocaleResolver, Module,
+    Context, EventLocaleResolver, Guard, HandlerError, HandlerResult, LocaleResolver, Module,
     ParsedArguments, Sender, Shortcut, State,
 };
 use async_trait::async_trait;
 use oxidebot_core::Message;
 use std::sync::Arc;
+
+/// Configures the built-in command-management, shortcut-management, and
+/// diagnostics features as one ordinary [`Module`].
+#[derive(Clone, Debug)]
+pub struct AdminTools {
+    prefix: Arc<str>,
+    command_management: bool,
+    shortcut_management: bool,
+    diagnostics: bool,
+}
+
+impl Default for AdminTools {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdminTools {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            prefix: Arc::from("oxidebot"),
+            command_management: true,
+            shortcut_management: true,
+            diagnostics: true,
+        }
+    }
+
+    /// Sets the command-word prefix. An empty prefix exposes leaf names
+    /// directly. The default creates `/oxidebot commands`,
+    /// `/oxidebot shortcut`, and `/oxidebot diagnostics`.
+    #[must_use]
+    pub fn prefix(mut self, value: impl Into<Arc<str>>) -> Self {
+        self.prefix = value.into();
+        self
+    }
+
+    #[must_use]
+    pub const fn command_management(mut self, enabled: bool) -> Self {
+        self.command_management = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn shortcut_management(mut self, enabled: bool) -> Self {
+        self.shortcut_management = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn diagnostics(mut self, enabled: bool) -> Self {
+        self.diagnostics = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn module<S>(&self) -> Module<S>
+    where
+        S: Send + Sync + 'static,
+    {
+        let mut module = Module::new();
+        if self.command_management {
+            module = module.include(command_admin_module_named(self.name("commands")));
+        }
+        if self.shortcut_management {
+            module = module.include(shortcut_admin_module_named(self.name("shortcut")));
+        }
+        if self.diagnostics {
+            module = module.include(diagnostics_module_named(self.name("diagnostics")));
+        }
+        module
+    }
+
+    #[must_use]
+    pub fn protected<S, G>(&self, guard: G) -> Module<S>
+    where
+        S: Send + Sync + 'static,
+        G: Guard<S>,
+    {
+        self.module::<S>().guard(guard)
+    }
+
+    fn name(&self, leaf: &str) -> String {
+        let prefix = self.prefix.trim();
+        if prefix.is_empty() {
+            leaf.to_owned()
+        } else {
+            format!("{prefix} {leaf}")
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EchoArguments {
@@ -231,8 +322,15 @@ pub fn command_admin_module<S>() -> Module<S>
 where
     S: Send + Sync + 'static,
 {
+    command_admin_module_named("commands")
+}
+
+fn command_admin_module_named<S>(name: impl Into<Arc<str>>) -> Module<S>
+where
+    S: Send + Sync + 'static,
+{
     Module::new().command(
-        CommandAdminArguments::command("commands").description("查看、启用或停用运行时命令"),
+        CommandAdminArguments::command(name).description("查看、启用或停用运行时命令"),
         command_admin_handler,
     )
 }
@@ -359,8 +457,15 @@ pub fn shortcut_admin_module<S>() -> Module<S>
 where
     S: Send + Sync + 'static,
 {
+    shortcut_admin_module_named("shortcut")
+}
+
+fn shortcut_admin_module_named<S>(name: impl Into<Arc<str>>) -> Module<S>
+where
+    S: Send + Sync + 'static,
+{
     Module::new().runtime_shortcuts().command(
-        ShortcutArguments::command("shortcut").description("增加、删除或列出有界运行时快捷指令"),
+        ShortcutArguments::command(name).description("增加、删除或列出有界运行时快捷指令"),
         shortcut_handler,
     )
 }
@@ -381,8 +486,15 @@ pub fn diagnostics_module<S>() -> Module<S>
 where
     S: Send + Sync + 'static,
 {
+    diagnostics_module_named("oxidebot diagnostics")
+}
+
+fn diagnostics_module_named<S>(name: impl Into<Arc<str>>) -> Module<S>
+where
+    S: Send + Sync + 'static,
+{
     Module::new().command(
-        command("oxidebot diagnostics").description("显示 OxideBot 命令注册表诊断信息"),
+        command(name).description("显示 OxideBot 命令注册表诊断信息"),
         diagnostics_handler,
     )
 }

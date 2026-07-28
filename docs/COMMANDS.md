@@ -44,11 +44,11 @@ async fn create_release(Args(args): Args<CreateReleaseArgs>) -> String {
     format!("creating {} in {}", args.name, args.environment)
 }
 
-let features = Module::new().command(
-    CreateReleaseArgs::command("release-create")
-        .example("/release-create v1.2 -e production -vv -t stable"),
-    create_release,
-);
+let release = CreateReleaseArgs::command("release-create")
+    .example("/release-create v1.2 -e production -vv -t stable")
+    .handle(create_release);
+
+let features = Module::new().add(release);
 ```
 
 The generated schema drives:
@@ -102,7 +102,9 @@ async fn todo(Args(command): Args<TodoCommand>) -> String {
     }
 }
 
-let features = Module::new().command(TodoCommand::command(), todo).help();
+let features = Module::new()
+    .add(TodoCommand::feature(todo))
+    .help();
 ```
 
 The grammar above accepts `/todo add`, `/todo done`, and `/todo list`. Missing
@@ -211,7 +213,7 @@ The command IR supports three related flows:
    required argument.
 
 ```rust
-let deploy = DeployArgs::command("deploy").completion(
+let deploy = DeployArgs::feature("deploy", deploy).completion(
     CompletionConfig::new()
         .timeout(std::time::Duration::from_secs(60))
         .max_rounds(3)
@@ -264,20 +266,24 @@ A large command tree does not need one giant `match`. Derive-generated branch
 markers bind themselves to the owning command tree:
 
 ```rust
-async fn add(
-    BranchArgs(args): BranchArgs<todo_command_branches::Add>,
-) -> String {
+#[oxidebot::branch(todo_command_branches::Add)]
+async fn add(args: AddArgs) -> String {
     args.text.join(" ")
 }
 
+#[oxidebot::branch(todo_command_branches::List, unit)]
+async fn list() -> &'static str {
+    "list"
+}
+
 let module = Module::new()
-    .command_branch(todo_command_branches::Add, add)
-    .command_branch(todo_command_branches::List, list);
+    .add(add)
+    .add(list);
 ```
 
-The root command is still parsed only once. Nested subcommand markers can opt
-into descendant matching, and `BranchArgs` validates the selected stable path
-before constructing its typed arguments.
+The root command is still parsed only once. The attribute macro keeps the
+stable branch marker and `BranchArgs` plumbing inside generated code. The
+lower-level marker APIs remain available for framework tooling.
 
 ## Function commands
 
@@ -293,10 +299,11 @@ async fn echo(
     format!("{}: {}", user.id, text.join(" "))
 }
 
-let module = Module::new().command(echo_command(), echo);
+let module = Module::new().add(echo);
 ```
 
-Parameters carrying `#[arg(...)]` are command values. Other parameters remain
+The generated value contains the schema and handler together, so they cannot
+be accidentally mismatched during registration. Parameters carrying `#[arg(...)]` are command values. Other parameters remain
 ordinary extractors. Generic functions and methods intentionally use the
 explicit `CommandArgs` path instead.
 
@@ -308,7 +315,8 @@ let command = TodoCommand::command()
     .shortcut(Shortcut::regex(
         r"^添加(?P<text>.+)$",
         "/todo add {text}",
-    )?);
+    )
+    .expect("valid shortcut pattern"));
 ```
 
 Literal shortcuts may preserve a token-boundary tail or explicitly allow a
@@ -322,10 +330,12 @@ never executes a command directly.
 
 ## Dynamic completion
 
-Mark a field as autocomplete-capable and register a provider through its stable
-field ID:
+Keep the provider beside its field. `#[oxidebot::completer]` turns one
+state-aware async function into a statically typed provider, and the generated
+`CommandArgs::feature` installs it automatically:
 
 ```rust
+#[oxidebot::completer]
 async fn complete_projects(
     context: Context<AppState>,
     input: CompletionInput,
@@ -334,8 +344,10 @@ async fn complete_projects(
         .state()
         .projects
         .search(&input.partial)
-        .await?
+        .await
+        .internal("complete projects")?
         .into_iter()
+        .take(input.limit)
         .map(|project| {
             CompletionItem::new(
                 project.id,
@@ -343,14 +355,19 @@ async fn complete_projects(
                 input.replace,
             )
             .description(project.name)
+            .field(input.field)
         })
         .collect())
 }
 
-let command = DeployArgs::command("deploy");
-let app = OxideBot::with_state(state)
-    .completer_for(&command, &[], "project", complete_projects)?
-    .include(Module::new().command(command, deploy));
+#[derive(CommandArgs)]
+struct DeployArgs {
+    #[arg(complete = complete_projects, prompt = "Which project?")]
+    project: String,
+}
+
+let module = Module::new()
+    .add(DeployArgs::feature("deploy", deploy));
 ```
 
 The same provider feeds textual `?` completion, missing-value dialogue, and
