@@ -1,36 +1,96 @@
-# Migrating typed-context handlers to Router
+# Migrating from the Web-shaped draft API
 
-The original API remains valid:
+This release deliberately removes the parts of the earlier 1.0 draft that
+modeled a bot event as an HTTP request. The change is intentionally breaking:
+there is one recommended authoring path rather than compatibility aliases for
+two competing mental models.
 
-```rust
-OxideBot::new().handler(on(
-    message().command("ping"),
-    |_context: MessageContext| async move {
-        Ok(Outcome::stop().text("pong"))
-    },
-));
-```
+## Name mapping
 
-The equivalent Router handler is:
+| Earlier draft | Current API |
+| --- | --- |
+| `Router<S>` | `Module<S>` |
+| `router.merge(other)` | `module.include(other)` |
+| `router.mount("admin", child)` | explicit command names such as `"admin ban"` |
+| `Plugin` / `router.plugin(...)` | a function returning `Module<S>` + `include` |
+| `Request<S>` | `Context<S>` |
+| `Response` | `Outcome` |
+| `IntoResponse` | `IntoOutcome` |
+| `FromRequest<S>` | synchronous `Extract<S>` |
+| `Parsed<T>` | `Args<T>` |
+| `Extensions` / `Extension<T>` | root `State<S>`, explicit arguments, or custom `Extract` |
+| `FromRef<S>` | root `State<S>` or custom `Extract` |
+| `layer(from_fn(...))` | `guard`, `before`, and `after` |
+| `Next<S>` | removed; hooks have direct Bot-domain phases |
+| `route_layer` | removed; module hooks are order-independent |
+| `Router::handler` / `on(matcher, ...)` | `Module::on`, `message`, `command`, `interaction`, `native` |
+| `OxideBot::bot(adapter)` | `OxideBot::adapter(adapter)` |
+| `OxideBot::router(routes)` | `OxideBot::include(module)` |
+
+## Minimal command
+
+Before:
 
 ```rust
 async fn ping() -> &'static str {
     "pong"
 }
 
-let routes = Router::new().command(command("ping"), ping);
-OxideBot::new().router(routes);
+let routes = Router::new()
+    .command(command("ping"), ping);
+
+OxideBot::new()
+    .bot(adapter)
+    .router(routes);
 ```
 
-## Replace context reads with extractors
+After:
+
+```rust
+async fn ping() -> &'static str {
+    "pong"
+}
+
+let features = Module::new()
+    .command(command("ping"), ping);
+
+OxideBot::new()
+    .adapter(adapter)
+    .include(features);
+```
+
+## Replace nested-route vocabulary
 
 Before:
 
 ```rust
-async move {
-    let user = context.event().sender.clone();
-    let text = context.text();
-    let state = context.state();
+let features = Router::new()
+    .mount("admin", Router::new()
+        .command(command("ban"), ban)
+        .command(command("mute"), mute));
+```
+
+After:
+
+```rust
+let features = Module::new()
+    .command(command("admin ban"), ban)
+    .command(command("admin mute"), mute);
+```
+
+The old `mount` only rewrote command strings and did nothing meaningful to
+event routes. Multi-word commands now state their real syntax directly.
+
+## Replace request extraction
+
+Before:
+
+```rust
+async fn handler(
+    Parsed(args): Parsed<MyArgs>,
+    State(database): State<Database>,
+    Extension(identity): Extension<Identity>,
+) -> String {
     // ...
 }
 ```
@@ -39,37 +99,159 @@ After:
 
 ```rust
 async fn handler(
-    Sender(user): Sender,
-    Text(text): Text,
+    Args(args): Args<MyArgs>,
     State(state): State<AppState>,
-) {
-    // ...
+    Sender(user): Sender,
+) -> HandlerResult<String> {
+    state
+        .database
+        .run(identity_for(&user), args)
+        .await
+        .map_err(|error| HandlerError::internal(error.to_string()))
 }
 ```
 
-Keep `EventContext<tags::...>` alongside extractors when the complete original
-payload is useful.
+`State<S>` now always exposes the root `Arc<S>`. For a reusable synchronous
+domain projection, implement `Extract<AppState>` explicitly. For asynchronous
+authorization, use a module guard or ordinary business logic instead of a
+hidden request-local type map.
 
-## Replace manual argument parsing
+## Replace middleware
 
-Move command fields into a `CommandArgs` struct, then extract `Parsed<T>`. This
-centralizes parsing, errors, defaults, help, and optional dialogue completion.
+Before:
 
-## Replace deferred Outcome boilerplate
+```rust
+async fn auth(
+    mut request: Request<AppState>,
+    next: Next<AppState>,
+) -> Response {
+    // inspect, mutate Extensions, call next
+}
 
-- `Ok(Outcome::stop().text(text))` becomes `text` or `Ok(text)`.
-- `Ok(Outcome::continue_())` becomes `()` or `Response::continue_()`.
-- Multiple deferred replies use `Response::stop().reply(a).reply(b)`.
-- Workflows needing send IDs use `Reply` and `Receipt`.
+let routes = routes.layer(from_fn(auth));
+```
 
-## Compose feature modules
+After, admission is a guard:
 
-Return `Router<AppState>` from each feature instead of registering handlers into
-a feature-owned runtime. Merge or mount those Routers in one root Router.
+```rust
+async fn auth(context: Context<AppState>) -> GuardDecision {
+    if context.state().allows(context.event()) {
+        GuardDecision::allow()
+    } else {
+        GuardDecision::deny("Permission denied.")
+    }
+}
 
-## Migrate incrementally
+let features = features.guard(auth);
+```
 
-`Router::handler(old_handler)` accepts an existing `Handler<S>`, and
-`OxideBot::handler` remains available. New and old handlers share the compiled
-candidate tables and one canonical event allocation, so migration does not
-require an all-at-once adapter or event-model rewrite.
+Observation is a phase hook:
+
+```rust
+async fn trace_start(context: Context<AppState>) {
+    tracing::debug!(event = ?context.event_type(), "start");
+}
+
+async fn trace_end(
+    context: Context<AppState>,
+    outcome: Outcome,
+) -> Outcome {
+    tracing::debug!(
+        event = ?context.event_type(),
+        replies = outcome.replies().len(),
+        "end",
+    );
+    outcome
+}
+
+let features = features
+    .before(trace_start)
+    .after(trace_end);
+```
+
+Hooks apply to the entire module regardless of declaration order. There is no
+`layer` versus `route_layer` distinction.
+
+## Replace response flow assumptions
+
+Earlier, the return type implicitly controlled routing:
+
+```text
+String -> reply and stop
+()     -> continue
+None   -> continue
+```
+
+Now handler kind controls the natural default:
+
+```text
+command / interaction -> stop
+ordinary event / native observer -> continue
+```
+
+Returning a message controls only the reply. `()` is therefore safe for a
+command that already sent through `Reply`; it still blocks as a command.
+
+Use explicit overrides only when necessary:
+
+```rust
+Outcome::continue_().reply("allow another handler")
+Outcome::stop().reply("consume this event")
+```
+
+`Option<T>: IntoOutcome` remains available for optional effects. `None` produces
+no deferred reply, while the matched handler kind still supplies the routing
+default, so absence cannot silently change command-versus-observer flow.
+
+## Replace error conversion
+
+The earlier blanket `Result<T, E: Display>` conversion could leak database,
+filesystem, token, or platform details to a chat. Current fallible handlers
+require `E: Into<HandlerError>`.
+
+Use a deliberate user error:
+
+```rust
+Err(HandlerError::user("That project does not exist."))
+```
+
+Map internal failures to an internal variant:
+
+```rust
+operation()
+    .await
+    .map_err(|error| HandlerError::internal(error.to_string()))?;
+```
+
+Only `HandlerError::User` is replied to. Other variants are logged.
+
+## Replace legacy matcher registration
+
+Before:
+
+```rust
+OxideBot::new().handler(on(
+    message().command("ping"),
+    |context: MessageContext| async move {
+        Ok(Outcome::stop().text("pong"))
+    },
+));
+```
+
+After:
+
+```rust
+async fn ping(context: MessageContext) -> &'static str {
+    assert_eq!(context.text(), "/ping");
+    "pong"
+}
+
+OxideBot::new()
+    .adapter(adapter)
+    .include(Module::new().command(command("ping"), ping));
+```
+
+The complete event remains available through `EventContext<Tag>`. Removing the
+legacy registration API does not remove any 0.1.8 event or `CallApiTrait`
+capability; it removes only the second way to feed the same compiled dispatch
+tables.

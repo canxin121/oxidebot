@@ -1,7 +1,7 @@
 //! OxideBot's batteries-included facade.
 //!
-//! Most applications only need `use oxidebot::prelude::*;`, an adapter, a
-//! [`Router`], and ordinary async functions.
+//! Most applications need `use oxidebot::prelude::*;`, one or more adapters,
+//! a flat [`Module`], and ordinary async functions.
 
 pub use oxidebot_core as core;
 pub use oxidebot_core::*;
@@ -11,25 +11,33 @@ pub use oxidebot_runtime::*;
 /// Derives a strongly typed command schema and parser.
 pub use oxidebot_macros::CommandArgs;
 
-/// Common request extractors.
+/// Typed values that ordinary handler functions may request.
 pub mod extract {
     pub use oxidebot_core::{BotIdentity, EventId};
     pub use oxidebot_runtime::{
-        Bot, ChatGroup, CommandResult, Dialogue, EventContext, Extension, FromRef, FromRequest,
-        MaybeGroup, MessageContext, MessageId, Parsed, Receipt, Reply, Segments, Sender,
+        Args, Bot, ChatGroup, CommandResult, Context, Dialogue, EventContext, Extract,
+        ExtractError, MaybeGroup, MessageContext, MessageId, Reply, Segments, Sender,
         ShutdownSignal, State, Target, Text,
     };
 }
 
-/// Router and middleware building blocks.
-pub mod routing {
+/// Typed command schemas, values, parsing, and completion.
+pub mod commands {
     pub use oxidebot_runtime::{
-        command, event, from_fn, interaction, message, native, Command, CommandCatalog,
-        CompletionConfig, Middleware, Next, Plugin, Request, Response, Router,
+        command, ArgumentSpec, Command, CommandArgs, CommandCatalog, CommandParseError,
+        CommandResult, CommandSchema, CommandValue, CompletionConfig, FromCommandValue, Mention,
+        ParsedArguments,
     };
 }
 
-/// Imports intended for bot application modules.
+/// Flat Bot-module, admission, hook, and effect building blocks.
+pub mod handler {
+    pub use oxidebot_runtime::{
+        After, Before, Guard, GuardDecision, GuardResult, IntoOutcome, Module, Outcome, Propagation,
+    };
+}
+
+/// Imports intended for ordinary Bot application modules.
 pub mod prelude {
     pub use crate::message;
     pub use oxidebot_core::{
@@ -43,13 +51,11 @@ pub mod prelude {
     };
     pub use oxidebot_macros::CommandArgs;
     pub use oxidebot_runtime::{
-        command, event as on_event, from_fn, interaction, message as on_message, native,
-        ArgumentSpec, Bot, ChatGroup, Command, CommandArgs as CommandArgsTrait, CommandCatalog,
-        CommandParseError, CommandResult, CommandSchema, CommandValue, CompletionConfig, Dialogue,
-        EventContext, Extension, Extensions, FromCommandValue, FromRef, FromRequest, HandlerError,
-        HandlerResult, IntoResponse, MaybeGroup, Mention, MessageContext, MessageId, Middleware,
-        Next, OxideBot, Parsed, ParsedArguments, Plugin, Receipt, Reply, Request, Response, Router,
-        Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
+        command, Args, Bot, ChatGroup, Command, CommandArgs, CommandResult, CompletionConfig,
+        Context, Dialogue, EventContext, Extract, ExtractError, GuardDecision, GuardResult,
+        HandlerError, HandlerResult, IntoOutcome, MaybeGroup, Mention, MessageContext, MessageId,
+        Module, Outcome, OxideBot, Propagation, Receipt, Reply, Segments, Sender, SessionPolicy,
+        ShutdownSignal, State, Target, Text,
     };
 }
 

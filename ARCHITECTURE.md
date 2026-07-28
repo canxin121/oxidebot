@@ -1,121 +1,192 @@
 # OxideBot architecture
 
-## Design rule: one semantic model
+## One semantic model
 
 OxideBot exposes one event hierarchy: the restored 0.1.8 `Event`. It exposes one
-adapter and bot API: `CallApiTrait`. The Router, command system, extractors,
-middleware, sessions, and reply helpers are views and orchestration around those
-same types; they do not introduce a second event body or a reduced API.
+platform-neutral bot API: `CallApiTrait`. Commands, modules, extractors,
+dialogues, and reply helpers are orchestration around those same types; they do
+not introduce a reduced event body or second API.
 
-The runtime owns compact dispatch metadata, but that metadata only contains
-routing keys, accounting information, identity, and a reference to the same
-canonical event.
+The runtime keeps compact dispatch metadata for admission and indexing, but a
+decoded event payload is retained once and shared by every candidate through
+`Arc<DispatchEnvelope>`.
 
 ## Authoring pipeline
 
-A matched Router endpoint receives a clone-cheap `Request<S>` containing:
+The public pipeline is:
 
-- one `Arc<DispatchEnvelope>`;
-- one `Arc<S>` application state;
-- the current `BotHandle`;
-- the shared bounded `SessionRegistry`;
-- the shared shutdown signal;
-- request-local typed `Extensions`;
+```text
+Module match
+-> Context<S>
+-> guards
+-> command validation / optional completion
+-> before hooks
+-> synchronous Extract<S>
+-> ordinary async function
+-> IntoOutcome
+-> after hooks
+-> handler-kind blocking default
+-> canonical API effects
+```
+
+`Context<S>` is the single common runtime view. It contains shared handles to:
+
+- the one dispatch envelope and canonical event;
+- root `Arc<S>` application state;
+- current `BotHandle` and complete API object;
+- the bounded `SessionRegistry`;
+- shutdown;
 - an optional lossless `CommandResult`.
 
-Middleware consumes and returns that request through a `Next<S>` chain. The
-endpoint then evaluates its `FromRequest<S>` extractors in function-argument
-order and invokes an ordinary async function. Its return value is converted by
-`IntoResponse`.
+There is no parallel request object, dynamic request extensions, or per-handler
+event copy.
 
-No extractor runs before the route has matched. No event payload is cloned to
-create a request or context.
+`EventContext<Tag>` is a state-independent typed view over the same envelope.
+State remains an explicit `State<S>` or `Context<S>` handler argument.
 
-## Router compilation
+## Flat module compilation
 
-`Router<S>` is a build-time composition structure. `merge`, `mount`, and
-`plugin` flatten modules into one ordered endpoint list. Middleware layers are
-baked onto endpoint definitions, and each endpoint becomes the existing
-`ErasedHandler<S>` representation before application startup.
+`Module<S>` is a build-time collection of handler definitions, guards, and
+hooks. `include` flattens another module in registration order. It does not
+construct a path tree or another runtime.
 
-Routes use the existing indexes:
+Module-wide guards and before hooks are prepended to included handlers. Module
+`after` hooks are appended, so child after hooks run before parent after hooks.
+The result is deterministic and independent of method-call order; there is no
+Tower `layer` / `route_layer` distinction.
 
-- exact `EventType` routes enter the 53-slot dense table;
-- normal `/name` commands enter the exact command-key table;
+Platform and bot restrictions also compose structurally. Inclusion intersects
+scopes instead of overwriting them, so a parent cannot accidentally broaden a
+child module's bot restriction; incompatible scopes are rejected during build.
+
+At build time every definition becomes one or more internal `ErasedHandler<S>`
+values and then `PreparedHandler<S>` entries. Public function-handler
+ergonomics stop at this boundary; runtime indexes remain specialized and
+compact.
+
+## Compiled candidate indexes
+
+Routes use existing indexes:
+
+- exact `EventType` handlers enter the stable 53-slot dense table;
+- normal `/name` commands enter the exact command-root table;
 - interaction IDs and platform-native names enter exact hash tables;
-- commands using custom prefixes, no prefix, or case-insensitive matching enter
-  the broad message candidate slot and perform their full match only after the
-  message event is admitted.
+- custom-prefix, no-prefix, or case-insensitive commands enter the broad message
+  candidate slot and perform a full match only after admission.
 
-Aliases sharing one root are de-duplicated before route registration. At
-dispatch time, global, platform, and bot candidate slices are merged by route
-ID, preserving registration order without allocating a temporary candidate
-vector.
+Global, platform, and bot-scoped candidate slices are merged by monotonically
+assigned route ID. Registration order is preserved without allocating a
+temporary candidate vector.
 
-## Command parsing
+## Extraction
+
+`Extract<S>` is synchronous and monomorphized. Built-in extraction consists of
+matching or borrowing the canonical event and cloning only small owned values
+or clone-cheap handles requested by the handler.
+
+No extractor runs before a handler matches. Interactive completion is not an
+extractor: the command endpoint performs that workflow once, then `Args<T>`
+parses synchronously from the completed `CommandResult`.
+
+The lack of a generic optional extractor is intentional. Absence is expressed
+by domain types such as `MaybeGroup`, while parse, permission, API, and
+configuration errors remain visible.
+
+## Commands
 
 A `Command` performs a lossless first-stage match over canonical message
 segments. Text segments use a shell-like tokenizer; mentions, files, media, and
 other segments remain typed `CommandValue` variants.
 
-`CommandSchema` is shared by parsing, automatic help, validation, and
-interactive completion. `#[derive(CommandArgs)]` generates only schema and
-conversion code; it does not create a parallel runtime parser.
+`CommandSchema` is shared by parsing, validation, automatic help, usage output,
+and interactive completion. `#[derive(CommandArgs)]` generates schema and
+conversion code rather than a parallel parser.
 
-Interactive completion is entered only for `MissingArgument`. The completion
-path registers an exact bounded session before sending a prompt, preventing a
-fast reply from racing registration. Replies are re-tokenized losslessly and
-inserted into the missing positional or named option. Unknown options, missing
-option values, and invalid conversions are returned immediately.
+Completion is entered only for `MissingArgument`, after module guards. It
+registers an exact bounded session before sending a prompt, preventing a fast
+reply from racing registration. Replies are tokenized losslessly and inserted
+into the precise missing positional or named field. Other parse failures return
+immediately.
 
-## Response effects
+## Effects and routing flow
 
-`Response` contains a stop decision and zero or more deferred canonical message
-segment lists. The compiled router enforces the configured reply-count limit
-and sends those effects through the same `CallApiTrait` object exposed to
-handlers.
+`Outcome` contains canonical deferred replies and a propagation decision.
+It is not an HTTP response.
 
-`Reply` bypasses deferred effects for workflows requiring immediate API results.
-It returns a `Receipt` over every `SendMessageResponse`, so message splitting by
-a platform remains visible and safe.
+The matched handler kind supplies the default when no override exists:
+
+- command and interaction handlers stop;
+- ordinary event and native observers continue.
+
+This separates effects from dispatch policy. A command that sends immediately
+and returns `()` still blocks naturally; an event observer that returns a
+message still continues naturally. Explicit `Outcome::stop()` and
+`Outcome::continue_()` are reserved for true overrides.
+
+The compiled dispatcher enforces the configured deferred-reply count and sends
+messages through the same `CallApiTrait` object exposed to handlers.
+
+`Reply` bypasses deferred effects for workflows that need platform results
+immediately. It returns a `Receipt` over every `SendMessageResponse`, preserving
+platform message splitting.
+
+## Guards and hooks
+
+Guards model admission concerns such as permissions, rate limits, chat type,
+and feature flags. They run before command completion and extraction. `Skip`
+continues candidate dispatch; `Deny` emits explicit effects and stops.
+
+Before hooks run after completion and before extraction. After hooks receive the
+handler's unresolved `Outcome` and may observe or transform it. The natural
+handler-kind blocking default is resolved only after after hooks complete.
+
+There is no continuation object and no mutable type map. Handler dependencies
+remain in function signatures or root state.
+
+## Error boundary
+
+Function handlers accept successful values implementing `IntoOutcome` and
+fallible values whose error explicitly converts to `HandlerError`.
+
+Only `HandlerError::User` becomes a user reply. Command, session, API,
+application, parse, timeout, and service errors are logged internally. A failed
+command or interaction still keeps its natural blocking boundary, while a failed observer
+leaves later observers available. Failure therefore cannot silently change the
+matched handler kind's propagation policy. The runtime never sends an arbitrary
+`Display` representation to a chat.
+
+Extractor errors are separately constrained to safe contract messages. Their
+reply inherits the matched handler kind's normal propagation policy, just like
+an explicitly user-facing handler error.
 
 ## Two-stage admission
 
 A platform frame first produces a compact `DispatchIndex` containing:
 
 - bot and platform identity;
-- the stable `EventType`;
+- stable `EventType`;
 - optional conversation and actor keys;
 - optional normalized command, interaction, or native keys.
 
 Static route interest and dynamic session interest are checked against this
-index. An uninterested frame can be dropped before the complete event is
-decoded. When interested, the adapter creates a `DispatchDraft` containing the
-original 0.1.8 `Event`; the runtime verifies that the event type agrees with the
-index.
+index. An uninterested frame can be dropped before full event decode. An
+admitted adapter frame becomes a `DispatchDraft`; runtime validation confirms
+that the decoded 0.1.8 event agrees with the compact index.
 
-## Shared ownership and ordering
+## Ownership and ordering
 
-A decoded event is retained once. Handlers, extractors, typed contexts, filters,
-and sessions borrow from or share that allocation. Large messages, files,
-layouts, polls, payments, and platform-native data are never duplicated per
-candidate route.
+A decoded event is retained once. Contexts, typed event views, filters,
+handlers, and sessions borrow from or share that allocation. Large messages,
+files, layouts, polls, payments, and native data are not duplicated per route.
 
-Execution is partitioned by virtual actor. Conversation/thread keys are used
-first, then actor keys, then the event ID fallback. One key executes serially,
-while unrelated keys can run concurrently through fixed worker shards rather
-than unbounded task creation.
+Execution is partitioned by virtual actor: conversation/thread key first, actor
+key next, event ID fallback last. One key executes serially, while unrelated
+keys run concurrently through fixed worker shards rather than unbounded task
+creation.
 
 ## Bounded resources
 
-Ingress, executor, session, and command queues enforce item and retained-byte
+Ingress, executor, session, and API command queues enforce item and retained-byte
 budgets. Global and per-bot permits are acquired together. Session namespaces,
-route keys, decoded envelopes, raw payloads, and handler reply counts are also
-bounded or validated before entering downstream work.
-
-## Compatibility boundary
-
-The pre-Router `on(matcher, handler)` and typed `Context` interfaces remain
-available. They compile into the same `PreparedHandler` and route tables as new
-Router endpoints. They are an explicit low-level escape hatch, not a second
-framework layered beside Router.
+route keys, decoded envelopes, raw payloads, completion rounds, and handler
+reply counts are bounded or validated before downstream work.

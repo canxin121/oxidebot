@@ -184,6 +184,9 @@ impl ServiceError {
 
 #[derive(Debug, Error)]
 pub enum HandlerError {
+    /// A deliberately user-facing failure. Only this variant is replied to.
+    #[error("{0}")]
+    User(Arc<str>),
     #[error(transparent)]
     Command(#[from] CommandError),
     #[error(transparent)]
@@ -192,8 +195,30 @@ pub enum HandlerError {
     Parse(String),
     #[error("bot API call failed: {0}")]
     Api(String),
+    #[error("handler failed: {0}")]
+    Internal(String),
     #[error("handler timed out")]
     Timeout,
+}
+
+impl HandlerError {
+    #[must_use]
+    pub fn user(message: impl Into<Arc<str>>) -> Self {
+        Self::User(message.into())
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+
+    #[must_use]
+    pub fn user_message(&self) -> Option<&str> {
+        match self {
+            Self::User(message) => Some(message),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -233,4 +258,4 @@ pub enum RuntimeError {
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
-pub type HandlerResult<T = crate::Response> = std::result::Result<T, HandlerError>;
+pub type HandlerResult<T = crate::Outcome> = std::result::Result<T, HandlerError>;

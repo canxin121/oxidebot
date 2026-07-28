@@ -283,20 +283,6 @@ impl Command {
         Ok(())
     }
 
-    pub(crate) fn mounted(mut self, prefix: &str) -> Self {
-        let prefix = prefix.trim();
-        if prefix.is_empty() {
-            return self;
-        }
-        self.name = Arc::from(format!("{prefix} {}", self.name));
-        self.aliases = self
-            .aliases
-            .into_iter()
-            .map(|alias| Arc::from(format!("{prefix} {alias}")))
-            .collect();
-        self
-    }
-
     /// Returns exact pre-decode keys when this command can use the fast `/name`
     /// path. `None` means it needs the broad message candidate table.
     pub(crate) fn fast_route_keys(&self) -> Option<Vec<Arc<str>>> {
@@ -925,7 +911,7 @@ impl ParsedArguments {
     }
 }
 
-/// Raw command match injected into the request before extractors run.
+/// Raw command match attached to the event context before extractors run.
 #[derive(Clone, Debug)]
 pub struct CommandResult {
     command: Command,
@@ -1367,7 +1353,7 @@ pub fn tokenize_text(input: &str) -> Result<Vec<String>, CommandParseError> {
     Ok(output)
 }
 
-/// Immutable help/catalog view assembled from all mounted commands.
+/// Immutable help/catalog view assembled from all registered commands.
 #[derive(Clone, Debug, Default)]
 pub struct CommandCatalog {
     commands: Arc<[Command]>,

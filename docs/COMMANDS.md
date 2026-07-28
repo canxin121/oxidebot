@@ -1,101 +1,217 @@
-# Commands
+# Typed commands
 
-## Derive a schema
+OxideBot commands are message-domain parsers, not nested routes. A command name
+may contain multiple words directly:
 
 ```rust
-#[derive(CommandArgs)]
-#[command(description = "Ban a member", category = "moderation", alias = "block")]
-struct BanArgs {
-    #[arg(prompt = "Who should be banned?")]
-    member: Mention,
+command("admin ban")
+command("account settings show")
+```
 
-    #[arg(long, short = 'r')]
-    reason: Option<String>,
+There is no `mount` operation and no command-prefix tree. Writing the complete
+command path makes help, aliases, permissions, and route indexing explicit.
 
-    #[arg(long, short = 'd', default = 0_u64)]
-    delete_days: u64,
+## Derive one schema
 
+```rust
+use oxidebot::prelude::*;
+
+#[derive(Debug, CommandArgs)]
+#[command(
+    description = "Create a release",
+    category = "operations",
+    alias = "release new"
+)]
+struct CreateReleaseArgs {
+    /// Release name.
+    #[arg(prompt = "What should the release be called?")]
+    name: String,
+
+    /// Target environment.
+    #[arg(long, short = 'e', default = "staging".to_owned())]
+    environment: String,
+
+    /// Skip the confirmation stage.
     #[arg(long, short = 'f')]
     force: bool,
+
+    /// Optional labels.
+    #[arg(long, short = 't')]
+    tags: Vec<String>,
+
+    /// Remaining free-form notes.
+    #[arg(rest)]
+    notes: Vec<String>,
 }
+
+async fn create_release(
+    Args(args): Args<CreateReleaseArgs>,
+) -> String {
+    format!("creating {} in {}", args.name, args.environment)
+}
+
+let features = Module::new().command(
+    CreateReleaseArgs::command("release create")
+        .example("/release create v1.2 -e production -t stable"),
+    create_release,
+);
 ```
 
-Field documentation becomes help text unless `help = "..."` is supplied.
-`Option<T>` is optional, `Vec<T>` is repeatable, and a `bool` with a long or
-short option is a flag. A plain field is required unless it has a default.
+The derive generates `CommandSchema` and conversion code. The same schema is
+used by parsing, build-time validation, help, usage rendering, unknown-option
+suggestions, and interactive completion.
 
-Supported field attributes:
+## Field forms
 
-- `name`, `help`, `prompt`, and `value_name`;
-- `long` or `long = "name"`;
-- `short` or `short = 'n'`;
-- `default` or `default = expression` for plain fields;
-- `required = true|false`;
-- `multiple` and `rest` on `Vec<T>`;
-- `flag` on plain `bool`;
-- `skip` for a `Default` field that is not part of parsing.
-
-Conflicting combinations produce derive-time errors instead of malformed
-runtime schemas.
-
-## Command configuration
+A plain field is positional:
 
 ```rust
-let command = BanArgs::command("moderation ban")
-    .prefix("!")
-    .case_insensitive()
-    .example("!moderation ban @alice --reason spam")
-    .completion(CompletionConfig::new());
+name: String
 ```
 
-`Router::mount("admin", routes)` prepends a command path to every command in the
-mounted Router. It does not alter event routes.
+An `Option<T>` field is optional command data:
+
+```rust
+environment: Option<String>
+```
+
+This is different from a generic optional handler extractor, which OxideBot
+does not provide.
+
+A `bool` long or short option is a flag:
+
+```rust
+#[arg(long, short = 'f')]
+force: bool
+```
+
+Repeated option values use `Vec<T>`:
+
+```rust
+#[arg(long, short = 't')]
+tags: Vec<String>
+```
+
+A final positional `Vec<T>` may consume the remainder:
+
+```rust
+#[arg(rest)]
+notes: Vec<String>
+```
+
+Defaults are generated into the schema:
+
+```rust
+#[arg(long, default = 10_u32)]
+limit: u32
+```
+
+A required field may define a prompt used only when completion is enabled:
+
+```rust
+#[arg(prompt = "Which project?")]
+project: String
+```
 
 ## Accepted syntax
 
-The parser recognizes:
+The tokenizer and schema parser support:
 
-```text
-/search "rust async" --limit 20 -v tag-a tag-b
-/search rust --limit=20
-/search rust -vn20
-/search -- -literal-positional
-/scale -1.5
-```
+- single and double quotes;
+- backslash escapes;
+- empty quoted values (`""` and `''`);
+- `--long value` and `--long=value`;
+- short options and combined short flags;
+- attached short-option values;
+- `--` to end option parsing;
+- negative numeric positional values;
+- required, optional, defaulted, repeated, and rest arguments;
+- exact aliases and multi-word command paths;
+- multiple prefixes, no-prefix commands, and case-insensitive commands.
 
-Single and double quotes, backslash escaping, empty quoted values, long-option
-assignment, combined short flags, attached short values, and the `--` sentinel
-are supported.
+Canonical non-text segments are not flattened. Command fields can consume
+`Mention`, `File`, `MessageSegment`, or a custom type implementing
+`FromCommandValue`.
 
-## Non-text arguments
+## Fast and broad command matching
 
-Command tokenization preserves canonical segments:
+The default command form:
 
 ```rust
-#[derive(CommandArgs)]
-struct UploadArgs {
-    owner: Mention,
-    file: File,
-    #[arg(rest)]
-    extra: Vec<MessageSegment>,
-}
+command("ping")
 ```
 
-Implement `FromCommandValue` to parse a domain-specific value without changing
-the command engine.
+uses the exact `/ping` pre-decode key. The runtime can discard an unrelated
+message frame before constructing the complete event.
 
-## Completion
+Commands enter the broad message candidate slot only when their matching rules
+require it, such as:
 
-Completion is opt-in per command. On `MissingArgument`, OxideBot registers an
-exact conversation/actor session, sends the field prompt, and retries parsing.
-A reply to a missing named option is inserted as that option. Cancellation
-words and maximum rounds are bounded by `CompletionConfig`.
+```rust
+command("hello").prefix("!")
+command("help").no_prefix()
+command("PING").case_insensitive()
+```
 
-Type conversion failures, unknown options, and missing option values are not
-completion candidates. They return an error plus the generated usage line.
+Full parsing still occurs only after the message is admitted.
+
+## Interactive completion
+
+```rust
+let deploy = DeployArgs::command("deploy").completion(
+    CompletionConfig::new()
+        .timeout(std::time::Duration::from_secs(60))
+        .max_rounds(3)
+        .cancel_words(["cancel", "stop", "取消"]),
+);
+```
+
+The flow is:
+
+```text
+exact command match
+-> module guards
+-> schema validation
+-> bounded dialogue only for MissingArgument
+-> complete Args<T>
+-> before hooks
+-> handler extraction and execution
+```
+
+Unknown options, duplicate options, missing option values, extra values, and
+invalid type conversions are returned immediately. They never start a prompt
+loop. Answers are inserted into the exact missing positional or named field,
+including long options.
+
+Session registration happens before the prompt is sent, preventing a fast user
+reply from racing the waiter. Cancellation and maximum rounds are bounded by
+the command's `CompletionConfig`.
 
 ## Automatic help
 
-`Router::help()` adds `/help [command]`. The index and detail pages are generated
-from mounted `Command` and `CommandSchema` values, so displayed aliases,
-arguments, defaults, and examples use the same source as parsing.
+```rust
+let features = Module::new()
+    .command(CreateReleaseArgs::command("release create"), create_release)
+    .command(command("ping").description("Check liveness"), ping)
+    .help();
+```
+
+`/help` renders the visible command catalog. `/help release create` renders the
+same schema used by the parser, including usage fragments, descriptions,
+defaults, aliases, categories, and examples.
+
+Included modules contribute their commands to the same catalog. Calling
+`help()` more than once through module composition does not create duplicate
+help handlers.
+
+## Raw command access
+
+Most handlers should use `Args<T>`. `CommandResult` is available when a handler
+needs the matched alias, original lossless command values, or custom dynamic
+parsing:
+
+```rust
+async fn inspect(command: CommandResult) -> String {
+    format!("matched {}", command.command().name())
+}
+```

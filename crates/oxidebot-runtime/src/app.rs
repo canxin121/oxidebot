@@ -4,11 +4,11 @@ use crate::{
     budget::{HierarchicalLease, PriorityQueueLimiter},
     dedupe::{DedupeCache, DedupeCommit},
     executor::{ExecutorHandle, ExecutorSubmit},
-    handler::{erase_handler, prepare_handler, ErasedHandler, PreparedHandler, RouteSpec},
+    handler::{prepare_handler, PreparedHandler, RouteSpec},
     router::{CompiledRouter, RouterLimits},
     session::{SessionDelivery, SessionRegistry},
-    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, Filter, Handler, MetricsHandle,
-    Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
+    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, Filter, MetricsHandle, Result,
+    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
     ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
@@ -40,11 +40,10 @@ where
     state: Arc<S>,
     config: RuntimeConfig,
     adapters: Vec<Box<dyn Adapter>>,
-    handlers: Vec<Arc<dyn ErasedHandler<S>>>,
+    module: crate::Module<S>,
     filters: Vec<Arc<dyn Filter<S>>>,
     services: Vec<Arc<dyn Service<S>>>,
     metrics: MetricsHandle,
-    route_errors: Vec<String>,
 }
 
 impl OxideBot<()> {
@@ -70,11 +69,10 @@ where
             state: Arc::new(state),
             config: RuntimeConfig::default(),
             adapters: Vec::new(),
-            handlers: Vec::new(),
+            module: crate::Module::new(),
             filters: Vec::new(),
             services: Vec::new(),
             metrics: Arc::new(RuntimeMetrics::default()),
-            route_errors: Vec::new(),
         }
     }
 
@@ -102,7 +100,7 @@ where
     }
 
     #[must_use]
-    pub fn bot<A>(mut self, adapter: A) -> Self
+    pub fn adapter<A>(mut self, adapter: A) -> Self
     where
         A: Adapter,
     {
@@ -110,31 +108,14 @@ where
         self
     }
 
+    /// Includes one reusable Bot feature module.
+    ///
+    /// Modules remain uncompiled until `build`, so commands from separate
+    /// includes share one help catalog and duplicate help handlers are removed.
     #[must_use]
-    pub fn handler<H>(mut self, handler: H) -> Self
-    where
-        H: Handler<S>,
-    {
-        self.handlers.push(erase_handler(handler));
+    pub fn include(mut self, module: crate::Module<S>) -> Self {
+        self.module = self.module.include(module);
         self
-    }
-
-    /// Adds a compositional router containing commands, events, middleware,
-    /// and plugins. Router construction remains chainable; validation errors
-    /// are reported by `build`/`run`.
-    #[must_use]
-    pub fn router(mut self, router: crate::Router<S>) -> Self {
-        match router.into_handlers() {
-            Ok(handlers) => self.handlers.extend(handlers),
-            Err(BuildError::InvalidRoute(error)) => self.route_errors.push(error),
-            Err(error) => self.route_errors.push(error.to_string()),
-        }
-        self
-    }
-
-    #[must_use]
-    pub fn routes(self, router: crate::Router<S>) -> Self {
-        self.router(router)
     }
 
     #[must_use]
@@ -160,19 +141,16 @@ where
             state,
             config,
             adapters,
-            handlers,
+            module,
             filters,
             services,
             metrics,
-            route_errors,
         } = self;
-        if let Some(error) = route_errors.into_iter().next() {
-            return Err(BuildError::InvalidRoute(error));
-        }
         config.validate()?;
+        let handlers = module.into_handlers()?;
         if handlers.len() > MAX_RUNTIME_HANDLERS {
             return Err(BuildError::InvalidConfig(
-                "route handler count exceeds the runtime safety limit",
+                "handler count exceeds the runtime safety limit",
             ));
         }
         let handlers = handlers
@@ -296,7 +274,7 @@ where
         };
         if handler.event_kind != expected_kind {
             return Err(BuildError::InvalidRoute(
-                "matcher event view differs from its compiled route category".into(),
+                "handler event type differs from its compiled dispatch category".into(),
             ));
         }
         if let Some(platform) = &handler.scope.platform {

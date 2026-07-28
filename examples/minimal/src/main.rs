@@ -17,17 +17,19 @@ struct EchoArgs {
     times: usize,
 }
 
-async fn echo(Parsed(args): Parsed<EchoArgs>) -> String {
+async fn echo(Args(args): Args<EchoArgs>) -> String {
     std::iter::repeat_n(args.text.join(" "), args.times)
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-async fn trace(request: Request, next: Next<()>) -> Response {
-    let event_type = request.event_type();
-    let response = next.run(request).await;
-    println!("handled {event_type:?}; stopped={}", response.is_stopped());
-    response
+async fn trace(context: Context, outcome: Outcome) -> Outcome {
+    println!(
+        "handled {:?}; propagation={:?}",
+        context.event_type(),
+        outcome.propagation(),
+    );
+    outcome
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -46,18 +48,18 @@ async fn main() -> oxidebot::Result<()> {
         ))],
     );
 
-    let routes = Router::new()
+    let features = Module::new()
         .command(
             command("ping").description("Check whether the bot is alive"),
             ping,
         )
         .command(EchoArgs::command("echo"), echo)
-        .layer(from_fn(trace))
+        .after(trace)
         .help();
 
     OxideBot::new()
-        .bot(adapter)
-        .router(routes)
+        .adapter(adapter)
+        .include(features)
         .run_to_completion()
         .await?;
 

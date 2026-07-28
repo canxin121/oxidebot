@@ -1,40 +1,63 @@
 use crate::{
-    command::tokenize_segments,
-    handler::{Context, TaggedEvent},
-    router::reply_target,
-    Bot, CommandArgs, CommandParseError, CommandResult, Dialogue, Receipt, Reply, Request,
-    Response, ShutdownSignal,
+    handler::EventContext, router::reply_target, Bot, CommandArgs, CommandParseError,
+    CommandResult, Context, Dialogue, HandlerError, Outcome, Reply, ShutdownSignal,
 };
-use async_trait::async_trait;
 use oxidebot_core::{
     api::payload::SendMessageTarget,
     event::{EventTag, NoticeEvent, RequestEvent},
     source::{group::Group, message::MessageSegment, user::User},
     BotIdentity, Event, EventId,
 };
-use std::{ops::Deref, sync::Arc};
+use std::{fmt, ops::Deref, sync::Arc};
 
-/// Axum-style asynchronous extraction from one matched bot event.
-#[async_trait]
-pub trait FromRequest<S>: Sized
+/// A safe, user-facing error produced while extracting a handler argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtractError {
+    message: Arc<str>,
+}
+
+impl ExtractError {
+    #[must_use]
+    pub fn new(message: impl Into<Arc<str>>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn into_outcome(self) -> Outcome {
+        Outcome::new().text(self.message.to_string())
+    }
+}
+
+impl fmt::Display for ExtractError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ExtractError {}
+
+impl From<ExtractError> for HandlerError {
+    fn from(error: ExtractError) -> Self {
+        Self::user(error.message)
+    }
+}
+
+/// Extracts one typed value from the common event [`Context`].
+///
+/// Extraction is synchronous and monomorphized. Interactive command completion
+/// is performed once by the command handler before argument extraction, so
+/// ordinary message and event handlers do not allocate boxed extractor futures.
+pub trait Extract<S>: Sized
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response>;
-}
-
-/// Builds a focused state value from the application's root state.
-pub trait FromRef<T>: Sized {
-    fn from_ref(input: &T) -> Self;
-}
-
-impl<T> FromRef<T> for T
-where
-    T: Clone,
-{
-    fn from_ref(input: &T) -> Self {
-        input.clone()
-    }
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError>;
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +107,14 @@ impl Deref for ChatGroup {
 #[derive(Clone, Debug)]
 pub struct MaybeGroup(pub Option<Group>);
 
+impl Deref for MaybeGroup {
+    type Target = Option<Group>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageId(pub String);
 
@@ -106,33 +137,33 @@ impl Deref for Target {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct State<T>(pub T);
+/// The application's root state.
+///
+/// Focused application services should be exposed through methods on the root
+/// state or through a small custom [`Extract`] implementation. OxideBot does
+/// not maintain a Web-style substate conversion registry.
+#[derive(Debug)]
+pub struct State<S>(pub Arc<S>);
 
-impl<T> Deref for State<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl<S> Clone for State<S> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Extension<T>(pub T);
-
-impl<T> Deref for Extension<T> {
-    type Target = T;
+impl<S> Deref for State<S> {
+    type Target = S;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_ref()
     }
 }
 
 /// Strongly typed command arguments.
 #[derive(Clone, Debug)]
-pub struct Parsed<T>(pub T);
+pub struct Args<T>(pub T);
 
-impl<T> Deref for Parsed<T> {
+impl<T> Deref for Args<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -140,357 +171,238 @@ impl<T> Deref for Parsed<T> {
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Text
+impl<S> Extract<S> for Context<S>
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(context.clone())
+    }
+}
+
+impl<S> Extract<S> for Text
+where
+    S: Send + Sync + 'static,
+{
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context
             .message()
             .map(|event| Self(event.message.get_raw_text()))
-            .ok_or_else(|| Response::error("this handler requires a message event"))
+            .ok_or_else(|| ExtractError::new("this handler requires a message event"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Segments
+impl<S> Extract<S> for Segments
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context
             .message()
             .map(|event| Self(event.message.segments.clone()))
-            .ok_or_else(|| Response::error("this handler requires a message event"))
+            .ok_or_else(|| ExtractError::new("this handler requires a message event"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Sender
+impl<S> Extract<S> for Sender
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        sender_for_event(request.event())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        sender_for_event(context.event())
             .cloned()
             .map(Self)
-            .ok_or_else(|| Response::error("this event has no sender"))
+            .ok_or_else(|| ExtractError::new("this event has no sender"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for ChatGroup
+impl<S> Extract<S> for ChatGroup
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        group_for_event(request.event())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        group_for_event(context.event())
             .cloned()
             .map(Self)
-            .ok_or_else(|| Response::error("this event is not scoped to a group"))
+            .ok_or_else(|| ExtractError::new("this event is not scoped to a group"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for MaybeGroup
+impl<S> Extract<S> for MaybeGroup
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(Self(group_for_event(request.event()).cloned()))
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(Self(group_for_event(context.event()).cloned()))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for MessageId
+impl<S> Extract<S> for MessageId
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context
             .message()
             .map(|event| Self(event.message.id.clone()))
-            .ok_or_else(|| Response::error("this event has no message id"))
+            .ok_or_else(|| ExtractError::new("this event has no message id"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Target
+impl<S> Extract<S> for Target
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        reply_target(request.event())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        reply_target(context.event())
             .map(Self)
-            .ok_or_else(|| Response::error("this event has no natural reply target"))
+            .ok_or_else(|| ExtractError::new("this event has no natural reply target"))
     }
 }
 
-#[async_trait]
-impl<S, T> FromRequest<S> for State<T>
+impl<S> Extract<S> for State<S>
 where
     S: Send + Sync + 'static,
-    T: FromRef<S> + Send + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(Self(T::from_ref(request.state())))
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(Self(context.state_arc()))
     }
 }
 
-#[async_trait]
-impl<S, T> FromRequest<S> for Extension<T>
-where
-    S: Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-{
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
-            .extensions()
-            .get::<T>()
-            .cloned()
-            .map(Self)
-            .ok_or_else(|| {
-                Response::error(format!(
-                    "required extension `{}` is missing",
-                    std::any::type_name::<T>()
-                ))
-            })
-    }
-}
-
-#[async_trait]
-impl<S> FromRequest<S> for Bot
+impl<S> Extract<S> for Bot
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context
             .bot()
             .map(Self)
-            .map_err(|error| Response::error(error.to_string()))
+            .map_err(|_| ExtractError::new("the current adapter does not expose the OxideBot API"))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Reply
+impl<S> Extract<S> for Reply
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        let api = request
-            .bot()
-            .map_err(|error| Response::error(error.to_string()))?;
-        let target = reply_target(request.event())
-            .ok_or_else(|| Response::error("this event has no natural reply target"))?;
-        let reply_to = request.message().map(|event| event.message.id.clone());
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        let api = context.bot().map_err(|_| {
+            ExtractError::new("the current adapter does not expose the OxideBot API")
+        })?;
+        let target = reply_target(context.event())
+            .ok_or_else(|| ExtractError::new("this event has no natural reply target"))?;
+        let reply_to = context.message().map(|event| event.message.id.clone());
         Ok(Self::new(api, target, reply_to))
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Receipt
+impl<S> Extract<S> for Dialogue
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        let api = request
-            .bot()
-            .map_err(|error| Response::error(error.to_string()))?;
-        let message_id = request
-            .message()
-            .map(|event| event.message.id.clone())
-            .ok_or_else(|| Response::error("this event has no editable message"))?;
-        Ok(Self::from_message_id(api, message_id))
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        dialogue_from_context(context)
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for Dialogue
+impl<S> Extract<S> for CommandResult
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        dialogue_from_request(request).map_err(Response::error)
-    }
-}
-
-#[async_trait]
-impl<S> FromRequest<S> for CommandResult
-where
-    S: Send + Sync + 'static,
-{
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context
             .command()
             .cloned()
-            .ok_or_else(|| Response::error("this handler requires a command route"))
+            .ok_or_else(|| ExtractError::new("this handler requires a command"))
     }
 }
 
-#[async_trait]
-impl<S, T> FromRequest<S> for Parsed<T>
+impl<S, T> Extract<S> for Args<T>
 where
     S: Send + Sync + 'static,
     T: CommandArgs,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        let mut result = request
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        let result = context
             .command()
             .cloned()
-            .ok_or_else(|| Response::error("this handler requires a command route"))?;
+            .ok_or_else(|| ExtractError::new("this handler requires a command"))?;
         let schema = T::schema();
-        let parse = |result: &CommandResult| {
-            result
-                .parse_with(&schema)
-                .and_then(|arguments| T::from_arguments(&arguments))
-        };
-
-        let first_error = match parse(&result) {
-            Ok(value) => return Ok(Self(value)),
-            Err(error) if error.missing_prompt().is_none() => {
-                return Err(command_error_response(&result, error));
-            }
-            Err(error) => error,
-        };
-
-        let Some(completion) = result.command().completion_ref().cloned() else {
-            return Err(command_error_response(&result, first_error));
-        };
-        let dialogue = dialogue_from_request(request)
-            .map_err(Response::error)?
-            .timeout(completion.timeout)
-            .namespace(format!("command:{}", result.command().name()))
-            .map_err(|error| Response::error(error.to_string()))?;
-
-        for _ in 0..completion.max_rounds {
-            let error = match parse(&result) {
-                Ok(value) => return Ok(Self(value)),
-                Err(error) => error,
-            };
-            let Some(prompt) = error.missing_prompt() else {
-                return Err(command_error_response(&result, error));
-            };
-            let missing_name = error
-                .missing_name()
-                .expect("a missing prompt always belongs to a missing argument")
-                .to_owned();
-            let response = dialogue
-                .ask_message(prompt)
-                .await
-                .map_err(|error| Response::error(error.to_string()))?;
-            let Event::MessageEvent(message) = response.event() else {
-                return Err(Response::error("command completion requires a message"));
-            };
-            let raw_text = message.message.get_raw_text();
-            if completion.is_cancelled(&raw_text) {
-                return Err(command_error_response(
-                    &result,
-                    CommandParseError::Cancelled,
-                ));
-            }
-            let values = tokenize_segments(&message.message.segments)
-                .map_err(|error| command_error_response(&result, error))?;
-            result = result.with_answer(&schema, &missing_name, values);
-        }
-
-        Err(command_error_response(
-            &result,
-            CommandParseError::CompletionExhausted,
-        ))
+        result
+            .parse_with(&schema)
+            .and_then(|arguments| T::from_arguments(&arguments))
+            .map(Self)
+            .map_err(|error| command_extract_error(&result, error))
     }
 }
 
-#[async_trait]
-impl<S, T> FromRequest<S> for Option<T>
-where
-    S: Send + Sync + 'static,
-    T: FromRequest<S> + Send,
-{
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(T::from_request(request).await.ok())
-    }
-}
-
-#[async_trait]
-impl<S, T> FromRequest<S> for Context<TaggedEvent<T>, S>
+impl<S, T> Extract<S> for EventContext<T>
 where
     S: Send + Sync + 'static,
     T: EventTag,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        if T::get(request.event()).is_none() {
-            return Err(Response::error(format!(
-                "this handler requires event type {:?}",
-                T::TYPE
-            )));
-        }
-        Ok(Context::from_parts(
-            Arc::clone(&request.envelope),
-            Arc::clone(&request.state),
-            request.bot.clone(),
-            request.sessions.clone(),
-            request.shutdown.clone(),
-        ))
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        EventContext::from_context(context).ok_or_else(|| {
+            ExtractError::new(format!("this handler requires event type {:?}", T::TYPE))
+        })
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for BotIdentity
+impl<S> Extract<S> for BotIdentity
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(request.bot.identity().clone())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(context.bot_identity().clone())
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for EventId
+impl<S> Extract<S> for EventId
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(request.envelope.id.clone())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(context.envelope.id.clone())
     }
 }
 
-#[async_trait]
-impl<S> FromRequest<S> for ShutdownSignal
+impl<S> Extract<S> for ShutdownSignal
 where
     S: Send + Sync + 'static,
 {
-    async fn from_request(request: &mut Request<S>) -> Result<Self, Response> {
-        Ok(request.shutdown.clone())
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        Ok(context.shutdown.clone())
     }
 }
 
-fn command_error_response(result: &CommandResult, error: CommandParseError) -> Response {
-    Response::error(format!("{error}\n\n用法：{}", result.command().usage()))
+fn command_extract_error(result: &CommandResult, error: CommandParseError) -> ExtractError {
+    ExtractError::new(format!("{error}\n\n用法：{}", result.command().usage()))
 }
 
-fn dialogue_from_request<S>(request: &Request<S>) -> Result<Dialogue, String>
+fn dialogue_from_context<S>(context: &Context<S>) -> Result<Dialogue, ExtractError>
 where
     S: Send + Sync + 'static,
 {
-    let conversation = request
+    let conversation = context
         .envelope
         .index
         .conversation
         .clone()
-        .ok_or_else(|| "this event has no conversation scope".to_owned())?;
-    let actor = request
+        .ok_or_else(|| ExtractError::new("this event has no conversation scope"))?;
+    let actor = context
         .envelope
         .index
         .actor
         .clone()
-        .ok_or_else(|| "this event has no actor scope".to_owned())?;
-    let target = reply_target(request.event())
-        .ok_or_else(|| "this event has no natural reply target".to_owned())?;
-    let api = request.bot().map_err(|error| error.to_string())?;
+        .ok_or_else(|| ExtractError::new("this event has no actor scope"))?;
+    let target = reply_target(context.event())
+        .ok_or_else(|| ExtractError::new("this event has no natural reply target"))?;
+    let api = context
+        .bot()
+        .map_err(|_| ExtractError::new("the current adapter does not expose the OxideBot API"))?;
     Ok(Dialogue::new(
         api,
-        request.sessions.clone(),
+        context.sessions.clone(),
         conversation,
         actor,
         target,

@@ -2,7 +2,7 @@ use crate::{
     adapter::InterestPlan,
     handler::{PreparedHandler, RouteSpec},
     session::SessionRegistry,
-    BotHandle, Filter, MetricsHandle, ShutdownSignal,
+    BotHandle, Filter, MetricsHandle, Outcome, ShutdownSignal,
 };
 use futures_util::FutureExt;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
@@ -261,7 +261,7 @@ pub(crate) fn reply_target(event: &Event) -> Option<SendMessageTarget> {
     }
 }
 
-/// Immutable router compiled into candidate indexes before adapters start.
+/// Immutable dispatch table compiled into candidate indexes before adapters start.
 pub(crate) struct CompiledRouter<S>
 where
     S: Send + Sync + 'static,
@@ -318,7 +318,7 @@ where
     }
 
     /// Dispatches only the pre-indexed candidates. Event and exact lists are
-    /// merged by RouteId so registration order and `Outcome::stop()` semantics
+    /// merged by RouteId so registration order and explicit blocking semantics
     /// remain deterministic without allocating a temporary candidate vector.
     pub(crate) async fn dispatch(&self, event: Arc<DispatchEnvelope>, bot: BotHandle) {
         let identity = bot.identity();
@@ -362,6 +362,9 @@ where
                 Err(_) => {
                     self.metrics.handler_panic();
                     tracing::error!(event_id = %event.id, "handler panicked while creating its future");
+                    if prepared.default_block {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -371,6 +374,9 @@ where
                     Err(_) => {
                         self.metrics.handler_timeout();
                         tracing::warn!(event_id = %event.id, "handler timed out");
+                        if prepared.default_block {
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -380,16 +386,27 @@ where
             let outcome = match result {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(error)) => {
-                    tracing::warn!(event_id = %event.id, %error, "handler failed");
-                    continue;
+                    if let Some(message) = error.user_message() {
+                        Outcome::new().text(message.to_owned())
+                    } else {
+                        tracing::warn!(event_id = %event.id, %error, "handler failed");
+                        if prepared.default_block {
+                            break;
+                        }
+                        continue;
+                    }
                 }
                 Err(_) => {
                     self.metrics.handler_panic();
                     tracing::error!(event_id = %event.id, "handler panicked");
+                    if prepared.default_block {
+                        break;
+                    }
                     continue;
                 }
-            };
-            let stop = outcome.stop;
+            }
+            .resolve(prepared.default_block);
+            let stop = outcome.is_stopped();
             if outcome.replies.len() > self.max_handler_replies {
                 self.metrics.handler_effect_rejection();
                 tracing::error!(

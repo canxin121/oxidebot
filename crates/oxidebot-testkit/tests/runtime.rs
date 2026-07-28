@@ -1,5 +1,5 @@
 use oxidebot::{
-    event::tags, message, on, BotId, EventContext, EventId, MessageContext, Outcome, OxideBot,
+    command, event::tags, BotId, EventContext, EventId, MessageContext, Module, Outcome, OxideBot,
     PlatformId, RuntimeMetrics,
 };
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};
@@ -29,15 +29,14 @@ async fn command_interest_skips_unrelated_full_decodes() {
         [ScriptStep::Frame(ignored), ScriptStep::Frame(accepted)],
     );
 
+    let features = Module::new().command(command("ping"), |context: MessageContext| async move {
+        assert_eq!(context.text(), "/ping");
+        Outcome::new().text("pong")
+    });
+
     OxideBot::new()
-        .bot(adapter)
-        .handler(on(
-            message().command("ping"),
-            |context: MessageContext| async move {
-                assert_eq!(context.text(), "/ping");
-                Ok(Outcome::stop().text("pong"))
-            },
-        ))
+        .adapter(adapter)
+        .include(features)
         .run_to_completion()
         .await
         .expect("runtime succeeds");
@@ -61,16 +60,18 @@ async fn handlers_receive_the_original_018_event_model() {
         ))],
     );
 
+    let features = Module::new().on(
+        tags::Message,
+        |context: EventContext<tags::Message>| async move {
+            assert_eq!(context.event().sender.id, "user");
+            assert_eq!(context.event().message.get_raw_text(), "hello");
+            Outcome::continue_()
+        },
+    );
+
     OxideBot::new()
-        .bot(adapter)
-        .handler(on(
-            oxidebot::event::<tags::Message>(),
-            |context: EventContext<tags::Message>| async move {
-                assert_eq!(context.event().sender.id, "user");
-                assert_eq!(context.event().message.get_raw_text(), "hello");
-                Ok(Outcome::continue_())
-            },
-        ))
+        .adapter(adapter)
+        .include(features)
         .run_to_completion()
         .await
         .expect("runtime succeeds");
@@ -91,12 +92,12 @@ async fn metrics_still_report_indexed_dispatch() {
         ))],
     );
 
+    let features = Module::new().message(|| async { Outcome::continue_() });
+
     OxideBot::new()
         .metrics(Arc::clone(&metrics))
-        .bot(adapter)
-        .handler(on(message(), |_context: MessageContext| async {
-            Ok(Outcome::continue_())
-        }))
+        .adapter(adapter)
+        .include(features)
         .run_to_completion()
         .await
         .expect("runtime succeeds");

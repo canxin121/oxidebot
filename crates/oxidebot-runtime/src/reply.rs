@@ -102,16 +102,6 @@ pub struct Receipt {
 }
 
 impl Receipt {
-    pub(crate) fn from_message_id(api: BotObject, message_id: String) -> Self {
-        Self {
-            api,
-            responses: vec![SendMessageResponse {
-                sent_message_id: message_id,
-            }]
-            .into(),
-        }
-    }
-
     #[must_use]
     pub fn responses(&self) -> &[SendMessageResponse] {
         &self.responses
