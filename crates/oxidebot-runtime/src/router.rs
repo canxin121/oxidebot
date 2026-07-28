@@ -7,7 +7,7 @@ use crate::{
 use futures_util::FutureExt;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
 use oxidebot_core::{
-    api::payload::SendMessageTarget,
+    conversation::{ConversationRef, MessageTarget},
     event::{EventType, NoticeEvent, RequestEvent},
     BotIdentity, Event, PlatformId,
 };
@@ -185,77 +185,60 @@ fn next_route_id(lists: &[&[RouteId]; 6], positions: &mut [usize; 6]) -> Option<
     Some(route_id)
 }
 
-pub(crate) fn reply_target(event: &Event) -> Option<SendMessageTarget> {
+pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
+    fn group(id: &str) -> MessageTarget {
+        MessageTarget::new(ConversationRef::group(id.to_owned()))
+    }
+
+    fn direct(id: &str) -> MessageTarget {
+        MessageTarget::new(ConversationRef::direct(id.to_owned()))
+    }
+
     match event {
         Event::MessageEvent(event) => Some(
             event
                 .group
                 .as_ref()
-                .map(|group| SendMessageTarget::Group(group.id.clone()))
-                .unwrap_or_else(|| SendMessageTarget::Private(event.sender.id.clone())),
+                .map(|group_ref| group(&group_ref.id))
+                .unwrap_or_else(|| direct(&event.sender.id)),
         ),
         Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreaseEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupMemberDecreaseEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupAdminChangeEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupMuteChangeEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupMemberMuteChangeEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupHighlightChangeEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
-            NoticeEvent::GroupMemberAliasChangeEvent(event) => {
-                Some(SendMessageTarget::Group(event.group.id.clone()))
-            }
+            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupMemberDecreaseEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupAdminChangeEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupMuteChangeEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupHighlightChangeEvent(event) => Some(group(&event.group.id)),
+            NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(group(&event.group.id)),
             NoticeEvent::MessageReactionsEvent(event) => Some(
                 event
                     .group
                     .as_ref()
-                    .map(|group| SendMessageTarget::Group(group.id.clone()))
-                    .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+                    .map(|group_ref| group(&group_ref.id))
+                    .unwrap_or_else(|| direct(&event.user.id)),
             ),
             NoticeEvent::MessageDeletedEvent(event) => event
                 .group
                 .as_ref()
-                .map(|group| SendMessageTarget::Group(group.id.clone()))
-                .or_else(|| {
-                    event
-                        .user
-                        .as_ref()
-                        .map(|user| SendMessageTarget::Private(user.id.clone()))
-                }),
+                .map(|group_ref| group(&group_ref.id))
+                .or_else(|| event.user.as_ref().map(|user| direct(&user.id))),
             NoticeEvent::MessageEditedEvent(event) => Some(
                 event
                     .group
                     .as_ref()
-                    .map(|group| SendMessageTarget::Group(group.id.clone()))
-                    .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+                    .map(|group_ref| group(&group_ref.id))
+                    .unwrap_or_else(|| direct(&event.user.id)),
             ),
         },
-        Event::RequestEvent(RequestEvent::FriendAddEvent(event)) => {
-            Some(SendMessageTarget::Private(event.user.id.clone()))
-        }
-        Event::RequestEvent(RequestEvent::GroupAddEvent(event)) => {
-            Some(SendMessageTarget::Group(event.group.id.clone()))
-        }
-        Event::RequestEvent(RequestEvent::GroupInviteEvent(event)) => {
-            Some(SendMessageTarget::Private(event.user.id.clone()))
-        }
+        Event::RequestEvent(RequestEvent::FriendAddEvent(event)) => Some(direct(&event.user.id)),
+        Event::RequestEvent(RequestEvent::GroupAddEvent(event)) => Some(group(&event.group.id)),
+        Event::RequestEvent(RequestEvent::GroupInviteEvent(event)) => Some(direct(&event.user.id)),
         Event::InteractionEvent(event) => Some(
             event
                 .group
                 .as_ref()
-                .map(|group| SendMessageTarget::Group(group.id.clone()))
-                .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+                .map(|group_ref| group(&group_ref.id))
+                .unwrap_or_else(|| direct(&event.user.id)),
         ),
         Event::LifecycleEvent(_) | Event::MetaEvent(_) | Event::AnyEvent(_) => None,
     }
@@ -419,8 +402,26 @@ where
                 match bot.api() {
                     Ok(api) => {
                         for reply in outcome.replies {
-                            if let Err(error) = api.send_message(reply, target.clone()).await {
-                                tracing::warn!(event_id = %event.id, %error, "could not send handler reply");
+                            match api
+                                .send_outgoing_message_with(
+                                    target.clone(),
+                                    reply,
+                                    oxidebot_core::FallbackPolicy::Auto,
+                                )
+                                .await
+                            {
+                                Ok(report) => {
+                                    if report.degraded() {
+                                        tracing::warn!(
+                                            event_id = %event.id,
+                                            degradations = ?report.degradations,
+                                            "handler reply required delivery fallbacks"
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(event_id = %event.id, %error, "could not send handler reply");
+                                }
                             }
                         }
                     }

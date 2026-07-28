@@ -467,6 +467,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "oxidebot-core",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",

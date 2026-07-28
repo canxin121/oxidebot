@@ -452,6 +452,7 @@ mod tests {
                     message: Message {
                         id: "1".to_owned(),
                         segments: vec![MessageSegment::text("hello")],
+                        options: Default::default(),
                     },
                 }),
                 2_048,

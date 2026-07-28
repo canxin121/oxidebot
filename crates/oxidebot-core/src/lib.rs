@@ -70,8 +70,13 @@ pub use interaction::{
     ButtonStyle, ChatMenu, ChoiceOption, ChosenChatCriteria, CommandScope, InlineKeyboard,
     InlineQueryTarget, InputComponent, InteractionCapabilities, InteractionComponent,
     InteractionEvent, InteractionKind, InteractionNotificationStyle, InteractionResponse,
-    InteractionResponseHandle, InteractionVisibility, LoginAction, MessageComponents,
-    MessageOptions, Modal, ModalField, PlatformNativeData, PollKind, ReplyButton,
-    ReplyButtonAction, ReplyButtonRow, ReplyKeyboard, RequestChat, RequestManagedBot, RequestUsers,
-    SelectKind, SelectMenu, SelectOption, UnsupportedInteractionError, ViewNavigation,
+    InteractionResponseHandle, InteractionVisibility, LoginAction, MessageComponents, Modal,
+    ModalField, PlatformNativeData, PollKind, ReplyButton, ReplyButtonAction, ReplyButtonRow,
+    ReplyKeyboard, RequestChat, RequestManagedBot, RequestUsers, SelectKind, SelectMenu,
+    SelectOption, UnsupportedInteractionError, ViewNavigation,
+};
+pub use source::message::{
+    DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
+    FallbackPolicy, File, Folder, FsNode, IntoMessageSegment, Message, MessageOptions,
+    MessageSegment, SegmentKind,
 };

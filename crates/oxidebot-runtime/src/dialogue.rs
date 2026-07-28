@@ -1,7 +1,7 @@
 use crate::{AskOptions, HandlerError, SessionKey, SessionPolicy, SessionRegistry};
 use oxidebot_core::{
-    api::payload::SendMessageTarget, event::Event, source::message::Message, BotObject,
-    ConversationKey, SessionNamespace, UserKey,
+    conversation::MessageTarget, event::Event, source::message::Message, BotObject,
+    ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
 };
 use std::{str::FromStr, sync::Arc, time::Duration};
 
@@ -12,7 +12,7 @@ pub struct Dialogue {
     sessions: SessionRegistry,
     conversation: ConversationKey,
     actor: UserKey,
-    target: SendMessageTarget,
+    target: MessageTarget,
     options: AskOptions,
 }
 
@@ -22,7 +22,7 @@ impl Dialogue {
         sessions: SessionRegistry,
         conversation: ConversationKey,
         actor: UserKey,
-        target: SendMessageTarget,
+        target: MessageTarget,
     ) -> Self {
         Self {
             api,
@@ -82,7 +82,7 @@ impl Dialogue {
             .register(key, self.options.timeout, self.options.policy)
             .await?;
         self.api
-            .send_message(prompt.into().into_segments(), self.target.clone())
+            .send_outgoing_message_with(self.target.clone(), prompt.into(), FallbackPolicy::Auto)
             .await
             .map_err(|error| HandlerError::Api(error.to_string()))?;
         Ok(waiter.wait().await?)

@@ -40,6 +40,18 @@ pub struct ContentCapabilities {
     pub contacts: SupportLevel,
     pub stickers: SupportLevel,
     pub custom_emoji: SupportLevel,
+    #[serde(default)]
+    pub user_mentions: SupportLevel,
+    #[serde(default)]
+    pub role_mentions: SupportLevel,
+    #[serde(default)]
+    pub channel_mentions: SupportLevel,
+    #[serde(default)]
+    pub everyone_mentions: SupportLevel,
+    #[serde(default)]
+    pub shares: SupportLevel,
+    #[serde(default)]
+    pub custom_content: SupportLevel,
     pub polls: SupportLevel,
     pub quizzes: SupportLevel,
     pub checklists: SupportLevel,
@@ -49,6 +61,8 @@ pub struct ContentCapabilities {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryCapabilities {
     pub replies: SupportLevel,
+    pub edit_messages: SupportLevel,
+    pub delete_messages: SupportLevel,
     pub quoted_replies: SupportLevel,
     pub threads: SupportLevel,
     pub silent: SupportLevel,
@@ -201,6 +215,66 @@ pub struct BotCapabilities {
     pub collaboration: CollaborationCapabilities,
     pub application: ApplicationCapabilities,
     pub limits: PlatformLimits,
+}
+
+impl BotCapabilities {
+    /// Conservative capabilities provided by the original 0.1.8 message API.
+    /// Adapters should override [`crate::CallApiTrait::bot_capabilities`] when
+    /// they can report a more precise matrix.
+    #[must_use]
+    pub fn legacy_message_api() -> Self {
+        let native = SupportLevel::Native;
+        Self {
+            content: ContentCapabilities {
+                plain_text: native,
+                rich_text: SupportLevel::Emulated,
+                rich_layout: SupportLevel::Emulated,
+                images: native,
+                video: native,
+                audio: native,
+                animation: SupportLevel::Emulated,
+                voice_notes: SupportLevel::Emulated,
+                video_notes: SupportLevel::Emulated,
+                files: native,
+                media_galleries: SupportLevel::Emulated,
+                location: native,
+                contacts: SupportLevel::Emulated,
+                stickers: SupportLevel::Emulated,
+                custom_emoji: SupportLevel::Emulated,
+                user_mentions: native,
+                role_mentions: SupportLevel::Emulated,
+                channel_mentions: SupportLevel::Emulated,
+                everyone_mentions: native,
+                shares: native,
+                custom_content: native,
+                polls: SupportLevel::Emulated,
+                quizzes: SupportLevel::Emulated,
+                checklists: SupportLevel::Emulated,
+                platform_native: SupportLevel::Unsupported,
+            },
+            delivery: DeliveryCapabilities {
+                replies: native,
+                // The original trait provides default methods for these
+                // operations, but those defaults return “not implemented”.
+                // Adapters must opt in explicitly instead of making receipts
+                // promise capabilities that may fail at runtime.
+                edit_messages: SupportLevel::Unsupported,
+                delete_messages: SupportLevel::Unsupported,
+                ..DeliveryCapabilities::default()
+            },
+            conversations: ConversationCapabilities {
+                direct: native,
+                groups: native,
+                channels: SupportLevel::Emulated,
+                ..ConversationCapabilities::default()
+            },
+            collaboration: CollaborationCapabilities {
+                forwarding: native,
+                ..CollaborationCapabilities::default()
+            },
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

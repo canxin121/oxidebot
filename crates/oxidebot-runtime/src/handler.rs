@@ -5,9 +5,9 @@ use crate::{
 use futures_util::future::BoxFuture;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
 use oxidebot_core::{
-    api::payload::SendMessageTarget,
+    conversation::{ConversationRef, MessageTarget},
     event::{tags, EventTag, EventType},
-    source::message::MessageSegment,
+    source::message::{DeliveryReport, FallbackPolicy, Message, MessageSegment},
     BotIdentity, BotObject, EventId, PlatformId,
 };
 use std::{
@@ -22,7 +22,7 @@ use std::{
 ///
 /// The application state is intentionally not hidden inside this value. A
 /// handler that needs application state asks for `State<S>` separately, while
-/// `EventContext<T>` provides the complete 0.1.8 payload and Bot runtime handles.
+/// `EventContext<T>` provides the complete public event payload and Bot runtime handles.
 pub struct EventContext<T>
 where
     T: EventTag,
@@ -63,7 +63,7 @@ where
         &self.envelope.id
     }
 
-    /// Returns the bot's complete 0.1.8 API implementation.
+    /// Returns the bot's complete unified API implementation.
     pub fn bot(&self) -> Result<BotObject, HandlerError> {
         self.bot.api().map_err(HandlerError::from)
     }
@@ -134,28 +134,24 @@ impl EventContext<tags::Message> {
         self.event().message.get_raw_text()
     }
 
-    pub async fn send(
-        &self,
-        message: Vec<MessageSegment>,
-    ) -> Result<Vec<oxidebot_core::api::response::SendMessageResponse>, HandlerError> {
+    pub async fn send(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
         let target = self
             .event()
             .group
             .as_ref()
-            .map(|group| SendMessageTarget::Group(group.id.clone()))
-            .unwrap_or_else(|| SendMessageTarget::Private(self.event().sender.id.clone()));
+            .map(|group| MessageTarget::new(ConversationRef::group(group.id.clone())))
+            .unwrap_or_else(|| {
+                MessageTarget::new(ConversationRef::direct(self.event().sender.id.clone()))
+            });
         self.bot()?
-            .send_message(message, target)
+            .send_outgoing_message_with(target, message.into(), FallbackPolicy::Auto)
             .await
             .map_err(|error| HandlerError::Api(error.to_string()))
     }
 
-    pub async fn reply(
-        &self,
-        mut message: Vec<MessageSegment>,
-    ) -> Result<Vec<oxidebot_core::api::response::SendMessageResponse>, HandlerError> {
-        message.push(MessageSegment::reply(self.event().message.id.clone()));
-        self.send(message).await
+    pub async fn reply(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
+        self.send(message.into().reply_to(self.event().message.id.clone()))
+            .await
     }
 
     pub async fn ask_parse<T>(
@@ -250,6 +246,10 @@ impl RouteScope {
 
     pub(crate) fn is_global(&self) -> bool {
         self.platform.is_none() && self.bot.is_none()
+    }
+
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        self.intersect(other).is_ok()
     }
 
     pub(crate) fn intersect(&self, other: &Self) -> Result<Self, String> {

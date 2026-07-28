@@ -1,8 +1,11 @@
 # OxideBot
 
 OxideBot is a high-performance, platform-neutral bot framework built around one
-complete semantic model: the restored **0.1.8 `Event` hierarchy**, the canonical
-`Message` / `MessageSegment` types, and the full `CallApiTrait` API.
+complete semantic model: the restored **0.1.8 `Event` hierarchy**, one extended
+cross-platform `Message` / `MessageSegment` intermediate representation, and
+the full `CallApiTrait` API. The stable 0.1.8 message variants remain available,
+but rich text, media, components, polls, layouts, and native segments now use
+the same message value instead of parallel models.
 
 The authoring layer keeps the parts of Axum that are genuinely useful outside
 HTTP—ordinary async functions, typed extraction, composable application
@@ -173,11 +176,13 @@ Optional data is represented by explicit domain extractors such as
 it would turn permission, parsing, API, and configuration failures into
 indistinguishable `None` values.
 
-## Strongly typed commands
+## Strongly typed command grammars
 
-`#[derive(CommandArgs)]` generates one schema used by parsing, validation,
-automatic help, usage output, suggestions, and optional interactive completion.
-Handlers never need to split raw strings manually.
+`#[derive(CommandArgs)]` generates one leaf schema, while `#[derive(BotCommand)]`
+generates a real user-visible subcommand tree. The same immutable command IR is
+used by text parsing, structured `CommandMatch`, localized help, completion,
+platform-native command publication, and native autocomplete. Handlers never
+need to split raw strings or maintain a second slash-command definition.
 
 ```rust
 #[derive(Debug, CommandArgs)]
@@ -214,10 +219,32 @@ values, `--long=value`, combined short flags, attached short-option values,
 `--`, negative numeric positionals, repeated/rest values, and typed mentions,
 files, and original message segments.
 
-Only a missing required argument can enter interactive completion. Unknown
-options, missing option values, and invalid conversions fail immediately with
-command-specific usage. Guards run before completion, so an unauthorized or
-rate-limited user is never prompted for more input.
+A command tree can be declared directly:
+
+```rust
+#[derive(Debug, BotCommand)]
+#[command(name = "todo", description = "Manage todos")]
+enum TodoCommand {
+    Add(AddTodoArgs),
+    Done(DoneTodoArgs),
+    List,
+}
+
+async fn todo(Args(command): Args<TodoCommand>) -> String {
+    match command {
+        TodoCommand::Add(args) => format!("add {}", args.text.join(" ")),
+        TodoCommand::Done(args) => format!("done {}", args.id),
+        TodoCommand::List => "list".to_owned(),
+    }
+}
+
+let module = Module::new().command(TodoCommand::command(), todo).help();
+```
+
+Only a missing required argument can enter interactive dialogue recovery.
+Unknown subcommands/options, missing option values, and invalid conversions
+fail immediately with localized choices and command-specific usage. Guards run
+before completion, so an unauthorized or rate-limited user is never prompted.
 
 See [docs/COMMANDS.md](docs/COMMANDS.md).
 
@@ -300,9 +327,11 @@ Parent module guards and hooks apply to included modules regardless of whether
 they are declared before or after `include`, eliminating Tower-style ordering
 traps. See [docs/MODULES.md](docs/MODULES.md).
 
-## Messages, immediate replies, and receipts
+## One message IR, delivery planning, and receipts
 
-All message helpers construct the canonical 0.1.8 model:
+All inbound events, handler results, active sends, command tokenization, and
+adapter export use the same `Message`. Stable 0.1.8 constructors remain the
+shortest path, while portable rich segments live in the same enum:
 
 ```rust
 let message = Message::text("Hello ")
@@ -318,6 +347,26 @@ let equivalent = message![
     MessageSegment::file(File::from_path("report.pdf")),
 ];
 ```
+
+Rich and interactive content uses the same value:
+
+```rust
+let message = Message::rich_text(
+    RichText::plain("Deployment complete")
+        .span(0..10, TextStyle::Bold),
+)
+.components(MessageComponents::InlineKeyboard(
+    InlineKeyboard::new([ActionRow::buttons([
+        Button::url("Open", "https://example.invalid"),
+    ])]),
+));
+```
+
+Before I/O, `Message::plan_for` combines the target `BotCapabilities` with a
+`FallbackPolicy`. It returns a `DeliveryPlan` containing physical messages and
+explicit degradations. `Strict` refuses unsupported semantics; `Auto`,
+`ToText`, `Flatten`, and `DropUnsupported` remain observable through
+`DeliveryReport` rather than silently losing content.
 
 Returning a message is the shortest path. Use `Reply` when the workflow needs
 the platform result immediately:

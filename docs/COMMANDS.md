@@ -1,27 +1,23 @@
-# Typed commands
+# Typed command grammars
 
-OxideBot commands are message-domain parsers, not nested routes. A command name
-may contain multiple words directly:
+OxideBot commands are message-domain grammars, not URL routes. A flat
+`Module` never creates a Web-style route tree, while a command may contain a
+real user-visible subcommand tree that is shared by text parsing, help,
+completion, localization, and platform-native command publication.
 
-```rust
-command("admin ban")
-command("account settings show")
-```
+## One command IR
 
-There is no `mount` operation and no command-prefix tree. Writing the complete
-command path makes help, aliases, permissions, and route indexing explicit.
+Every command is compiled into one immutable `Command` grammar. Text messages
+and native slash/menu invocations both produce the same `CommandMatch`, and the
+match is parsed once before handler extraction.
 
-## Derive one schema
+For a single command, derive `CommandArgs`:
 
 ```rust
 use oxidebot::prelude::*;
 
 #[derive(Debug, CommandArgs)]
-#[command(
-    description = "Create a release",
-    category = "operations",
-    alias = "release new"
-)]
+#[command(description = "Create a release", alias = "release-new")]
 struct CreateReleaseArgs {
     /// Release name.
     #[arg(prompt = "What should the release be called?")]
@@ -31,12 +27,12 @@ struct CreateReleaseArgs {
     #[arg(long, short = 'e', default = "staging".to_owned())]
     environment: String,
 
-    /// Skip the confirmation stage.
-    #[arg(long, short = 'f')]
-    force: bool,
+    /// Increase diagnostic verbosity; `-vvv` becomes 3.
+    #[arg(long, short = 'v', action = "count")]
+    verbose: u8,
 
     /// Optional labels.
-    #[arg(long, short = 't')]
+    #[arg(long, short = 't', action = "append")]
     tags: Vec<String>,
 
     /// Remaining free-form notes.
@@ -44,118 +40,175 @@ struct CreateReleaseArgs {
     notes: Vec<String>,
 }
 
-async fn create_release(
-    Args(args): Args<CreateReleaseArgs>,
-) -> String {
+async fn create_release(Args(args): Args<CreateReleaseArgs>) -> String {
     format!("creating {} in {}", args.name, args.environment)
 }
 
 let features = Module::new().command(
-    CreateReleaseArgs::command("release create")
-        .example("/release create v1.2 -e production -t stable"),
+    CreateReleaseArgs::command("release-create")
+        .example("/release-create v1.2 -e production -vv -t stable"),
     create_release,
 );
 ```
 
-The derive generates `CommandSchema` and conversion code. The same schema is
-used by parsing, build-time validation, help, usage rendering, unknown-option
-suggestions, and interactive completion.
+The generated schema drives:
 
-## Field forms
+- text and typed-message parsing;
+- native command definitions;
+- build-time structural validation;
+- localized usage and help;
+- static and native autocomplete;
+- unknown-option suggestions;
+- bounded missing-argument recovery.
 
-A plain field is positional:
+## Real subcommand trees
+
+Use `BotCommand` for a root command with branches. A tuple variant wraps one
+`CommandArgs` structure; a unit variant has no arguments.
 
 ```rust
-name: String
+#[derive(Debug, CommandArgs)]
+struct AddArgs {
+    #[arg(rest, required = true, prompt = "What should I add?")]
+    text: Vec<String>,
+
+    #[arg(long, short = 'p', min = 1.0, max = 5.0, default = 3_u8)]
+    priority: u8,
+}
+
+#[derive(Debug, CommandArgs)]
+struct DoneArgs {
+    id: u64,
+}
+
+#[derive(Debug, BotCommand)]
+#[command(name = "todo", description = "Manage todo items")]
+enum TodoCommand {
+    /// Create a todo item.
+    Add(AddArgs),
+
+    /// Mark an item as complete.
+    Done(DoneArgs),
+
+    /// List open items.
+    List,
+}
+
+async fn todo(Args(command): Args<TodoCommand>) -> String {
+    match command {
+        TodoCommand::Add(args) => format!("add: {}", args.text.join(" ")),
+        TodoCommand::Done(args) => format!("done: {}", args.id),
+        TodoCommand::List => "list".to_owned(),
+    }
+}
+
+let features = Module::new().command(TodoCommand::command(), todo).help();
 ```
 
-An `Option<T>` field is optional command data:
+The grammar above accepts `/todo add`, `/todo done`, and `/todo list`. Missing
+or unknown branches are diagnosed before the handler runs, with localized
+choices and edit-distance suggestions. This is a command syntax tree; it does
+not reintroduce `mount`, nested application routers, or Tower layers.
+
+Nested branches can also be built explicitly with `CommandBranch::subcommand`
+when a project needs more than one enum level.
+
+## Structured parse results
+
+Most handlers should request `Args<T>`. Framework tooling can request the
+shared `CommandMatch` directly:
 
 ```rust
-environment: Option<String>
+async fn inspect(command: CommandMatch) -> String {
+    format!(
+        "command={} branch={:?} source={:?}",
+        command.command().name(),
+        command.branch_names(),
+        command.source(),
+    )
+}
 ```
 
-This is different from a generic optional handler extractor, which OxideBot
-does not provide.
+`CommandMatch` retains:
 
-A `bool` long or short option is a flag:
+- deterministic command, branch, and field IDs;
+- canonical and invoked names;
+- selected branch path;
+- typed text, mention, file, message-segment, and native form values;
+- the active merged schema;
+- locale and invocation source;
+- the parsed arguments after validation.
+
+Generated Rust field IDs are the normal query mechanism. Dynamic tools may use
+`ParsedArguments` and schema lookup without reparsing the original message.
+
+## Field forms and constraints
+
+A plain field is positional. `Option<T>` is optional command data, and `Vec<T>`
+represents repeated or remaining values. This is separate from handler
+extraction; OxideBot intentionally has no generic `Option<Extractor>` that
+would swallow arbitrary failures.
+
+Useful field attributes include:
 
 ```rust
 #[arg(long, short = 'f')]
-force: bool
+force: bool,
+
+#[arg(long, action = "append")]
+include: Vec<String>,
+
+#[arg(long, short = 'v', action = "count")]
+verbosity: u8,
+
+#[arg(choice = "dev", choice = "staging", choice = "production")]
+environment: String,
+
+#[arg(min = 1.0, max = 100.0)]
+percentage: f64,
+
+#[arg(min_length = 3, max_length = 40)]
+name: String,
+
+#[arg(requires = "token")]
+remote: Option<String>,
+
+#[arg(conflicts_with = "dry_run")]
+force: bool,
 ```
 
-Repeated option values use `Vec<T>`:
+Canonical non-text segments are not flattened. Fields may consume `Mention`,
+`File`, `MessageSegment`, `FormValue`, or any custom `FromCommandValue` type.
 
-```rust
-#[arg(long, short = 't')]
-tags: Vec<String>
-```
-
-A final positional `Vec<T>` may consume the remainder:
-
-```rust
-#[arg(rest)]
-notes: Vec<String>
-```
-
-Defaults are generated into the schema:
-
-```rust
-#[arg(long, default = 10_u32)]
-limit: u32
-```
-
-A required field may define a prompt used only when completion is enabled:
-
-```rust
-#[arg(prompt = "Which project?")]
-project: String
-```
-
-## Accepted syntax
+## Accepted text syntax
 
 The tokenizer and schema parser support:
 
-- single and double quotes;
-- backslash escapes;
-- empty quoted values (`""` and `''`);
+- single and double quotes, backslash escapes, and empty quoted values;
 - `--long value` and `--long=value`;
-- short options and combined short flags;
-- attached short-option values;
+- short options, combined flags, and attached short-option values;
 - `--` to end option parsing;
-- negative numeric positional values;
+- negative numeric positionals;
+- store, append, count, set-true, and set-false actions;
 - required, optional, defaulted, repeated, and rest arguments;
-- exact aliases and multi-word command paths;
-- multiple prefixes, no-prefix commands, and case-insensitive commands.
+- exact aliases, multiple prefixes, no-prefix commands, and case folding;
+- canonical `Text`, `PlainText`, and `RichText` tokens;
+- mentions, files, native form values, and original message segments.
 
-Canonical non-text segments are not flattened. Command fields can consume
-`Mention`, `File`, `MessageSegment`, or a custom type implementing
-`FromCommandValue`.
+The default `/name` form keeps the exact pre-decode route key. Commands only
+enter the broad message candidate slot when custom prefix or case rules require
+it.
 
-## Fast and broad command matching
+## Completion
 
-The default command form:
+The command IR supports three related flows:
 
-```rust
-command("ping")
-```
-
-uses the exact `/ping` pre-decode key. The runtime can discard an unrelated
-message frame before constructing the complete event.
-
-Commands enter the broad message candidate slot only when their matching rules
-require it, such as:
-
-```rust
-command("hello").prefix("!")
-command("help").no_prefix()
-command("PING").case_insensitive()
-```
-
-Full parsing still occurs only after the message is admitted.
-
-## Interactive completion
+1. `CommandCatalog::suggest(input, cursor, locale)` returns structured
+   `CompletionItem`s without executing a handler.
+2. Native suggestion events resolve the same argument IDs and choices, then
+   call `answer_suggestion_request`.
+3. `CompletionConfig` enables bounded dialogue recovery only for a missing
+   required argument.
 
 ```rust
 let deploy = DeployArgs::command("deploy").completion(
@@ -166,52 +219,41 @@ let deploy = DeployArgs::command("deploy").completion(
 );
 ```
 
-The flow is:
+Unknown branches, unknown options, invalid values, duplicate options, and
+missing option values return immediately. Guards run before a completion
+session, so an unauthorized user is never prompted.
 
-```text
-exact command match
--> module guards
--> schema validation
--> bounded dialogue only for MissingArgument
--> complete Args<T>
--> before hooks
--> handler extraction and execution
-```
+## Help and localization
 
-Unknown options, duplicate options, missing option values, extra values, and
-invalid type conversions are returned immediately. They never start a prompt
-loop. Answers are inserted into the exact missing positional or named field,
-including long options.
+`CommandOutput` is structured before it becomes a message. The default
+`CommandRenderer` renders catalogs, branch help, parse errors, and completion
+items into the unified `Message` IR.
 
-Session registration happens before the prompt is sent, preventing a fast user
-reply from racing the waiter. Cancellation and maximum rounds are bounded by
-the command's `CompletionConfig`.
-
-## Automatic help
+Descriptions, argument help, prompts, and choices use `LocalizedText`:
 
 ```rust
-let features = Module::new()
-    .command(CreateReleaseArgs::command("release create"), create_release)
-    .command(command("ping").description("Check liveness"), ping)
-    .help();
+let command = command("status")
+    .description("Show status")
+    .description_translation("zh-CN", "查看状态");
+
+let project = ArgumentSpec::new("project")
+    .help("Project name")
+    .help_translation("zh-CN", "项目名称")
+    .prompt("Which project?")
+    .prompt_translation("zh-CN", "请选择项目：");
 ```
 
-`/help` renders the visible command catalog. `/help release create` renders the
-same schema used by the parser, including usage fragments, descriptions,
-defaults, aliases, categories, and examples.
+Locale is resolved from native command/suggestion events when available. A
+custom `CommandRenderer` can render the same outputs as plain text, rich text,
+buttons, or platform-native layouts without changing the grammar.
 
-Included modules contribute their commands to the same catalog. Calling
-`help()` more than once through module composition does not create duplicate
-help handlers.
+## Platform-native publication
 
-## Raw command access
+At startup, the command catalog converts the same grammar to
+`CommandDefinition`. Adapters that report
+`BotCapabilities.application.structured_commands` receive the definitions via
+`set_command_definitions`.
 
-Most handlers should use `Args<T>`. `CommandResult` is available when a handler
-needs the matched alias, original lossless command values, or custom dynamic
-parsing:
-
-```rust
-async fn inspect(command: CommandResult) -> String {
-    format!("matched {}", command.command().name())
-}
-```
+A platform-native invocation is mapped back to the same `CommandMatch`; it does
+not need a second slash-command handler. Native autocomplete uses the same
+field IDs, choices, locale, and completion items.

@@ -15,14 +15,14 @@ pub enum Propagation {
 
 /// Effects produced by one Bot handler.
 ///
-/// An outcome can enqueue canonical 0.1.8 messages and optionally override the
+/// An outcome can enqueue unified cross-platform messages and optionally override the
 /// handler's normal propagation policy. Commands and interactions stop by
 /// default; ordinary event observers continue by default. Returning a message
 /// controls the reply only, rather than secretly changing event flow.
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
     pub(crate) propagation: Propagation,
-    pub(crate) replies: Vec<Vec<MessageSegment>>,
+    pub(crate) replies: Vec<Message>,
 }
 
 impl Outcome {
@@ -55,7 +55,7 @@ impl Outcome {
 
     #[must_use]
     pub fn reply(mut self, message: impl Into<Message>) -> Self {
-        self.replies.push(message.into().into_segments());
+        self.replies.push(message.into());
         self
     }
 
@@ -75,8 +75,8 @@ impl Outcome {
     }
 
     #[must_use]
-    pub fn replies(&self) -> impl ExactSizeIterator<Item = &[MessageSegment]> {
-        self.replies.iter().map(Vec::as_slice)
+    pub fn replies(&self) -> impl ExactSizeIterator<Item = &Message> {
+        self.replies.iter()
     }
 
     /// Appends another outcome's replies. An explicit propagation decision in

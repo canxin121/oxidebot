@@ -7,13 +7,16 @@ use crate::{
     handler::{prepare_handler, PreparedHandler, RouteSpec},
     router::{CompiledRouter, RouterLimits},
     session::{SessionDelivery, SessionRegistry},
-    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, Filter, MetricsHandle, Result,
-    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
-    ShutdownSignal,
+    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, CommandCatalog, Filter,
+    MetricsHandle, Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service,
+    ServiceContext, ServiceError, ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
-use oxidebot_core::{BotIdentity, BotSlot, EventId};
+use oxidebot_core::{
+    application::{CommandDefinition, CommandOption},
+    BotCapabilities, BotIdentity, BotSlot, EventId,
+};
 use std::{
     collections::{HashSet, VecDeque},
     future::{pending, Future},
@@ -147,6 +150,7 @@ where
             metrics,
         } = self;
         config.validate()?;
+        let command_catalog = module.catalog();
         let handlers = module.into_handlers()?;
         if handlers.len() > MAX_RUNTIME_HANDLERS {
             return Err(BuildError::InvalidConfig(
@@ -172,6 +176,7 @@ where
             handlers,
             filters,
             services,
+            command_catalog,
             metrics,
         })
     }
@@ -199,6 +204,7 @@ where
     handlers: Vec<PreparedHandler<S>>,
     filters: Vec<Arc<dyn Filter<S>>>,
     services: Vec<Arc<dyn Service<S>>>,
+    command_catalog: CommandCatalog,
     metrics: MetricsHandle,
 }
 
@@ -470,6 +476,89 @@ fn register_bots(
     Ok((registered, workers, BotDirectory::new(handles)))
 }
 
+fn prepare_command_definitions(
+    mut definitions: Vec<CommandDefinition>,
+    capabilities: &BotCapabilities,
+) -> std::result::Result<Vec<CommandDefinition>, String> {
+    if capabilities
+        .limits
+        .max_commands
+        .is_some_and(|limit| definitions.len() > limit)
+    {
+        return Err(format!(
+            "{} commands exceed the platform limit of {}",
+            definitions.len(),
+            capabilities.limits.max_commands.unwrap_or_default(),
+        ));
+    }
+    let localized = capabilities
+        .application
+        .command_localizations
+        .is_supported();
+    let autocomplete = capabilities.application.autocomplete.is_supported();
+    for definition in &mut definitions {
+        if !localized {
+            definition.name.translations.clear();
+            definition.description.translations.clear();
+        }
+        adapt_native_options(&mut definition.options, localized, autocomplete);
+    }
+    Ok(definitions)
+}
+
+fn adapt_native_options(options: &mut [CommandOption], localized: bool, autocomplete: bool) {
+    for option in options {
+        if !localized {
+            option.name.translations.clear();
+            option.description.translations.clear();
+            for choice in &mut option.choices {
+                choice.name.translations.clear();
+            }
+        }
+        if !autocomplete {
+            option.autocomplete = false;
+        }
+        adapt_native_options(&mut option.options, localized, autocomplete);
+    }
+}
+
+async fn publish_command_definitions(bots: &BotDirectory, catalog: &CommandCatalog) -> Result<()> {
+    if catalog.commands().is_empty() {
+        return Ok(());
+    }
+    for bot in bots.iter() {
+        let definitions = catalog.for_identity(bot.identity()).definitions();
+        if definitions.is_empty() {
+            continue;
+        }
+        let Ok(api) = bot.api() else {
+            continue;
+        };
+        let capabilities = api.bot_capabilities();
+        if !capabilities.application.structured_commands.is_supported() {
+            continue;
+        }
+        let definitions =
+            prepare_command_definitions(definitions, &capabilities).map_err(|error| {
+                RuntimeError::Service(ServiceError::new(format!(
+                    "could not prepare command definitions for {}:{}: {error}",
+                    bot.identity().platform,
+                    bot.identity().bot,
+                )))
+            })?;
+        api.set_command_definitions(definitions)
+            .await
+            .map_err(|error| {
+                RuntimeError::Service(ServiceError::new(format!(
+                    "could not publish command definitions for {}:{}: {error}",
+                    bot.identity().platform,
+                    bot.identity().bot,
+                )))
+            })?;
+    }
+    Ok(())
+}
+
 async fn run_application<S, F>(app: Application<S>, shutdown_signal: F, mode: RunMode) -> Result<()>
 where
     S: Send + Sync + 'static,
@@ -482,6 +571,7 @@ where
         handlers,
         filters,
         services,
+        command_catalog,
         metrics,
     } = app;
 
@@ -489,6 +579,20 @@ where
         register_bots(adapters, &config, Arc::clone(&metrics))?;
     let bot_count = bot_directory.len();
     let cancellation = CancellationToken::new();
+
+    // API calls are serialized by the per-bot command workers. Start them
+    // before publishing the shared command IR, otherwise publication would
+    // enqueue work and wait on workers that are not running yet.
+    let mut command_tasks = JoinSet::new();
+    for worker in command_workers {
+        command_tasks.spawn(worker.run());
+    }
+    if let Err(error) = publish_command_definitions(&bot_directory, &command_catalog).await {
+        cancellation.cancel();
+        command_tasks.abort_all();
+        while command_tasks.join_next().await.is_some() {}
+        return Err(error);
+    }
 
     let (sessions, session_workers) = SessionRegistry::new(
         config.session_shards,
@@ -508,11 +612,6 @@ where
         },
         Arc::clone(&metrics),
     ));
-    let mut command_tasks = JoinSet::new();
-    for worker in command_workers {
-        command_tasks.spawn(worker.run());
-    }
-
     let mut session_tasks = JoinSet::new();
     for worker in session_workers {
         session_tasks.spawn(worker.run());

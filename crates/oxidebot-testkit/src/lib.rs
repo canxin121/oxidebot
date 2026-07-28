@@ -158,6 +158,7 @@ impl InboundFrame for TestFrame {
             message: Message {
                 id: message_id,
                 segments: vec![MessageSegment::text(text)],
+                options: Default::default(),
             },
         });
         let mut draft = DispatchDraft::new(self.id, index, event, retained_event_bytes);

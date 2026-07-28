@@ -11,9 +11,12 @@ use oxidebot_core::message::{
     MessageReceipt, MessageRef, MessageTarget, NativeData, OutgoingMessage,
 };
 use oxidebot_core::{
-    api::{payload::SendMessageTarget as EventMessageTarget, response::SendMessageResponse},
-    source::message::MessageSegment as EventMessageSegment,
-    BotId, BotIdentity, BotObject, BotSlot, CallApiTrait, ConversationKey, InvalidId, PlatformId,
+    conversation::{
+        ConversationKind, ConversationRef as PublicConversationRef, MessageRef as PublicMessageRef,
+        MessageTarget as PublicMessageTarget,
+    },
+    BotId, BotIdentity, BotObject, BotSlot, CallApiTrait, ConversationKey, FallbackPolicy,
+    InvalidId, PlatformId,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -137,28 +140,32 @@ pub(crate) trait NativeService: Send + Sync + 'static {
 
 struct ApiMessageService(Arc<dyn CallApiTrait>);
 
-fn event_message_target(target: &MessageTarget) -> EventMessageTarget {
-    target
-        .recipients
-        .first()
-        .map(|recipient| EventMessageTarget::Private(recipient.id.to_string()))
-        .unwrap_or_else(|| EventMessageTarget::Group(target.conversation.id.to_string()))
+fn public_message_target(target: &MessageTarget) -> PublicMessageTarget {
+    if let Some(recipient) = target.recipients.first() {
+        return PublicMessageTarget::new(PublicConversationRef::direct(recipient.id.to_string()));
+    }
+
+    let root = PublicConversationRef::group(target.conversation.id.to_string());
+    let conversation = target
+        .conversation
+        .thread
+        .as_ref()
+        .map_or(root.clone(), |thread| {
+            PublicConversationRef::new(thread.to_string(), ConversationKind::Thread).child_of(root)
+        });
+    PublicMessageTarget::new(conversation)
 }
 
-fn event_message_segments(message: &OutgoingMessage) -> Vec<EventMessageSegment> {
-    message
-        .content
-        .iter()
-        .map(|content| match content {
-            oxidebot_core::message::MessageContent::Text(text) => {
-                EventMessageSegment::text(text.to_string())
-            }
-            oxidebot_core::message::MessageContent::RichText(text) => {
-                EventMessageSegment::text(text.text.to_string())
-            }
-            other => EventMessageSegment::custom_string("runtime".to_owned(), format!("{other:?}")),
-        })
-        .collect()
+fn public_message_ref(message: &MessageRef) -> PublicMessageRef {
+    let root = PublicConversationRef::group(message.conversation.id.to_string());
+    let conversation = message
+        .conversation
+        .thread
+        .as_ref()
+        .map_or(root.clone(), |thread| {
+            PublicConversationRef::new(thread.to_string(), ConversationKind::Thread).child_of(root)
+        });
+    PublicMessageRef::new(message.id.to_string()).in_conversation(conversation)
 }
 
 fn platform_error(error: anyhow::Error) -> PlatformError {
@@ -175,22 +182,24 @@ impl MessageService for ApiMessageService {
         target: &MessageTarget,
         message: &OutgoingMessage,
     ) -> std::result::Result<MessageReceipt, PlatformError> {
-        let responses = self
+        let report = self
             .0
-            .send_message(
-                event_message_segments(message),
-                event_message_target(target),
+            .send_outgoing_message_with(
+                public_message_target(target),
+                message.clone(),
+                FallbackPolicy::Auto,
             )
             .await
             .map_err(platform_error)?;
-        let id = responses
+        let id = report
+            .messages
             .into_iter()
             .next()
-            .map(|response: SendMessageResponse| response.sent_message_id)
+            .map(|message| message.id)
             .ok_or_else(|| {
                 PlatformError::new(
                     PlatformErrorKind::Permanent,
-                    "send_message returned no message id",
+                    "send_outgoing_message returned no message id",
                 )
             })?;
         Ok(MessageReceipt::new(MessageRef::new(
@@ -205,14 +214,14 @@ impl MessageService for ApiMessageService {
         replacement: &OutgoingMessage,
     ) -> std::result::Result<(), PlatformError> {
         self.0
-            .edit_message(message.id.to_string(), event_message_segments(replacement))
+            .edit_outgoing_message(public_message_ref(message), replacement.clone())
             .await
             .map_err(platform_error)
     }
 
     async fn delete(&self, message: &MessageRef) -> std::result::Result<(), PlatformError> {
         self.0
-            .delete_message(message.id.to_string())
+            .delete_message_ref(public_message_ref(message))
             .await
             .map_err(platform_error)
     }

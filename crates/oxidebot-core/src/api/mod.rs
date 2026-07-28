@@ -41,6 +41,7 @@ use crate::{
         ConversationMember, ConversationProfile, ConversationRef, InviteLink, InviteLinkOptions,
         MessageRef, MessageTarget, Page, PageRequest, PermissionSet, Thread, ThreadOptions,
     },
+    source::message::{DeliveryPlan, DeliveryReport, FallbackPolicy},
 };
 use platform::{PlatformApiRequest, PlatformApiResponse, UnsupportedPlatformApiError};
 
@@ -80,27 +81,66 @@ pub trait CallApiTrait: Send + Sync {
     /// Returns granular capabilities and platform limits. This is the
     /// preferred capability API for new adapters.
     fn bot_capabilities(&self) -> BotCapabilities {
-        BotCapabilities::default()
+        BotCapabilities::legacy_message_api()
     }
 
-    /// Sends a fully modeled message. The default converts portable basic
-    /// content to the legacy API, keeping existing adapters source-compatible.
+    /// Builds the exact physical message plan that would be sent by
+    /// [`CallApiTrait::send_outgoing_message_with`]. Planning is pure and can be
+    /// used by previews, tests, observability, and strict-delivery workflows.
+    fn plan_outgoing_message(
+        &self,
+        message: &OutgoingMessage,
+        policy: FallbackPolicy,
+    ) -> Result<DeliveryPlan> {
+        Ok(message.plan_for(&self.bot_capabilities(), policy)?)
+    }
+
+    /// Sends the canonical message IR through the capability-aware delivery
+    /// planner and returns both physical message references and every
+    /// degradation that occurred.
+    ///
+    /// The default implementation is the compatibility transport for legacy
+    /// adapters and lowers every physical message through
+    /// [`CallApiTrait::send_message_with_options`]. An adapter that advertises
+    /// native support for portable rich segments or components must override
+    /// this method so its transport preserves those features.
+    async fn send_outgoing_message_with(
+        &self,
+        target: MessageTarget,
+        message: OutgoingMessage,
+        policy: FallbackPolicy,
+    ) -> Result<DeliveryReport> {
+        let plan = self.plan_outgoing_message(&message, policy)?;
+        let legacy_target = legacy_send_target(&target)?;
+        let conversation = target.conversation.clone();
+        let mut references = Vec::new();
+
+        for physical in plan.messages {
+            let (segments, options) = physical.try_into_legacy()?;
+            let responses = self
+                .send_message_with_options(segments, legacy_target.clone(), options)
+                .await?;
+            references.extend(responses.into_iter().map(|response| {
+                MessageRef::new(response.sent_message_id).in_conversation(conversation.clone())
+            }));
+        }
+
+        Ok(DeliveryReport {
+            messages: references,
+            degradations: plan.degradations,
+        })
+    }
+
+    /// Sends a fully modeled message with the safe automatic fallback policy.
     async fn send_outgoing_message(
         &self,
         target: MessageTarget,
         message: OutgoingMessage,
     ) -> Result<Vec<MessageRef>> {
-        let legacy_target = legacy_send_target(&target)?;
-        let conversation = target.conversation;
-        let (segments, options) = message.try_into_legacy()?;
         Ok(self
-            .send_message_with_options(segments, legacy_target, options)
+            .send_outgoing_message_with(target, message, FallbackPolicy::Auto)
             .await?
-            .into_iter()
-            .map(|response| {
-                MessageRef::new(response.sent_message_id).in_conversation(conversation.clone())
-            })
-            .collect())
+            .messages)
     }
 
     async fn edit_outgoing_message(
@@ -108,7 +148,15 @@ pub trait CallApiTrait: Send + Sync {
         message: MessageRef,
         new_message: OutgoingMessage,
     ) -> Result<()> {
-        let (segments, options) = new_message.try_into_legacy()?;
+        let plan = self.plan_outgoing_message(&new_message, FallbackPolicy::Strict)?;
+        if plan.messages.len() != 1 {
+            return Err(UnsupportedFeatureError::new(
+                "editing a logical message that expands to multiple physical messages",
+            )
+            .into());
+        }
+        let physical = plan.messages.into_iter().next().expect("length checked");
+        let (segments, options) = physical.try_into_legacy()?;
         if !options.is_empty() {
             return Err(UnsupportedFeatureError::new("editing message options atomically").into());
         }
@@ -134,10 +182,30 @@ pub trait CallApiTrait: Send + Sync {
         target: SendMessageTarget,
         options: MessageOptions,
     ) -> Result<Vec<SendMessageResponse>> {
+        let mut message = message;
+        let mut options = options;
+
+        // Reply metadata is part of the canonical message IR, while the 0.1.8
+        // adapter surface represented replies as a message segment. Fold the
+        // option into that stable representation so existing adapters keep
+        // working without implementing the richer options method.
+        if let Some(reply) = options.reply.take() {
+            let reply_id = reply.message.id;
+            let already_present = message.iter().any(|segment| {
+                matches!(
+                    segment,
+                    MessageSegment::Reply { message_id } if message_id == &reply_id
+                )
+            });
+            if !already_present {
+                message.insert(0, MessageSegment::reply(reply_id));
+            }
+        }
+
         if options.is_empty() {
             self.send_message(message, target).await
         } else {
-            Err(UnsupportedInteractionError::new("message components").into())
+            Err(UnsupportedInteractionError::new("message options").into())
         }
     }
 

@@ -2,7 +2,7 @@
 //! contact, and delivery models.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, error::Error, fmt, ops::Range, time::Duration};
+use std::{collections::BTreeMap, ops::Range, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde_json::Value;
@@ -10,11 +10,12 @@ use serde_json::Value;
 use crate::{
     collaboration::ReactionSummary,
     conversation::{ConversationRef, MessageRef, MessageTarget},
-    interaction::{ActionRow, MessageOptions, PlatformNativeData},
-    source::{
-        message::{File, MessageSegment},
-        user::User,
-    },
+    interaction::{ActionRow, PlatformNativeData},
+    source::{message::File, user::User},
+};
+
+pub use crate::source::message::{
+    ContentConversionError, Message as OutgoingMessage, MessageSegment as MessageContent,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -330,28 +331,6 @@ pub struct RichLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum MessageContent {
-    PlainText(String),
-    RichText(RichText),
-    Image(Media),
-    Video(Media),
-    Audio(Media),
-    Animation(Media),
-    VoiceNote(Media),
-    VideoNote(Media),
-    File(Media),
-    MediaGallery(Vec<MediaGalleryItem>),
-    Location(LocationContent),
-    Contact(ContactCard),
-    CustomEmoji(CustomEmoji),
-    Sticker(Sticker),
-    Poll(Poll),
-    Checklist(Checklist),
-    RichLayout(RichLayout),
-    PlatformNative(PlatformNativeData),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReplyOptions {
     pub message: MessageRef,
     pub quote: Option<RichText>,
@@ -422,135 +401,6 @@ pub enum DeliveryTime {
     Scheduled(DateTime<Utc>),
     Draft,
 }
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct OutgoingMessage {
-    pub content: Vec<MessageContent>,
-    pub options: MessageOptions,
-}
-
-impl OutgoingMessage {
-    pub fn new(content: impl IntoIterator<Item = MessageContent>) -> Self {
-        Self {
-            content: content.into_iter().collect(),
-            options: MessageOptions::default(),
-        }
-    }
-
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::new([MessageContent::PlainText(text.into())])
-    }
-
-    pub fn options(mut self, options: MessageOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    pub fn try_into_legacy(
-        self,
-    ) -> Result<(Vec<MessageSegment>, MessageOptions), ContentConversionError> {
-        let mut segments = Vec::with_capacity(self.content.len());
-        for content in self.content {
-            segments.push(content.try_into()?);
-        }
-        Ok((segments, self.options))
-    }
-}
-
-impl TryFrom<MessageContent> for MessageSegment {
-    type Error = ContentConversionError;
-
-    fn try_from(content: MessageContent) -> Result<Self, Self::Error> {
-        match content {
-            MessageContent::PlainText(text) => Ok(Self::text(text)),
-            MessageContent::RichText(text) if text.spans.is_empty() => Ok(Self::text(text.text)),
-            MessageContent::Image(media) if media_is_legacy(&media) => Ok(Self::image(media.file)),
-            MessageContent::Video(media) if media_is_legacy(&media) => Ok(Self::video(
-                media.file,
-                media
-                    .duration
-                    .and_then(|value| i32::try_from(value.as_secs()).ok()),
-            )),
-            MessageContent::Audio(media) if media_is_legacy(&media) => Ok(Self::audio(
-                media.file,
-                media
-                    .duration
-                    .and_then(|value| i32::try_from(value.as_secs()).ok()),
-            )),
-            MessageContent::File(media) if media_is_legacy(&media) => Ok(Self::file(media.file)),
-            MessageContent::Location(location)
-                if location.horizontal_accuracy.is_none()
-                    && location.live_period.is_none()
-                    && location.heading.is_none()
-                    && location.proximity_alert_radius.is_none()
-                    && location.platform_data.is_none() =>
-            {
-                Ok(Self::location(
-                    location.latitude,
-                    location.longitude,
-                    location.title.unwrap_or_default(),
-                    location.address,
-                ))
-            }
-            other => Err(ContentConversionError {
-                kind: other.kind_name().to_owned(),
-            }),
-        }
-    }
-}
-
-fn media_is_legacy(media: &Media) -> bool {
-    media.caption.is_none()
-        && media.thumbnail.is_none()
-        && media.width.is_none()
-        && media.height.is_none()
-        && !media.spoiler
-        && media.alt_text.is_none()
-        && media.waveform.is_none()
-        && media.platform_data.is_none()
-}
-
-impl MessageContent {
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Self::PlainText(_) => "plain text",
-            Self::RichText(_) => "rich text",
-            Self::Image(_) => "image",
-            Self::Video(_) => "video",
-            Self::Audio(_) => "audio",
-            Self::Animation(_) => "animation",
-            Self::VoiceNote(_) => "voice note",
-            Self::VideoNote(_) => "video note",
-            Self::File(_) => "file",
-            Self::MediaGallery(_) => "media gallery",
-            Self::Location(_) => "location",
-            Self::Contact(_) => "contact",
-            Self::CustomEmoji(_) => "custom emoji",
-            Self::Sticker(_) => "sticker",
-            Self::Poll(_) => "poll",
-            Self::Checklist(_) => "checklist",
-            Self::RichLayout(_) => "rich layout",
-            Self::PlatformNative(_) => "platform-native content",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentConversionError {
-    pub kind: String,
-}
-
-impl fmt::Display for ContentConversionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "message content {:?} cannot be represented by the legacy MessageSegment API",
-            self.kind
-        )
-    }
-}
-
-impl Error for ContentConversionError {}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageEnvelope {

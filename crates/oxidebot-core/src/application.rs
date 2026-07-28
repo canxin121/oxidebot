@@ -17,6 +17,43 @@ pub struct Localized<T> {
     pub translations: BTreeMap<String, T>,
 }
 
+impl<T> Localized<T> {
+    #[must_use]
+    pub fn new(default: T) -> Self {
+        Self {
+            default,
+            translations: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn translation(mut self, locale: impl Into<String>, value: T) -> Self {
+        self.translations.insert(locale.into(), value);
+        self
+    }
+
+    #[must_use]
+    pub fn resolve(&self, locale: Option<&str>) -> &T {
+        let Some(locale) = locale else {
+            return &self.default;
+        };
+        self.translations
+            .get(locale)
+            .or_else(|| {
+                locale
+                    .split_once('-')
+                    .and_then(|(language, _)| self.translations.get(language))
+            })
+            .unwrap_or(&self.default)
+    }
+}
+
+impl<T> From<T> for Localized<T> {
+    fn from(default: T) -> Self {
+        Self::new(default)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandKind {
     #[default]
@@ -61,6 +98,10 @@ pub enum CommandOptionType {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommandOption {
+    /// Stable OxideBot node or field identifier. Adapters should preserve it
+    /// when the platform can echo opaque metadata in autocomplete events.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: Localized<String>,
     pub description: Localized<String>,
     pub kind: CommandOptionType,
@@ -107,7 +148,20 @@ pub struct CommandInvocation {
 pub struct SuggestionRequest {
     pub id: String,
     pub query: String,
+    /// Stable OxideBot command ID when the platform exposes the originating
+    /// structured command. Older adapters may leave this empty.
+    #[serde(default)]
+    pub command_id: Option<String>,
+    /// Human-readable command name used as a fallback when no stable ID is
+    /// available.
+    #[serde(default)]
+    pub command_name: Option<String>,
+    /// Selected subcommand path, excluding the root command.
+    #[serde(default)]
+    pub command_path: Vec<String>,
     pub field_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
     pub user: User,
     pub conversation: Option<ConversationRef>,
     pub limit: Option<u32>,

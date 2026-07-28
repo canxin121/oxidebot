@@ -1,9 +1,9 @@
 use crate::{
-    handler::EventContext, router::reply_target, Bot, CommandArgs, CommandParseError,
-    CommandResult, Context, Dialogue, HandlerError, Outcome, Reply, ShutdownSignal,
+    handler::EventContext, router::reply_target, Bot, CommandParseError, CommandResult, Context,
+    Dialogue, FromCommandMatch, HandlerError, Outcome, Reply, ShutdownSignal,
 };
 use oxidebot_core::{
-    api::payload::SendMessageTarget,
+    conversation::MessageTarget,
     event::{EventTag, NoticeEvent, RequestEvent},
     source::{group::Group, message::MessageSegment, user::User},
     BotIdentity, Event, EventId,
@@ -127,10 +127,10 @@ impl Deref for MessageId {
 }
 
 #[derive(Clone, Debug)]
-pub struct Target(pub SendMessageTarget);
+pub struct Target(pub MessageTarget);
 
 impl Deref for Target {
-    type Target = SendMessageTarget;
+    type Target = MessageTarget;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -320,17 +320,14 @@ where
 impl<S, T> Extract<S> for Args<T>
 where
     S: Send + Sync + 'static,
-    T: CommandArgs,
+    T: FromCommandMatch,
 {
     fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
         let result = context
             .command()
             .cloned()
             .ok_or_else(|| ExtractError::new("this handler requires a command"))?;
-        let schema = T::schema();
-        result
-            .parse_with(&schema)
-            .and_then(|arguments| T::from_arguments(&arguments))
+        T::from_match(&result)
             .map(Self)
             .map_err(|error| command_extract_error(&result, error))
     }

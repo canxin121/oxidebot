@@ -1,12 +1,13 @@
 use crate::HandlerError;
 use oxidebot_core::{
-    api::{payload::SendMessageTarget, response::SendMessageResponse},
-    source::message::Message,
-    BotObject,
+    collaboration::{Reaction, ReactionOptions},
+    conversation::{MessageRef, MessageTarget},
+    source::message::{DeliveryDegradation, DeliveryReport, FallbackPolicy, Message},
+    BotCapabilities, BotObject,
 };
 use std::{ops::Deref, sync::Arc, time::Duration};
 
-/// Complete 0.1.8 API object extracted for the current bot.
+/// Complete unified API object extracted for the current bot.
 #[derive(Clone)]
 pub struct Bot(pub BotObject);
 
@@ -35,22 +36,31 @@ impl std::fmt::Debug for Bot {
 #[derive(Clone)]
 pub struct Reply {
     api: BotObject,
-    target: SendMessageTarget,
+    target: MessageTarget,
     reply_to: Option<String>,
+    fallback: FallbackPolicy,
 }
 
 impl Reply {
-    pub(crate) fn new(api: BotObject, target: SendMessageTarget, reply_to: Option<String>) -> Self {
+    pub(crate) fn new(api: BotObject, target: MessageTarget, reply_to: Option<String>) -> Self {
         Self {
             api,
             target,
             reply_to,
+            fallback: FallbackPolicy::Auto,
         }
     }
 
     #[must_use]
-    pub fn target(&self) -> &SendMessageTarget {
+    pub fn target(&self) -> &MessageTarget {
         &self.target
+    }
+
+    /// Overrides capability fallback behavior for subsequent sends.
+    #[must_use]
+    pub const fn fallback(mut self, fallback: FallbackPolicy) -> Self {
+        self.fallback = fallback;
+        self
     }
 
     pub async fn send(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
@@ -71,14 +81,15 @@ impl Reply {
                 message = message.reply_to(message_id.clone());
             }
         }
-        let responses = self
+        let report = self
             .api
-            .send_message(message.into_segments(), self.target.clone())
+            .send_outgoing_message_with(self.target.clone(), message, self.fallback)
             .await
             .map_err(|error| HandlerError::Api(error.to_string()))?;
         Ok(Receipt {
             api: Arc::clone(&self.api),
-            responses: responses.into(),
+            target: self.target.clone(),
+            report: Arc::new(report),
         })
     }
 }
@@ -89,60 +100,162 @@ impl std::fmt::Debug for Reply {
             .debug_struct("Reply")
             .field("target", &self.target)
             .field("reply_to", &self.reply_to)
+            .field("fallback", &self.fallback)
             .finish_non_exhaustive()
     }
 }
 
 /// Handles returned by one logical send. Platforms may split one message into
-/// several physical messages, so operations are applied to every response.
+/// several physical messages, so bulk methods operate on every reference and
+/// indexed methods operate on one physical message.
 #[derive(Clone)]
 pub struct Receipt {
     api: BotObject,
-    responses: Arc<[SendMessageResponse]>,
+    target: MessageTarget,
+    report: Arc<DeliveryReport>,
 }
 
 impl Receipt {
     #[must_use]
-    pub fn responses(&self) -> &[SendMessageResponse] {
-        &self.responses
+    pub fn report(&self) -> &DeliveryReport {
+        &self.report
+    }
+
+    #[must_use]
+    pub fn references(&self) -> &[MessageRef] {
+        &self.report.messages
     }
 
     pub fn ids(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.responses
+        self.report
+            .messages
             .iter()
-            .map(|response| response.sent_message_id.as_str())
+            .map(|message| message.id.as_str())
+    }
+
+    #[must_use]
+    pub fn degraded(&self) -> bool {
+        self.report.degraded()
+    }
+
+    #[must_use]
+    pub fn degradations(&self) -> &[DeliveryDegradation] {
+        &self.report.degradations
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> BotCapabilities {
+        self.api.bot_capabilities()
+    }
+
+    #[must_use]
+    pub fn is_editable(&self) -> bool {
+        self.capabilities().delivery.edit_messages.is_supported()
+    }
+
+    #[must_use]
+    pub fn is_deletable(&self) -> bool {
+        self.capabilities().delivery.delete_messages.is_supported()
+    }
+
+    #[must_use]
+    pub fn is_reactionable(&self) -> bool {
+        self.capabilities().collaboration.reactions.is_supported()
+    }
+
+    pub async fn send(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
+        let report = self
+            .api
+            .send_outgoing_message_with(self.target.clone(), message.into(), FallbackPolicy::Auto)
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))?;
+        Ok(Self {
+            api: Arc::clone(&self.api),
+            target: self.target.clone(),
+            report: Arc::new(report),
+        })
+    }
+
+    pub async fn reply(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
+        let Some(reference) = self.references().last() else {
+            return Err(HandlerError::Api(
+                "receipt contains no message reference".into(),
+            ));
+        };
+        self.send(message.into().reply_to(reference.id.clone()))
+            .await
     }
 
     pub async fn edit(&self, replacement: impl Into<Message>) -> Result<(), HandlerError> {
-        let segments = replacement.into().into_segments();
-        for response in self.responses.iter() {
+        let replacement = replacement.into();
+        for reference in self.references() {
             self.api
-                .edit_message(response.sent_message_id.clone(), segments.clone())
+                .edit_outgoing_message(reference.clone(), replacement.clone())
                 .await
                 .map_err(|error| HandlerError::Api(error.to_string()))?;
         }
         Ok(())
+    }
+
+    pub async fn edit_at(
+        &self,
+        index: usize,
+        replacement: impl Into<Message>,
+    ) -> Result<(), HandlerError> {
+        let reference = self.reference_at(index)?;
+        self.api
+            .edit_outgoing_message(reference.clone(), replacement.into())
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))
     }
 
     pub async fn delete(&self) -> Result<(), HandlerError> {
-        for response in self.responses.iter() {
+        for reference in self.references() {
             self.api
-                .delete_message(response.sent_message_id.clone())
+                .delete_message_ref(reference.clone())
                 .await
                 .map_err(|error| HandlerError::Api(error.to_string()))?;
         }
         Ok(())
     }
 
+    pub async fn delete_at(&self, index: usize) -> Result<(), HandlerError> {
+        let reference = self.reference_at(index)?;
+        self.api
+            .delete_message_ref(reference.clone())
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))
+    }
+
     pub async fn react(&self, reaction: impl Into<String>) -> Result<(), HandlerError> {
-        let reaction = reaction.into();
-        for response in self.responses.iter() {
+        let reaction = Reaction::UnicodeEmoji(reaction.into());
+        for reference in self.references() {
             self.api
-                .set_message_reaction(response.sent_message_id.clone(), reaction.clone())
+                .add_message_reaction(
+                    reference.clone(),
+                    reaction.clone(),
+                    ReactionOptions::default(),
+                )
                 .await
                 .map_err(|error| HandlerError::Api(error.to_string()))?;
         }
         Ok(())
+    }
+
+    pub async fn react_at(
+        &self,
+        index: usize,
+        reaction: impl Into<String>,
+    ) -> Result<(), HandlerError> {
+        let reference = self.reference_at(index)?;
+        self.api
+            .add_message_reaction(
+                reference.clone(),
+                Reaction::UnicodeEmoji(reaction.into()),
+                ReactionOptions::default(),
+            )
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))
     }
 
     /// Waits and then deletes every physical message represented by this receipt.
@@ -150,13 +263,23 @@ impl Receipt {
         tokio::time::sleep(delay).await;
         self.delete().await
     }
+
+    fn reference_at(&self, index: usize) -> Result<&MessageRef, HandlerError> {
+        self.references().get(index).ok_or_else(|| {
+            HandlerError::Api(format!(
+                "receipt contains {} physical messages; index {index} is out of range",
+                self.references().len()
+            ))
+        })
+    }
 }
 
 impl std::fmt::Debug for Receipt {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Receipt")
-            .field("responses", &self.responses)
+            .field("target", &self.target)
+            .field("report", &self.report)
             .finish_non_exhaustive()
     }
 }

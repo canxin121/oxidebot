@@ -9,7 +9,7 @@ pub use oxidebot_runtime as runtime;
 pub use oxidebot_runtime::*;
 
 /// Derives a strongly typed command schema and parser.
-pub use oxidebot_macros::CommandArgs;
+pub use oxidebot_macros::{BotCommand, CommandArgs};
 
 /// Typed values that ordinary handler functions may request.
 pub mod extract {
@@ -24,9 +24,12 @@ pub mod extract {
 /// Typed command schemas, values, parsing, and completion.
 pub mod commands {
     pub use oxidebot_runtime::{
-        command, ArgumentSpec, Command, CommandArgs, CommandCatalog, CommandParseError,
-        CommandResult, CommandSchema, CommandValue, CompletionConfig, FromCommandValue, Mention,
-        ParsedArguments,
+        command, ArgumentAction, ArgumentChoice, ArgumentSpec, Command, CommandArgs, CommandBranch,
+        CommandCatalog, CommandFieldId, CommandId, CommandMatch, CommandNodeId, CommandOutput,
+        CommandParseError, CommandRenderer, CommandResult, CommandSchema, CommandSource,
+        CommandTree, CommandValue, CommandValueKind, CompletionConfig, CompletionItem,
+        CompletionKind, DefaultCommandRenderer, FromCommandMatch, FromCommandValue, LocalizedText,
+        Mention, ParsedArguments, SourceSpan,
     };
 }
 
@@ -44,22 +47,30 @@ pub mod prelude {
         event::{self, tags, Event},
         source::{
             group::Group,
-            message::{File, IntoMessageSegment, Message, MessageSegment},
+            message::{
+                DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError,
+                DeliveryReport, FallbackPolicy, File, IntoMessageSegment, Message, MessageOptions,
+                MessageSegment, SegmentKind,
+            },
             user::User,
         },
-        BotId, BotIdentity, CallApiTrait, EventId, PlatformId,
+        ActionRow, BotId, BotIdentity, Button, ButtonAction, ButtonStyle, CallApiTrait, Checklist,
+        ContactCard, CustomEmoji, EventId, InlineKeyboard, LocationContent, Media,
+        MediaGalleryItem, MediaType, MessageComponents, PlatformId, Poll, PollOption, PollType,
+        RichLayout, RichText, Sticker, TextSpan, TextStyle,
     };
-    pub use oxidebot_macros::CommandArgs;
+    pub use oxidebot_macros::{BotCommand, CommandArgs};
     pub use oxidebot_runtime::{
-        command, Args, Bot, ChatGroup, Command, CommandArgs, CommandResult, CompletionConfig,
-        Context, Dialogue, EventContext, Extract, ExtractError, GuardDecision, GuardResult,
-        HandlerError, HandlerResult, IntoOutcome, MaybeGroup, Mention, MessageContext, MessageId,
-        Module, Outcome, OxideBot, Propagation, Receipt, Reply, Segments, Sender, SessionPolicy,
+        command, Args, Bot, ChatGroup, Command, CommandArgs, CommandBranch, CommandMatch,
+        CommandResult, CommandTree, CompletionConfig, CompletionItem, CompletionKind, Context,
+        Dialogue, EventContext, Extract, ExtractError, GuardDecision, GuardResult, HandlerError,
+        HandlerResult, IntoOutcome, MaybeGroup, Mention, MessageContext, MessageId, Module,
+        Outcome, OxideBot, Propagation, Receipt, Reply, Segments, Sender, SessionPolicy,
         ShutdownSignal, State, Target, Text,
     };
 }
 
-/// Builds the canonical 0.1.8 message type from text and message segments.
+/// Builds the unified cross-platform message IR from text and message segments.
 #[macro_export]
 macro_rules! message {
     ($($part:expr),* $(,)?) => {{

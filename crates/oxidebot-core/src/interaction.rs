@@ -19,86 +19,12 @@ use serde_json::Value;
 
 use crate::{
     application::CommandInvocation,
-    content::{
-        DeliveryTime, FormValue, LinkPreviewOptions, MentionPolicy, MessageVisibility,
-        NotificationPolicy, OutgoingMessage, ReplyOptions,
-    },
+    content::{FormValue, MessageVisibility, OutgoingMessage},
     conversation::ConversationPermission,
     source::{group::Group, message::Message, user::User},
 };
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct MessageOptions {
-    pub components: Option<MessageComponents>,
-    pub reply: Option<ReplyOptions>,
-    pub notification: NotificationPolicy,
-    pub visibility: MessageVisibility,
-    pub link_preview: Option<LinkPreviewOptions>,
-    pub mentions: Option<MentionPolicy>,
-    pub protect_content: bool,
-    pub delivery_time: DeliveryTime,
-    pub idempotency_key: Option<String>,
-    pub client_message_id: Option<String>,
-    pub metadata: BTreeMap<String, Value>,
-    pub platform_data: Option<PlatformNativeData>,
-}
-
-impl MessageOptions {
-    pub fn components(mut self, components: MessageComponents) -> Self {
-        self.components = Some(components);
-        self
-    }
-
-    pub fn reply(mut self, reply: ReplyOptions) -> Self {
-        self.reply = Some(reply);
-        self
-    }
-
-    pub fn notification(mut self, notification: NotificationPolicy) -> Self {
-        self.notification = notification;
-        self
-    }
-
-    pub fn visibility(mut self, visibility: MessageVisibility) -> Self {
-        self.visibility = visibility;
-        self
-    }
-
-    pub fn link_preview(mut self, link_preview: LinkPreviewOptions) -> Self {
-        self.link_preview = Some(link_preview);
-        self
-    }
-
-    pub fn mentions(mut self, mentions: MentionPolicy) -> Self {
-        self.mentions = Some(mentions);
-        self
-    }
-
-    pub fn protect_content(mut self, protect_content: bool) -> Self {
-        self.protect_content = protect_content;
-        self
-    }
-
-    pub fn delivery_time(mut self, delivery_time: DeliveryTime) -> Self {
-        self.delivery_time = delivery_time;
-        self
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.components.is_none()
-            && self.reply.is_none()
-            && self.notification == NotificationPolicy::Default
-            && self.visibility == MessageVisibility::Public
-            && self.link_preview.is_none()
-            && self.mentions.is_none()
-            && !self.protect_content
-            && self.delivery_time == DeliveryTime::Immediate
-            && self.idempotency_key.is_none()
-            && self.client_message_id.is_none()
-            && self.metadata.is_empty()
-            && self.platform_data.is_none()
-    }
-}
+pub use crate::source::message::MessageOptions;
 
 /// Interactive UI attached to a message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
