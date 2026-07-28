@@ -1,19 +1,19 @@
-use oxidebot_core::EventEnvelope;
+use oxidebot_core::Event;
 
-/// Fast synchronous admission check applied before route futures are created.
+/// Fast synchronous admission check over the single public event model.
 pub trait Filter<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
-    fn accepts(&self, event: &EventEnvelope, state: &S) -> bool;
+    fn accepts(&self, event: &Event, state: &S) -> bool;
 }
 
 impl<S, F> Filter<S> for F
 where
     S: Send + Sync + 'static,
-    F: Fn(&EventEnvelope, &S) -> bool + Send + Sync + 'static,
+    F: Fn(&Event, &S) -> bool + Send + Sync + 'static,
 {
-    fn accepts(&self, event: &EventEnvelope, state: &S) -> bool {
+    fn accepts(&self, event: &Event, state: &S) -> bool {
         self(event, state)
     }
 }

@@ -1,15 +1,19 @@
 //! Deterministic platform fixtures for runtime integration tests.
 
 use async_trait::async_trait;
+use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex};
 use oxidebot_core::{
-    BotId, BotSlot, CompactId, ConversationKey, EventBatch, EventBody, EventDraft, EventId,
-    EventIndex, EventKind, MessageContent, MessageCreated, MessageReceipt, MessageRef,
-    MessageTarget, OutgoingMessage, PlatformId, UserKey,
+    api::{payload::SendMessageTarget, response::SendMessageResponse},
+    event::{Event, EventType, MessageEvent},
+    source::{
+        message::{Message, MessageSegment},
+        user::User,
+    },
+    BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, DecodeError,
-    FrameIndex, IdempotencyGuarantee, InboundFrame, MessageService, PlatformError,
-    PlatformErrorKind,
+    FrameIndex, IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
 };
 use std::{
     sync::{
@@ -72,8 +76,8 @@ impl TestFrame {
         self.decodes.clone()
     }
 
-    fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> EventIndex {
-        let mut index = EventIndex::new(bot, platform.clone(), EventKind::MessageCreated);
+    fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
+        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
         let mut conversation = ConversationKey::new(bot, self.conversation.clone());
         if let Some(subspace) = &self.subspace {
             conversation = conversation.in_subspace(subspace.clone());
@@ -89,17 +93,36 @@ impl TestFrame {
             .map(Arc::from);
         index
     }
+
+    /// Conservative charge for the decoded public event and its routing keys.
+    fn retained_event_bytes(&self) -> usize {
+        self.id
+            .estimated_bytes()
+            .saturating_add(self.conversation.estimated_bytes())
+            .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
+            .saturating_add(self.actor.estimated_bytes())
+            .saturating_add(self.message_id.estimated_bytes())
+            .saturating_add(self.text.len())
+            // Covers owned strings, the message-segment vector, enum storage,
+            // and the adapter's receive-time metadata.
+            .saturating_add(2_048)
+    }
+
+    /// Includes the dispatch envelope and one-element batch-vector overhead.
+    fn frame_estimate_bytes(&self) -> usize {
+        self.retained_event_bytes().saturating_add(2_048)
+    }
 }
 
 impl InboundFrame for TestFrame {
     fn index(&self, bot: BotSlot, platform: &PlatformId) -> Result<FrameIndex, DecodeError> {
         Ok(FrameIndex::one(
             self.event_index(bot, platform),
-            self.text.len().saturating_add(2_048),
+            self.frame_estimate_bytes(),
         ))
     }
 
-    fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<EventBatch, DecodeError> {
+    fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<DispatchBatch, DecodeError> {
         let index = FrameIndex::one(self.event_index(bot, platform), 0);
         self.decode_indexed(bot, platform, &index)
     }
@@ -109,31 +132,37 @@ impl InboundFrame for TestFrame {
         _bot: BotSlot,
         _platform: &PlatformId,
         indexed: &FrameIndex,
-    ) -> Result<EventBatch, DecodeError> {
+    ) -> Result<DispatchBatch, DecodeError> {
         self.decodes.0.fetch_add(1, Ordering::Relaxed);
         let index = indexed
             .events
             .first()
             .cloned()
             .ok_or_else(|| DecodeError::new("test frame index is empty"))?;
-        let conversation = index
+        index
             .conversation
-            .clone()
+            .as_ref()
             .ok_or_else(|| DecodeError::new("test message has no conversation"))?;
-        let body = MessageCreated {
-            reference: MessageRef::new(conversation, self.message_id),
-            sender: index.actor.clone(),
-            content: vec![MessageContent::Text(self.text.clone())],
-            text: Some(self.text),
-            mentioned_bot: false,
-        };
-        Ok(EventBatch::new([EventDraft {
-            id: self.id,
-            index,
-            occurred_at: Some(SystemTime::now()),
-            delivery_attempt: 0,
-            body: EventBody::MessageCreated(Box::new(body)),
-        }]))
+        let retained_event_bytes = self.retained_event_bytes();
+        let message_id = self.message_id.to_string();
+        let actor_id = self.actor.to_string();
+        let text = self.text.to_string();
+        let event = Event::MessageEvent(MessageEvent {
+            id: self.id.as_str().to_owned(),
+            time: None,
+            sender: User {
+                id: actor_id,
+                ..User::default()
+            },
+            group: None,
+            message: Message {
+                id: message_id,
+                segments: vec![MessageSegment::text(text)],
+            },
+        });
+        let mut draft = DispatchDraft::new(self.id, index, event, retained_event_bytes);
+        draft.occurred_at = Some(SystemTime::now());
+        Ok(DispatchBatch::new([draft]))
     }
 }
 
@@ -143,11 +172,11 @@ pub enum ScriptStep {
     Pause(Duration),
 }
 
-/// Successfully sent message recorded by the scripted service.
+/// Successfully sent message recorded by the scripted API.
 #[derive(Clone, Debug)]
 pub struct SentMessage {
-    pub target: MessageTarget,
-    pub message: OutgoingMessage,
+    pub target: SendMessageTarget,
+    pub message: Vec<MessageSegment>,
 }
 
 #[derive(Default)]
@@ -157,11 +186,11 @@ struct ServiceState {
     temporary_failures: AtomicUsize,
 }
 
-/// Clone-cheap outbound service with deterministic temporary failures.
+/// Clone-cheap bot API fixture with deterministic temporary failures.
 #[derive(Clone, Default)]
-pub struct ScriptedMessageService(Arc<ServiceState>);
+pub struct ScriptedApi(Arc<ServiceState>);
 
-impl ScriptedMessageService {
+impl ScriptedApi {
     #[must_use]
     pub fn sent(&self) -> Vec<SentMessage> {
         self.0
@@ -181,13 +210,12 @@ impl ScriptedMessageService {
     }
 }
 
-#[async_trait]
-impl MessageService for ScriptedMessageService {
-    async fn send(
+impl ScriptedApi {
+    fn record(
         &self,
-        target: &MessageTarget,
-        message: &OutgoingMessage,
-    ) -> Result<MessageReceipt, PlatformError> {
+        target: SendMessageTarget,
+        message: Vec<MessageSegment>,
+    ) -> Result<usize, PlatformError> {
         let attempt = self.0.attempts.fetch_add(1, Ordering::AcqRel) + 1;
         if self
             .0
@@ -206,14 +234,22 @@ impl MessageService for ScriptedMessageService {
             .sent
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .push(SentMessage {
-                target: target.clone(),
-                message: message.clone(),
-            });
-        Ok(MessageReceipt::new(MessageRef::new(
-            target.conversation.clone(),
-            attempt as u64,
-        )))
+            .push(SentMessage { target, message });
+        Ok(attempt)
+    }
+}
+
+#[async_trait]
+impl CallApiTrait for ScriptedApi {
+    async fn send_message(
+        &self,
+        message: Vec<MessageSegment>,
+        target: SendMessageTarget,
+    ) -> anyhow::Result<Vec<SendMessageResponse>> {
+        let attempt = self.record(target, message).map_err(anyhow::Error::new)?;
+        Ok(vec![SendMessageResponse {
+            sent_message_id: attempt.to_string(),
+        }])
     }
 }
 
@@ -222,7 +258,7 @@ pub struct ScriptedAdapter {
     platform: PlatformId,
     bot: BotId,
     steps: Vec<ScriptStep>,
-    service: ScriptedMessageService,
+    service: ScriptedApi,
 }
 
 impl ScriptedAdapter {
@@ -231,8 +267,8 @@ impl ScriptedAdapter {
         platform: PlatformId,
         bot: BotId,
         steps: impl IntoIterator<Item = ScriptStep>,
-    ) -> (Self, ScriptedMessageService) {
-        let service = ScriptedMessageService::default();
+    ) -> (Self, ScriptedApi) {
+        let service = ScriptedApi::default();
         (
             Self {
                 platform,
@@ -252,7 +288,7 @@ impl Adapter for ScriptedAdapter {
     }
 
     fn services(&self) -> BotServices {
-        BotServices::messages(Arc::new(self.service.clone()))
+        BotServices::new(Arc::new(self.service.clone()))
             .send_idempotency(IdempotencyGuarantee::AdapterEmulated)
             .idempotent_delete(true)
     }

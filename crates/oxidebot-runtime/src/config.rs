@@ -1,5 +1,5 @@
 use crate::{dedupe::MIN_DEDUPE_BYTES_FOR_MAX_ID, BuildError, OverloadPolicy, QueueBudget};
-use oxidebot_core::MessageExecutionPartition;
+use oxidebot_core::event::kernel::MessageExecutionPartition;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -28,9 +28,9 @@ pub struct RuntimeConfig {
     pub ingress_per_bot: QueueBudget,
     /// Maximum retained bytes for one decoded platform frame.
     pub max_frame_bytes: usize,
-    /// Maximum canonical events one platform frame may expand into.
+    /// Maximum events one platform frame may expand into.
     pub max_frame_events: usize,
-    /// Maximum incremental retained bytes for one canonical event.
+    /// Maximum incremental retained bytes for one event.
     pub max_event_bytes: usize,
     /// Global executor budget shared across all bots.
     pub executor: QueueBudget,

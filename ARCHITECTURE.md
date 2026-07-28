@@ -1,150 +1,121 @@
-# OxideBot Runtime Architecture
+# OxideBot architecture
 
-## Hot path
+## Design rule: one semantic model
 
-```text
-platform frame
-  -> lightweight EventIndex
-  -> compiled InterestPlan
-  -> item/byte ingress admission
-  -> full canonical decode once
-  -> structural validation
-  -> uninterested sibling pruning
-  -> dedupe precheck + in-flight duplicate guard
-  -> per-bot fair admission
-  -> exact session fast path
-  -> sharded virtual-actor executor
-  -> dedupe commit after consume/admit/intentional shed
-  -> compiled route candidates
-  -> handler Outcome
-  -> bounded per-bot command scheduler
-  -> platform service
-```
+OxideBot exposes one event hierarchy: the restored 0.1.8 `Event`. It exposes one
+adapter and bot API: `CallApiTrait`. The Router, command system, extractors,
+middleware, sessions, and reply helpers are views and orchestration around those
+same types; they do not introduce a second event body or a reduced API.
 
-## Runtime invariants
+The runtime owns compact dispatch metadata, but that metadata only contains
+routing keys, accounting information, identity, and a reference to the same
+canonical event.
 
-1. A canonical event has one authoritative body and one routing index.
-2. Index and body addresses must agree before the event becomes trusted.
-3. A bot handle cannot send, edit, or delete data owned by another bot slot.
-4. Native request and response data must belong to the bot platform.
-5. Queue admission is bounded by retained bytes and item count.
-6. Global and per-bot executor and command budgets are acquired in a fixed
-   order.
-7. No event or handler creates a detached Tokio task.
-8. One execution key has at most one running handler pipeline.
-9. Exact command, interaction, and native routes do not scan unrelated routes.
-10. A normal message performs no session-worker round trip when no exact waiter
-    is active.
-11. Handler and service panic isolation requires an unwind panic strategy.
-12. Shutdown uses one process-wide deadline rather than a fresh grace period for
-    each subsystem.
-13. `Block` never converts an item that cannot fit an executor envelope into a
-    successful submission.
-14. Dedupe state is committed only after session consumption, executor admission,
-    or an explicit drop-and-ack overload policy.
-15. A per-bot semaphore release wakes executor shards that are waiting without
-    requiring unrelated input to arrive.
-16. Static route interest and candidate tables respect global, platform, and
-    exact-bot scopes.
-17. Every valid event ID can fit at least one dedupe entry under a validated
-    configuration, and each registered bot receives at least one dedupe slot.
-18. Command attempt deadlines are recomputed after queue, cooldown, and global
-    service-capacity waits.
-19. Handler deferred effects, route population, metadata keys, and geographic
-    coordinates are structurally bounded before entering downstream queues.
+## Authoring pipeline
 
-## Resource ownership
+A matched Router endpoint receives a clone-cheap `Request<S>` containing:
 
-- `AdapterContext` owns no background task. It submits admitted frames into the
-  runtime ingress channel.
-- `IngressBatch` retains both global and per-bot byte/item leases until every
-  derived event has left the session/executor paths.
-- Finalizing an event caches its incremental retained-size charge. Executor
-  admission therefore does not repeatedly traverse message content trees.
-- `ExecutorHandle` holds global and per-bot queue limiters. Each shard owns only
-  virtual queues, a bounded set of running futures, and a bounded set of real
-  semaphore waiters. A waiter does not consume a local running slot.
-- `SessionRegistry` owns exact scope interest and one timer queue per shard.
-- A handler outcome has a configured deferred-reply ceiling; an oversized
-  effect batch is rejected atomically rather than partially enqueued.
-- `BotHandle` is one clone-cheap `Arc` around immutable identity and a bounded
-  command client. Each bot has one scheduler worker, while all workers share
-  global queue and service-call limits with reserved high-priority capacity.
-- `Application` supervises every long-lived task and controls structured drain.
+- one `Arc<DispatchEnvelope>`;
+- one `Arc<S>` application state;
+- the current `BotHandle`;
+- the shared bounded `SessionRegistry`;
+- the shared shutdown signal;
+- request-local typed `Extensions`;
+- an optional lossless `CommandResult`.
 
-## Event partitioning
+Middleware consumes and returns that request through a `Next<S>` chain. The
+endpoint then evaluates its `FromRequest<S>` extractors in function-argument
+order and invokes an ordinary async function. Its return value is converted by
+`IntoResponse`.
 
-`MessageExecutionPartition::Conversation` is the conservative default. The
-execution key includes the optional thread/topic component, so unrelated
-threads do not serialize each other.
+No extractor runs before the route has matched. No event payload is cloned to
+create a request or context.
 
-`ConversationActor` adds the actor to the key for message-created events. This
-is useful for group-dialogue workloads, but handlers that mutate shared
-conversation state must provide their own synchronization or keep the default
-partition.
+## Router compilation
 
-## Adapter validation boundary
+`Router<S>` is a build-time composition structure. `merge`, `mount`, and
+`plugin` flatten modules into one ordered endpoint list. Middleware layers are
+baked onto endpoint definitions, and each endpoint becomes the existing
+`ErasedHandler<S>` representation before application startup.
 
-Adapters operate outside the trusted kernel boundary. Before ingress, OxideBot
-checks:
+Routes use the existing indexes:
 
-- bot and platform ownership;
-- semantic ID bounds;
-- route-key bounds;
-- index/body kind agreement;
-- message, actor, and conversation agreement;
-- normalized command agreement;
-- interaction value limits;
-- rich-text UTF-8 ranges;
-- media and native-data ownership;
-- decoded retained bytes not exceeding the pre-decode estimate.
+- exact `EventType` routes enter the 53-slot dense table;
+- normal `/name` commands enter the exact command-key table;
+- interaction IDs and platform-native names enter exact hash tables;
+- commands using custom prefixes, no prefix, or case-insensitive matching enter
+  the broad message candidate slot and perform their full match only after the
+  message event is admitted.
 
-The same ownership checks are repeated for outgoing commands before they enter
-the command scheduler, and adapter-returned receipts/native responses are
-validated before reaching application code.
+Aliases sharing one root are de-duplicated before route registration. At
+dispatch time, global, platform, and bot candidate slices are merged by route
+ID, preserving registration order without allocating a temporary candidate
+vector.
 
-## Overload behavior
+## Command parsing
 
-`Block` is the reliable mode. Admission waits without allocating unbounded
-queues, allowing TCP, WebSocket, long polling, or webhook infrastructure to
-propagate pressure upstream. An item that exceeds a configured per-item limit is
-rejected; it is never reported as accepted and then silently discarded.
+A `Command` performs a lossless first-stage match over canonical message
+segments. Text segments use a shell-like tokenizer; mentions, files, media, and
+other segments remain typed `CommandValue` variants.
 
-`DropNewest` intentionally sheds the newest executor or command item and updates
-metrics. It should be used only when permanent loss is acceptable.
+`CommandSchema` is shared by parsing, automatic help, validation, and
+interactive completion. `#[derive(CommandArgs)]` generates only schema and
+conversion code; it does not create a parallel runtime parser.
 
-## Low-power behavior
+Interactive completion is entered only for `MissingArgument`. The completion
+path registers an exact bounded session before sending a prompt, preventing a
+fast reply from racing registration. Replies are re-tokenized losslessly and
+inserted into the missing positional or named option. Unknown options, missing
+option values, and invalid conversions are returned immediately.
 
-- No global event broadcast.
-- No polling loop in the kernel.
-- No task per event, handler, or session.
-- Exact session interest avoids inactive session wakeups.
-- Current-thread Tokio runtimes are supported by default features.
-- Timers are centralized through Tokio's timer facilities and shard-local
-  `DelayQueue`s.
+## Response effects
 
+`Response` contains a stop decision and zero or more deferred canonical message
+segment lists. The compiled router enforces the configured reply-count limit
+and sends those effects through the same `CallApiTrait` object exposed to
+handlers.
 
-## Fairness and retry ownership
+`Reply` bypasses deferred effects for workflows requiring immediate API results.
+It returns a `Receipt` over every `SendMessageResponse`, so message splitting by
+a platform remains visible and safe.
 
-The dispatcher keeps independent pending queues and at most one admission future
-per bot. Ready bots are scheduled round-robin, so a saturated bot cannot block
-another bot before the executor.
+## Two-stage admission
 
-Executor shards wait on shared per-bot concurrency semaphores through actual
-permit futures. Permit waiting is separate from local running capacity, which
-prevents both cross-shard lost wake-ups and a saturated bot occupying every local
-execution slot.
+A platform frame first produces a compact `DispatchIndex` containing:
 
-Command queue admission and active service calls reserve capacity for interaction
-responses. A platform service permit covers only one network attempt; it is
-released before retry backoff or a bot-wide rate-limit cooldown. Command total
-deadlines start before queue admission and therefore include queueing, service
-capacity waits, attempts, and backoff.
+- bot and platform identity;
+- the stable `EventType`;
+- optional conversation and actor keys;
+- optional normalized command, interaction, or native keys.
 
-## Retained-memory charging
+Static route interest and dynamic session interest are checked against this
+index. An uninterested frame can be dropped before the complete event is
+decoded. When interested, the adapter creates a `DispatchDraft` containing the
+original 0.1.8 `Event`; the runtime verifies that the event type agrees with the
+index.
 
-`RetainedSize` is a conservative queue charge. `RetainedBytes` prevents a small
-`Bytes` slice from hiding a much larger backing allocation: arbitrary views are
-compacted by default, while zero-copy adapters must declare the backing charge.
-Shared frame raw data is charged once by the ingress lease, and executor leases
-charge only each event's incremental state.
+## Shared ownership and ordering
+
+A decoded event is retained once. Handlers, extractors, typed contexts, filters,
+and sessions borrow from or share that allocation. Large messages, files,
+layouts, polls, payments, and platform-native data are never duplicated per
+candidate route.
+
+Execution is partitioned by virtual actor. Conversation/thread keys are used
+first, then actor keys, then the event ID fallback. One key executes serially,
+while unrelated keys can run concurrently through fixed worker shards rather
+than unbounded task creation.
+
+## Bounded resources
+
+Ingress, executor, session, and command queues enforce item and retained-byte
+budgets. Global and per-bot permits are acquired together. Session namespaces,
+route keys, decoded envelopes, raw payloads, and handler reply counts are also
+bounded or validated before entering downstream work.
+
+## Compatibility boundary
+
+The pre-Router `on(matcher, handler)` and typed `Context` interfaces remain
+available. They compile into the same `PreparedHandler` and route tables as new
+Router endpoints. They are an explicit low-level escape hatch, not a second
+framework layered beside Router.

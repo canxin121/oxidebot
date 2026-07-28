@@ -19,4 +19,5 @@ multi-thread = ["oxidebot-runtime/multi-thread"]
 
 [dependencies]
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-macros = { path = "../oxidebot-macros", version = "1.0.0-alpha.1" }
 oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1", default-features = false }

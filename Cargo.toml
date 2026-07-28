@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/oxidebot-core",
+    "crates/oxidebot-macros",
     "crates/oxidebot-runtime",
     "crates/oxidebot",
     "crates/oxidebot-testkit",
@@ -18,10 +19,16 @@ repository = "https://github.com/canxin121/oxidebot"
 homepage = "https://github.com/canxin121/oxidebot"
 
 [workspace.dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
 async-trait = "0.1.91"
 bytes = "1.10.1"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 futures-util = "0.3.31"
+mime_guess = "2.0.5"
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+syn = { version = "2.0.117", features = ["full"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 thiserror = "2.0.17"

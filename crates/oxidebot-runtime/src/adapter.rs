@@ -5,9 +5,9 @@ use crate::{
     ShutdownSignal,
 };
 use async_trait::async_trait;
-use oxidebot_core::{
-    BotIdentity, BotSlot, EventBatch, EventIndex, EventKind, EventKindSet, PlatformId, RetainedSize,
-};
+use oxidebot_core::event::kernel::{DispatchBatch, DispatchIndex, DispatchKind};
+use oxidebot_core::event::EventTypeSet;
+use oxidebot_core::{BotIdentity, BotSlot, PlatformId, RetainedSize};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -18,14 +18,14 @@ use tokio_util::sync::CancellationToken;
 /// Routing metadata extracted before a platform frame is fully decoded.
 #[derive(Clone, Debug, Default)]
 pub struct FrameIndex {
-    pub events: Vec<EventIndex>,
+    pub events: Vec<DispatchIndex>,
     /// Conservative retained-byte upper bound for the fully decoded batch.
     pub estimated_bytes: usize,
 }
 
 impl FrameIndex {
     #[must_use]
-    pub fn one(event: EventIndex, estimated_bytes: usize) -> Self {
+    pub fn one(event: DispatchIndex, estimated_bytes: usize) -> Self {
         Self {
             events: vec![event],
             estimated_bytes,
@@ -47,7 +47,7 @@ pub trait InboundFrame: Send + 'static {
         self,
         bot: BotSlot,
         platform: &PlatformId,
-    ) -> std::result::Result<EventBatch, DecodeError>;
+    ) -> std::result::Result<DispatchBatch, DecodeError>;
 
     /// Decodes while receiving the already validated routing index.
     ///
@@ -60,7 +60,7 @@ pub trait InboundFrame: Send + 'static {
         bot: BotSlot,
         platform: &PlatformId,
         _index: &FrameIndex,
-    ) -> std::result::Result<EventBatch, DecodeError>
+    ) -> std::result::Result<DispatchBatch, DecodeError>
     where
         Self: Sized,
     {
@@ -70,43 +70,43 @@ pub trait InboundFrame: Send + 'static {
 
 #[derive(Clone, Debug, Default)]
 struct InterestSet {
-    generic_kinds: EventKindSet,
+    event_types: EventTypeSet,
     commands: HashSet<Arc<str>>,
     interactions: HashSet<Arc<str>>,
     native_types: HashSet<Arc<str>>,
 }
 
 impl InterestSet {
-    fn accepts(&self, index: &EventIndex) -> bool {
-        if self.generic_kinds.contains(index.kind) {
+    fn accepts(&self, index: &DispatchIndex) -> bool {
+        if self.event_types.contains(index.event_type) {
             return true;
         }
         match index.kind {
-            EventKind::MessageCreated => index
+            DispatchKind::Message => index
                 .command
                 .as_ref()
                 .is_some_and(|value| self.commands.contains(value)),
-            EventKind::Interaction => index
+            DispatchKind::Interaction => index
                 .interaction
                 .as_ref()
                 .is_some_and(|value| self.interactions.contains(value)),
-            EventKind::Native => index
+            DispatchKind::Native => index
                 .native_type
                 .as_ref()
                 .is_some_and(|value| self.native_types.contains(value)),
-            EventKind::MessageUpdated
-            | EventKind::MessagesDeleted
-            | EventKind::ReactionChanged
-            | EventKind::MemberChanged
-            | EventKind::ConversationChanged
-            | EventKind::FileChanged
-            | EventKind::PaymentChanged => false,
+            DispatchKind::MessageUpdate
+            | DispatchKind::MessageDelete
+            | DispatchKind::Reaction
+            | DispatchKind::Member
+            | DispatchKind::Conversation
+            | DispatchKind::File
+            | DispatchKind::Payment => false,
         }
     }
 
     fn add_route(&mut self, route: &RouteSpec) {
         match route {
-            RouteSpec::Generic(kind) => self.generic_kinds.insert(*kind),
+            RouteSpec::Event(event_type) => self.event_types.insert(*event_type),
             RouteSpec::Command(value) => {
                 self.commands.insert(value.clone());
             }
@@ -142,7 +142,7 @@ pub struct InterestPlan {
 impl InterestPlan {
     /// Returns whether an index can reach a route or exact active session.
     #[must_use]
-    pub fn accepts(&self, index: &EventIndex) -> bool {
+    pub fn accepts(&self, index: &DispatchIndex) -> bool {
         if self.static_plan.global.accepts(index) {
             return true;
         }
@@ -206,7 +206,7 @@ pub enum Submission {
 }
 
 pub(crate) struct IngressBatch {
-    pub(crate) batch: EventBatch,
+    pub(crate) batch: DispatchBatch,
     pub(crate) lease: HierarchicalLease,
 }
 
@@ -342,7 +342,7 @@ impl AdapterContext {
     }
 
     /// Applies interest gating, bounded admission, one full decode, and strict
-    /// body/index validation before publishing the batch.
+    /// event/index validation before publishing the batch.
     pub async fn submit<F>(&self, frame: F) -> std::result::Result<Submission, AdapterError>
     where
         F: InboundFrame,
@@ -395,7 +395,7 @@ impl AdapterContext {
         if batch.events.len() > self.max_frame_events {
             self.metrics.validation_error();
             return Err(AdapterError::new(
-                "decoded frame exceeds the configured canonical-event count limit",
+                "decoded frame exceeds the configured event-count limit",
             ));
         }
         if let Err(error) = validate_batch(&batch, &index.events, self.slot, &self.platform) {
@@ -416,7 +416,7 @@ impl AdapterContext {
         let decoded_events = batch.events.len();
         self.metrics.decoded_events(decoded_events);
 
-        // A frame may contain several canonical events while only a subset is
+        // A frame may contain several events while only a subset is
         // subscribed. Validate the complete decode, then retain only events that
         // can still reach a route or an exact active session.
         batch
@@ -446,7 +446,7 @@ impl AdapterContext {
 }
 
 fn validate_indexes(
-    indexes: &[EventIndex],
+    indexes: &[DispatchIndex],
     slot: BotSlot,
     platform: &PlatformId,
 ) -> std::result::Result<(), AdapterError> {
@@ -457,8 +457,8 @@ fn validate_indexes(
 }
 
 fn validate_batch(
-    batch: &EventBatch,
-    indexed_events: &[EventIndex],
+    batch: &DispatchBatch,
+    indexed_events: &[DispatchIndex],
     slot: BotSlot,
     platform: &PlatformId,
 ) -> std::result::Result<(), AdapterError> {

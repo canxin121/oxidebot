@@ -15,6 +15,7 @@ signal = ["tokio/signal"]
 multi-thread = ["tokio/rt-multi-thread"]
 
 [dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }

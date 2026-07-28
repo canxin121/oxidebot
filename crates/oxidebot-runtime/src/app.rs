@@ -12,7 +12,8 @@ use crate::{
     ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
-use oxidebot_core::{BotIdentity, BotSlot, EventEnvelope, EventId, MAX_ROUTE_KEY_BYTES};
+use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
+use oxidebot_core::{BotIdentity, BotSlot, EventId};
 use std::{
     collections::{HashSet, VecDeque},
     future::{pending, Future},
@@ -43,6 +44,7 @@ where
     filters: Vec<Arc<dyn Filter<S>>>,
     services: Vec<Arc<dyn Service<S>>>,
     metrics: MetricsHandle,
+    route_errors: Vec<String>,
 }
 
 impl OxideBot<()> {
@@ -72,6 +74,7 @@ where
             filters: Vec::new(),
             services: Vec::new(),
             metrics: Arc::new(RuntimeMetrics::default()),
+            route_errors: Vec::new(),
         }
     }
 
@@ -116,6 +119,24 @@ where
         self
     }
 
+    /// Adds a compositional router containing commands, events, middleware,
+    /// and plugins. Router construction remains chainable; validation errors
+    /// are reported by `build`/`run`.
+    #[must_use]
+    pub fn router(mut self, router: crate::Router<S>) -> Self {
+        match router.into_handlers() {
+            Ok(handlers) => self.handlers.extend(handlers),
+            Err(BuildError::InvalidRoute(error)) => self.route_errors.push(error),
+            Err(error) => self.route_errors.push(error.to_string()),
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn routes(self, router: crate::Router<S>) -> Self {
+        self.router(router)
+    }
+
     #[must_use]
     pub fn filter<F>(mut self, filter: F) -> Self
     where
@@ -143,7 +164,11 @@ where
             filters,
             services,
             metrics,
+            route_errors,
         } = self;
+        if let Some(error) = route_errors.into_iter().next() {
+            return Err(BuildError::InvalidRoute(error));
+        }
         config.validate()?;
         if handlers.len() > MAX_RUNTIME_HANDLERS {
             return Err(BuildError::InvalidConfig(
@@ -264,10 +289,10 @@ where
 {
     for handler in handlers {
         let expected_kind = match &handler.spec {
-            RouteSpec::Generic(kind) => *kind,
-            RouteSpec::Command(_) => oxidebot_core::EventKind::MessageCreated,
-            RouteSpec::Interaction(_) => oxidebot_core::EventKind::Interaction,
-            RouteSpec::Native(_) => oxidebot_core::EventKind::Native,
+            RouteSpec::Event(event_type) => event_type.dispatch_kind(),
+            RouteSpec::Command(_) => DispatchKind::Message,
+            RouteSpec::Interaction(_) => DispatchKind::Interaction,
+            RouteSpec::Native(_) => DispatchKind::Native,
         };
         if handler.event_kind != expected_kind {
             return Err(BuildError::InvalidRoute(
@@ -298,7 +323,7 @@ where
             }
         }
         let key = match &handler.spec {
-            RouteSpec::Generic(_) => continue,
+            RouteSpec::Event(_) => continue,
             RouteSpec::Command(value)
             | RouteSpec::Interaction(value)
             | RouteSpec::Native(value) => value,
@@ -715,7 +740,7 @@ where
 
 struct PendingDispatch {
     slot: BotSlot,
-    event: Arc<EventEnvelope>,
+    event: Arc<DispatchEnvelope>,
     bot: crate::BotHandle,
     ingress_retention: Arc<HierarchicalLease>,
 }

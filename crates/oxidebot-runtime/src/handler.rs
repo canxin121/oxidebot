@@ -3,10 +3,12 @@ use crate::{
     ShutdownSignal,
 };
 use futures_util::future::BoxFuture;
+use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
 use oxidebot_core::{
-    BotIdentity, ConversationChanged, EventBody, EventEnvelope, EventKind, FileChanged,
-    Interaction, MemberChanged, MessageCreated, MessageTarget, MessageUpdated, MessagesDeleted,
-    NativeEvent, OutgoingMessage, PaymentChanged, PlatformId, ReactionChanged,
+    api::payload::SendMessageTarget,
+    event::{tags, EventTag, EventType},
+    source::message::MessageSegment,
+    BotIdentity, BotObject, PlatformId,
 };
 use std::{
     future::Future,
@@ -16,82 +18,22 @@ use std::{
     sync::Arc,
 };
 
-/// Result of a route, including deferred platform actions.
-#[derive(Clone, Debug, Default)]
-pub struct Outcome {
-    pub(crate) stop: bool,
-    pub(crate) replies: Vec<OutgoingMessage>,
-}
-
-impl Outcome {
-    #[must_use]
-    pub const fn continue_() -> Self {
-        Self {
-            stop: false,
-            replies: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub const fn stop() -> Self {
-        Self {
-            stop: true,
-            replies: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn reply(mut self, message: impl Into<OutgoingMessage>) -> Self {
-        self.replies.push(message.into());
-        self
-    }
-}
-
-/// Type-level view over one canonical event body.
+/// Type-level borrowed view over one event category.
+#[doc(hidden)]
 pub trait EventView: Send + Sync + 'static {
-    /// Canonical category represented by this borrowed view.
-    const KIND: EventKind;
-
-    /// Returns a borrowed view when the envelope contains this event type.
-    fn from_envelope(envelope: &EventEnvelope) -> Option<&Self>;
+    type Target: Send + Sync + 'static + ?Sized;
+    const KIND: DispatchKind;
+    fn from_envelope(envelope: &DispatchEnvelope) -> Option<&Self::Target>;
 }
 
-macro_rules! impl_event_view {
-    ($type:ty, $variant:ident) => {
-        impl EventView for $type {
-            const KIND: EventKind = EventKind::$variant;
-
-            fn from_envelope(envelope: &EventEnvelope) -> Option<&Self> {
-                match &envelope.body {
-                    EventBody::$variant(event) => Some(event.as_ref()),
-                    _ => None,
-                }
-            }
-        }
-    };
-}
-
-impl_event_view!(MessageCreated, MessageCreated);
-impl_event_view!(MessageUpdated, MessageUpdated);
-impl_event_view!(MessagesDeleted, MessagesDeleted);
-impl_event_view!(Interaction, Interaction);
-impl_event_view!(ReactionChanged, ReactionChanged);
-impl_event_view!(MemberChanged, MemberChanged);
-impl_event_view!(ConversationChanged, ConversationChanged);
-impl_event_view!(FileChanged, FileChanged);
-impl_event_view!(PaymentChanged, PaymentChanged);
-impl_event_view!(NativeEvent, Native);
-
-/// Typed context passed to one route handler. The typed event is a borrowed view
-/// of the single shared envelope; matching multiple handlers never clones the
-/// canonical event body or its vectors. Context is intentionally not `Clone`;
-/// retaining events outside a handler must be an explicit application decision.
+/// A typed handler context. The event value is borrowed from the single shared
+/// dispatch allocation and is never cloned per handler.
 pub struct Context<E, S = ()>
 where
     E: EventView,
     S: Send + Sync + 'static,
 {
-    envelope: Arc<EventEnvelope>,
+    envelope: Arc<DispatchEnvelope>,
     state: Arc<S>,
     bot: BotHandle,
     sessions: SessionRegistry,
@@ -104,16 +46,27 @@ where
     E: EventView,
     S: Send + Sync + 'static,
 {
-    /// Returns the typed canonical event by reference.
-    #[must_use]
-    pub fn event(&self) -> &E {
-        E::from_envelope(&self.envelope)
-            .expect("compiled route and event view must describe the same event kind")
+    pub(crate) fn from_parts(
+        envelope: Arc<DispatchEnvelope>,
+        state: Arc<S>,
+        bot: BotHandle,
+        sessions: SessionRegistry,
+        shutdown: ShutdownSignal,
+    ) -> Self {
+        Self {
+            envelope,
+            state,
+            bot,
+            sessions,
+            shutdown,
+            _event: PhantomData,
+        }
     }
 
     #[must_use]
-    pub fn envelope(&self) -> &EventEnvelope {
-        &self.envelope
+    pub fn event(&self) -> &E::Target {
+        E::from_envelope(&self.envelope)
+            .expect("compiled route and event selector must describe the same event")
     }
 
     #[must_use]
@@ -121,85 +74,128 @@ where
         &self.state
     }
 
+    /// Returns the bot's single OxideBot API implementation.
     #[must_use]
-    pub fn bot(&self) -> &BotHandle {
-        &self.bot
+    pub fn bot(&self) -> BotObject {
+        self.bot
+            .api()
+            .expect("adapters are constructed from a CallApiTrait implementation")
     }
 
-    /// Read-only structured-shutdown signal. Handlers cannot cancel siblings or
-    /// the application root.
+    /// Returns the stable identity of the bot handling this event.
+    #[must_use]
+    pub fn bot_identity(&self) -> &BotIdentity {
+        self.bot.identity()
+    }
+
     #[must_use]
     pub fn shutdown(&self) -> &ShutdownSignal {
         &self.shutdown
     }
 }
 
-impl<S> Context<MessageCreated, S>
+/// Type-level selector for one stable [`EventType`].
+#[derive(Clone, Copy, Debug, Default)]
+#[doc(hidden)]
+pub struct TaggedEvent<T>(PhantomData<fn() -> T>);
+
+impl<T> EventView for TaggedEvent<T>
+where
+    T: EventTag,
+{
+    type Target = T::Event;
+    const KIND: DispatchKind = T::TYPE.dispatch_kind();
+
+    fn from_envelope(envelope: &DispatchEnvelope) -> Option<&Self::Target> {
+        envelope.event_as::<T>()
+    }
+}
+
+/// Handler context for a compile-time event tag.
+pub type EventContext<T, S = ()> = Context<TaggedEvent<T>, S>;
+/// Common message-event context.
+pub type MessageContext<S = ()> = EventContext<tags::Message, S>;
+
+impl<S> Context<TaggedEvent<tags::Message>, S>
 where
     S: Send + Sync + 'static,
 {
     #[must_use]
-    pub fn text(&self) -> Option<&str> {
-        self.event().text.as_deref()
+    pub fn text(&self) -> String {
+        self.event().message.get_raw_text()
+    }
+
+    pub async fn send(
+        &self,
+        message: Vec<MessageSegment>,
+    ) -> Result<Vec<oxidebot_core::api::response::SendMessageResponse>, HandlerError> {
+        let target = self
+            .event()
+            .group
+            .as_ref()
+            .map(|group| SendMessageTarget::Group(group.id.clone()))
+            .unwrap_or_else(|| SendMessageTarget::Private(self.event().sender.id.clone()));
+        self.bot
+            .api()?
+            .send_message(message, target)
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))
     }
 
     pub async fn reply(
         &self,
-        message: impl Into<OutgoingMessage>,
-    ) -> Result<oxidebot_core::MessageReceipt, crate::CommandError> {
-        self.bot
-            .send(
-                MessageTarget::new(self.event().reference.conversation.clone()),
-                message,
-            )
-            .await
+        mut message: Vec<MessageSegment>,
+    ) -> Result<Vec<oxidebot_core::api::response::SendMessageResponse>, HandlerError> {
+        message.push(MessageSegment::reply(self.event().message.id.clone()));
+        self.send(message).await
     }
 
-    /// Registers an exclusive one-shot session before sending the prompt. The
-    /// registration is synchronously cancelled if sending or the handler future
-    /// is cancelled.
     pub async fn ask_parse<T>(
         &self,
-        prompt: impl Into<OutgoingMessage>,
+        prompt: Vec<MessageSegment>,
         options: crate::AskOptions,
     ) -> Result<T, HandlerError>
     where
         T: FromStr,
         T::Err: std::fmt::Display,
     {
-        let conversation = self.event().reference.conversation.clone();
-        let actor = self
-            .event()
-            .sender
+        let conversation = self
+            .envelope
+            .index
+            .conversation
             .clone()
-            .ok_or_else(|| HandlerError::Parse("message has no sender".into()))?;
-        let key = SessionKey::new(conversation.clone(), actor, options.namespace.clone());
+            .ok_or_else(|| HandlerError::Parse("message has no conversation key".into()))?;
+        let actor = self
+            .envelope
+            .index
+            .actor
+            .clone()
+            .ok_or_else(|| HandlerError::Parse("message has no actor key".into()))?;
+        let key = SessionKey::new(conversation, actor, options.namespace.clone());
         let waiter = self
             .sessions
             .register(key, options.timeout, options.policy)
             .await?;
-        self.bot
-            .send(MessageTarget::new(conversation), prompt)
-            .await?;
+        self.send(prompt).await?;
         let response = waiter.wait().await?;
-        let text = response
-            .event()
-            .message_created()
-            .and_then(|message| message.text.as_deref())
-            .ok_or_else(|| HandlerError::Parse("session response has no text".into()))?;
+        let text = match response.event() {
+            oxidebot_core::Event::MessageEvent(event) => event.message.get_raw_text(),
+            _ => {
+                return Err(HandlerError::Parse(
+                    "session response is not a message event".into(),
+                ))
+            }
+        };
         text.parse()
             .map_err(|error: T::Err| HandlerError::Parse(error.to_string()))
     }
 }
 
-/// Fully compiled route category used by the router's candidate indexes.
-///
-/// This type is public only so advanced users can implement [`Matcher`]; normal
-/// applications should use the built-in matcher constructors.
+/// Fully compiled route category used by the router candidate indexes.
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum RouteSpec {
-    Generic(EventKind),
+    Event(EventType),
     Command(Arc<str>),
     Interaction(Arc<str>),
     Native(Arc<str>),
@@ -213,7 +209,6 @@ pub struct RouteScope {
 }
 
 impl RouteScope {
-    /// Creates an unrestricted route scope.
     #[must_use]
     pub const fn global() -> Self {
         Self {
@@ -222,7 +217,6 @@ impl RouteScope {
         }
     }
 
-    /// Restricts a route to one platform.
     #[must_use]
     pub fn for_platform(platform: PlatformId) -> Self {
         Self {
@@ -231,7 +225,6 @@ impl RouteScope {
         }
     }
 
-    /// Restricts a route to one exact bot identity.
     #[must_use]
     pub fn for_bot(bot: BotIdentity) -> Self {
         Self {
@@ -248,106 +241,48 @@ impl RouteScope {
     }
 }
 
-/// A typed route matcher. Matching is compiled once; it is not invoked by every
-/// event at runtime.
+/// A typed route matcher compiled once during application construction.
 pub trait Matcher: Send + Sync + 'static {
     type Event: EventView;
     fn route_spec(&self) -> RouteSpec;
 }
 
-/// Generic matcher for one canonical event category.
-#[derive(Clone, Copy, Debug)]
-pub struct KindMatcher<E> {
-    kind: EventKind,
-    _event: PhantomData<fn() -> E>,
-}
+/// Matcher for one event tag.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EventMatcher<T>(PhantomData<fn() -> T>);
 
-impl<E> Matcher for KindMatcher<E>
+impl<T> Matcher for EventMatcher<T>
 where
-    E: EventView,
+    T: EventTag,
 {
-    type Event = E;
+    type Event = TaggedEvent<T>;
 
     fn route_spec(&self) -> RouteSpec {
-        RouteSpec::Generic(self.kind)
+        RouteSpec::Event(T::TYPE)
     }
 }
 
-const fn kind_matcher<E>(kind: EventKind) -> KindMatcher<E> {
-    KindMatcher {
-        kind,
-        _event: PhantomData,
-    }
-}
-
-/// Matches all message-updated events.
+/// Selects one event subtype through a compile-time tag.
 #[must_use]
-pub const fn message_updated() -> KindMatcher<MessageUpdated> {
-    kind_matcher(EventKind::MessageUpdated)
+pub const fn event<T>() -> EventMatcher<T>
+where
+    T: EventTag,
+{
+    EventMatcher(PhantomData)
 }
 
-/// Matches all message-deletion batches.
-#[must_use]
-pub const fn messages_deleted() -> KindMatcher<MessagesDeleted> {
-    kind_matcher(EventKind::MessagesDeleted)
-}
-
-/// Matches every interaction, irrespective of custom ID.
-#[must_use]
-pub const fn any_interaction() -> KindMatcher<Interaction> {
-    kind_matcher(EventKind::Interaction)
-}
-
-/// Matches all reaction changes.
-#[must_use]
-pub const fn reaction_changed() -> KindMatcher<ReactionChanged> {
-    kind_matcher(EventKind::ReactionChanged)
-}
-
-/// Matches all membership changes.
-#[must_use]
-pub const fn member_changed() -> KindMatcher<MemberChanged> {
-    kind_matcher(EventKind::MemberChanged)
-}
-
-/// Matches all conversation state changes.
-#[must_use]
-pub const fn conversation_changed() -> KindMatcher<ConversationChanged> {
-    kind_matcher(EventKind::ConversationChanged)
-}
-
-/// Matches all file lifecycle changes.
-#[must_use]
-pub const fn file_changed() -> KindMatcher<FileChanged> {
-    kind_matcher(EventKind::FileChanged)
-}
-
-/// Matches all payment/subscription changes.
-#[must_use]
-pub const fn payment_changed() -> KindMatcher<PaymentChanged> {
-    kind_matcher(EventKind::PaymentChanged)
-}
-
-/// Matches all platform-native events.
-#[must_use]
-pub const fn any_native() -> KindMatcher<NativeEvent> {
-    kind_matcher(EventKind::Native)
-}
-
-/// Matcher for canonical message-created events.
+/// Matcher for ordinary message events, optionally indexed by command.
 #[derive(Clone, Debug, Default)]
 pub struct MessageMatcher {
     command: Option<Arc<str>>,
 }
 
-/// Matches all incoming messages.
 #[must_use]
 pub fn message() -> MessageMatcher {
     MessageMatcher::default()
 }
 
 impl MessageMatcher {
-    /// Restricts this matcher to a normalized command name.
     #[must_use]
     pub fn command(mut self, value: impl Into<Arc<str>>) -> Self {
         self.command = Some(value.into());
@@ -356,12 +291,12 @@ impl MessageMatcher {
 }
 
 impl Matcher for MessageMatcher {
-    type Event = MessageCreated;
+    type Event = TaggedEvent<tags::Message>;
 
     fn route_spec(&self) -> RouteSpec {
         self.command
             .as_ref()
-            .map_or(RouteSpec::Generic(EventKind::MessageCreated), |command| {
+            .map_or(RouteSpec::Event(EventType::Message), |command| {
                 RouteSpec::Command(command.clone())
             })
     }
@@ -381,14 +316,14 @@ pub fn interaction(custom_id: impl Into<Arc<str>>) -> InteractionMatcher {
 }
 
 impl Matcher for InteractionMatcher {
-    type Event = Interaction;
+    type Event = TaggedEvent<tags::Interaction>;
 
     fn route_spec(&self) -> RouteSpec {
         RouteSpec::Interaction(self.custom_id.clone())
     }
 }
 
-/// Matcher for one platform-native event type.
+/// Matcher for one platform-native lifecycle event identifier.
 #[derive(Clone, Debug)]
 pub struct NativeMatcher {
     kind: Arc<str>,
@@ -400,7 +335,7 @@ pub fn native(kind: impl Into<Arc<str>>) -> NativeMatcher {
 }
 
 impl Matcher for NativeMatcher {
-    type Event = NativeEvent;
+    type Event = TaggedEvent<tags::PlatformNative>;
 
     fn route_spec(&self) -> RouteSpec {
         RouteSpec::Native(self.kind.clone())
@@ -415,7 +350,6 @@ pub struct On<M, F, S> {
     _state: PhantomData<fn(S)>,
 }
 
-/// Creates a typed handler registration.
 #[must_use]
 pub fn on<M, F, Fut, S>(matcher: M, function: F) -> On<M, F, S>
 where
@@ -433,14 +367,12 @@ where
 }
 
 impl<M, F, S> On<M, F, S> {
-    /// Restricts this route to one platform.
     #[must_use]
     pub fn platform(mut self, platform: PlatformId) -> Self {
         self.scope = RouteScope::for_platform(platform);
         self
     }
 
-    /// Restricts this route to one exact bot identity.
     #[must_use]
     pub fn bot(mut self, bot: BotIdentity) -> Self {
         self.scope = RouteScope::for_bot(bot);
@@ -455,10 +387,10 @@ where
 {
     fn route_spec(&self) -> RouteSpec;
     fn route_scope(&self) -> RouteScope;
-    fn event_kind(&self) -> EventKind;
+    fn event_kind(&self) -> DispatchKind;
     fn call(
         &self,
-        event: Arc<EventEnvelope>,
+        event: Arc<DispatchEnvelope>,
         state: Arc<S>,
         bot: BotHandle,
         sessions: SessionRegistry,
@@ -466,7 +398,6 @@ where
     ) -> BoxFuture<'static, HandlerResult>;
 }
 
-/// Marker implemented by values accepted by [`crate::OxideBot::handler`].
 pub trait Handler<S>: ErasedHandler<S>
 where
     S: Send + Sync + 'static,
@@ -494,28 +425,27 @@ where
         self.scope.clone()
     }
 
-    fn event_kind(&self) -> EventKind {
+    fn event_kind(&self) -> DispatchKind {
         M::Event::KIND
     }
 
     fn call(
         &self,
-        event: Arc<EventEnvelope>,
+        event: Arc<DispatchEnvelope>,
         state: Arc<S>,
         bot: BotHandle,
         sessions: SessionRegistry,
         shutdown: ShutdownSignal,
     ) -> BoxFuture<'static, HandlerResult> {
         debug_assert!(M::Event::from_envelope(&event).is_some());
-        let future = (self.function)(Context {
+        Box::pin((self.function)(Context {
             envelope: event,
             state,
             bot,
             sessions,
             shutdown,
             _event: PhantomData,
-        });
-        Box::pin(future)
+        }))
     }
 }
 
@@ -527,14 +457,13 @@ where
     Arc::new(handler)
 }
 
-/// Build-time snapshot of a dynamic handler's immutable routing metadata.
 pub(crate) struct PreparedHandler<S>
 where
     S: Send + Sync + 'static,
 {
     pub(crate) spec: RouteSpec,
     pub(crate) scope: RouteScope,
-    pub(crate) event_kind: EventKind,
+    pub(crate) event_kind: DispatchKind,
     pub(crate) handler: Arc<dyn ErasedHandler<S>>,
 }
 

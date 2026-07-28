@@ -1,8 +1,7 @@
 use crate::{budget::HierarchicalLease, MetricsHandle, SessionError};
 use futures_util::StreamExt;
-use oxidebot_core::{
-    ConversationKey, EventEnvelope, EventIndex, EventKind, SessionNamespace, UserKey,
-};
+use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchIndex, DispatchKind};
+use oxidebot_core::{ConversationKey, Event, SessionNamespace, UserKey};
 use std::{
     collections::{hash_map::RandomState, HashMap, HashSet},
     fmt,
@@ -27,7 +26,7 @@ struct ScopeKey {
 }
 
 impl ScopeKey {
-    fn from_index(index: &EventIndex) -> Option<Self> {
+    fn from_index(index: &DispatchIndex) -> Option<Self> {
         Some(Self {
             conversation: index.conversation.clone()?,
             actor: index.actor.clone()?,
@@ -105,14 +104,14 @@ impl AskOptions {
 /// Event delivered to one exact session waiter.
 #[derive(Debug)]
 pub struct SessionEvent {
-    event: Arc<EventEnvelope>,
+    event: Arc<DispatchEnvelope>,
     _ingress_retention: Arc<HierarchicalLease>,
 }
 
 impl SessionEvent {
     #[must_use]
-    pub fn event(&self) -> &EventEnvelope {
-        self.event.as_ref()
+    pub fn event(&self) -> &Event {
+        self.event.event()
     }
 }
 
@@ -150,8 +149,8 @@ impl SessionInterest {
         shard_for(scope, self.shards.len(), &self.hash_builder)
     }
 
-    pub(crate) fn accepts(&self, index: &EventIndex) -> bool {
-        if index.kind != EventKind::MessageCreated || self.active.load(Ordering::Acquire) == 0 {
+    pub(crate) fn accepts(&self, index: &DispatchIndex) -> bool {
+        if index.kind != DispatchKind::Message || self.active.load(Ordering::Acquire) == 0 {
             return false;
         }
         let Some(scope) = ScopeKey::from_index(index) else {
@@ -291,7 +290,7 @@ impl SessionRegistry {
 
     pub(crate) async fn deliver(
         &self,
-        event: Arc<EventEnvelope>,
+        event: Arc<DispatchEnvelope>,
         ingress_retention: Arc<HierarchicalLease>,
     ) -> Result<SessionDelivery, SessionError> {
         // Critical hot-path fast miss: no channel send, oneshot allocation, or
@@ -363,7 +362,7 @@ enum SessionCommand {
     },
     Deliver {
         scope: ScopeKey,
-        event: Arc<EventEnvelope>,
+        event: Arc<DispatchEnvelope>,
         ingress_retention: Arc<HierarchicalLease>,
         reply: oneshot::Sender<SessionDelivery>,
     },

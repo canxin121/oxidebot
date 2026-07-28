@@ -1,4 +1,5 @@
-use oxidebot_core::{EventValidationError, ModelError};
+use oxidebot_core::event::kernel::DispatchValidationError;
+use oxidebot_core::message::ModelError;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
@@ -59,8 +60,8 @@ impl From<DecodeError> for AdapterError {
         Self::new(value.message)
     }
 }
-impl From<EventValidationError> for AdapterError {
-    fn from(value: EventValidationError) -> Self {
+impl From<DispatchValidationError> for AdapterError {
+    fn from(value: DispatchValidationError) -> Self {
         Self::new(value.to_string())
     }
 }
@@ -126,6 +127,8 @@ pub enum CommandError {
     InteractionsUnsupported,
     #[error("native API service is unsupported")]
     NativeUnsupported,
+    #[error("the adapter does not provide the OxideBot API")]
+    ApiUnsupported,
     #[error("platform service panicked")]
     ServicePanicked,
     #[error("command target belongs to another bot")]
@@ -187,6 +190,8 @@ pub enum HandlerError {
     Session(#[from] SessionError),
     #[error("could not parse session response: {0}")]
     Parse(String),
+    #[error("bot API call failed: {0}")]
+    Api(String),
     #[error("handler timed out")]
     Timeout,
 }
@@ -219,7 +224,7 @@ pub enum RuntimeError {
     Service(#[from] ServiceError),
     #[error("runtime channel failure: {0}")]
     Channel(&'static str),
-    #[error("canonical event exceeds the configured executor envelope: {0}")]
+    #[error("event exceeds the configured executor envelope: {0}")]
     EventTooLarge(String),
     #[error("runtime task failed: {0}")]
     Join(String),
@@ -228,4 +233,4 @@ pub enum RuntimeError {
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
-pub type HandlerResult = std::result::Result<crate::Outcome, HandlerError>;
+pub type HandlerResult<T = crate::Response> = std::result::Result<T, HandlerError>;

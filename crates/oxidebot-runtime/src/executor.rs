@@ -4,7 +4,8 @@ use crate::{
     BotHandle, MetricsHandle, OverloadPolicy, QueueBudget,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
-use oxidebot_core::{BotSlot, EventEnvelope, ExecutionKey, MessageExecutionPartition};
+use oxidebot_core::event::kernel::{DispatchEnvelope, MessageExecutionPartition};
+use oxidebot_core::{BotSlot, ExecutionKey};
 use std::{
     collections::{hash_map::RandomState, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash},
@@ -90,7 +91,7 @@ impl ExecutorHandle {
 
     pub(crate) async fn submit(
         &self,
-        event: Arc<EventEnvelope>,
+        event: Arc<DispatchEnvelope>,
         bot: BotHandle,
         ingress_retention: Arc<HierarchicalLease>,
     ) -> ExecutorSubmit {
@@ -163,7 +164,7 @@ impl ExecutorHandle {
 struct DispatchJob {
     key: ExecutionKey,
     bot_slot: BotSlot,
-    event: Arc<EventEnvelope>,
+    event: Arc<DispatchEnvelope>,
     bot: BotHandle,
     _leases: HierarchicalLease,
     _ingress_retention: Arc<HierarchicalLease>,
@@ -395,57 +396,66 @@ fn shard_for<T: Hash>(value: &T, shards: usize, hash_builder: &RandomState) -> u
 mod tests {
     use super::*;
     use crate::{
-        bot::{BotDescriptor, BotServices, CommandWorker, GlobalCommandCapacity, MessageService},
+        bot::{BotDescriptor, BotServices, CommandWorker, GlobalCommandCapacity},
         handler::PreparedHandler,
         session::SessionRegistry,
         RuntimeMetrics, ShutdownSignal,
     };
     use async_trait::async_trait;
+    use oxidebot_core::event::kernel::{DispatchDraft, DispatchIndex};
     use oxidebot_core::{
-        BotId, CompactId, ConversationKey, EventBody, EventDraft, EventId, EventIndex, EventKind,
-        MessageContent, MessageCreated, MessageReceipt, MessageRef, MessageTarget, OutgoingMessage,
-        PlatformId, UserKey,
+        api::{payload::SendMessageTarget, response::SendMessageResponse},
+        event::{Event, EventType, MessageEvent},
+        source::{
+            message::{Message, MessageSegment},
+            user::User,
+        },
+        BotId, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
     };
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
-    struct NoopMessageService;
+    struct NoopApi;
 
     #[async_trait]
-    impl MessageService for NoopMessageService {
-        async fn send(
+    impl CallApiTrait for NoopApi {
+        async fn send_message(
             &self,
-            target: &MessageTarget,
-            _message: &OutgoingMessage,
-        ) -> Result<MessageReceipt, crate::PlatformError> {
-            Ok(MessageReceipt::new(MessageRef::new(
-                target.conversation.clone(),
-                1_u64,
-            )))
+            _message: Vec<MessageSegment>,
+            _target: SendMessageTarget,
+        ) -> anyhow::Result<Vec<SendMessageResponse>> {
+            Ok(vec![SendMessageResponse {
+                sent_message_id: "1".to_owned(),
+            }])
         }
     }
 
-    fn event(platform: &PlatformId) -> Arc<EventEnvelope> {
+    fn event(platform: &PlatformId) -> Arc<DispatchEnvelope> {
         let bot = BotSlot(0);
         let conversation = ConversationKey::new(bot, CompactId::from("room"));
         let actor = UserKey::new(bot, CompactId::from("user"));
-        let mut index = EventIndex::new(bot, platform.clone(), EventKind::MessageCreated);
+        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
         index.conversation = Some(conversation.clone());
         index.actor = Some(actor.clone());
         Arc::new(
-            EventDraft {
-                id: EventId::new("wake-up").expect("static event ID"),
+            DispatchDraft::new(
+                EventId::new("wake-up").expect("static event ID"),
                 index,
-                occurred_at: None,
-                delivery_attempt: 0,
-                body: EventBody::MessageCreated(Box::new(MessageCreated {
-                    reference: MessageRef::new(conversation, 1_u64),
-                    sender: Some(actor),
-                    content: vec![MessageContent::Text(Arc::from("hello"))],
-                    text: Some(Arc::from("hello")),
-                    mentioned_bot: false,
-                })),
-            }
+                Event::MessageEvent(MessageEvent {
+                    id: "wake-up".to_owned(),
+                    time: None,
+                    sender: User {
+                        id: "user".to_owned(),
+                        ..User::default()
+                    },
+                    group: None,
+                    message: Message {
+                        id: "1".to_owned(),
+                        segments: vec![MessageSegment::text("hello")],
+                    },
+                }),
+                2_048,
+            )
             .finalize(0, Instant::now(), None),
         )
     }
@@ -468,7 +478,7 @@ mod tests {
         ));
 
         let platform = PlatformId::new("test").expect("static platform");
-        let services = BotServices::messages(Arc::new(NoopMessageService));
+        let services = BotServices::new(Arc::new(NoopApi));
         let (bot, _command_worker) = CommandWorker::build(
             BotSlot(0),
             BotDescriptor::new(platform.clone(), BotId::new("bot").expect("static bot ID")),

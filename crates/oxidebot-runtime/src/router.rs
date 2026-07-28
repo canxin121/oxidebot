@@ -5,7 +5,12 @@ use crate::{
     BotHandle, Filter, MetricsHandle, ShutdownSignal,
 };
 use futures_util::FutureExt;
-use oxidebot_core::{BotIdentity, EventEnvelope, EventKind, MessageTarget, PlatformId};
+use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
+use oxidebot_core::{
+    api::payload::SendMessageTarget,
+    event::{EventType, NoticeEvent, RequestEvent},
+    BotIdentity, Event, PlatformId,
+};
 use std::{
     collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
@@ -43,7 +48,7 @@ impl RouteList {
 }
 
 struct RouteTables {
-    generic: Vec<Vec<RouteId>>,
+    events: Vec<Vec<RouteId>>,
     commands: HashMap<Arc<str>, RouteList>,
     interactions: HashMap<Arc<str>, RouteList>,
     native: HashMap<Arc<str>, RouteList>,
@@ -62,7 +67,7 @@ fn insert_exact(table: &mut HashMap<Arc<str>, RouteList>, key: &Arc<str>, id: Ro
 impl RouteTables {
     fn new() -> Self {
         Self {
-            generic: (0..EventKind::BIT_COUNT).map(|_| Vec::new()).collect(),
+            events: (0..EventType::COUNT).map(|_| Vec::new()).collect(),
             commands: HashMap::new(),
             interactions: HashMap::new(),
             native: HashMap::new(),
@@ -71,7 +76,7 @@ impl RouteTables {
 
     fn insert(&mut self, id: RouteId, spec: &RouteSpec) {
         match spec {
-            RouteSpec::Generic(kind) => self.generic[*kind as usize].push(id),
+            RouteSpec::Event(event_type) => self.events[*event_type as usize].push(id),
             RouteSpec::Command(command) => insert_exact(&mut self.commands, command, id),
             RouteSpec::Interaction(custom_id) => {
                 insert_exact(&mut self.interactions, custom_id, id)
@@ -80,34 +85,38 @@ impl RouteTables {
         }
     }
 
-    fn exact<'a>(&'a self, event: &EventEnvelope) -> &'a [RouteId] {
+    fn exact<'a>(&'a self, event: &DispatchEnvelope) -> &'a [RouteId] {
         match event.index.kind {
-            EventKind::MessageCreated => event
+            DispatchKind::Message => event
                 .index
                 .command
                 .as_ref()
                 .and_then(|value| self.commands.get(value))
                 .map_or(&[], RouteList::as_slice),
-            EventKind::Interaction => event
+            DispatchKind::Interaction => event
                 .index
                 .interaction
                 .as_ref()
                 .and_then(|value| self.interactions.get(value))
                 .map_or(&[], RouteList::as_slice),
-            EventKind::Native => event
+            DispatchKind::Native => event
                 .index
                 .native_type
                 .as_ref()
                 .and_then(|value| self.native.get(value))
                 .map_or(&[], RouteList::as_slice),
-            EventKind::MessageUpdated
-            | EventKind::MessagesDeleted
-            | EventKind::ReactionChanged
-            | EventKind::MemberChanged
-            | EventKind::ConversationChanged
-            | EventKind::FileChanged
-            | EventKind::PaymentChanged => &[],
+            DispatchKind::MessageUpdate
+            | DispatchKind::MessageDelete
+            | DispatchKind::Reaction
+            | DispatchKind::Member
+            | DispatchKind::Conversation
+            | DispatchKind::File
+            | DispatchKind::Payment => &[],
         }
+    }
+
+    fn event<'a>(&'a self, envelope: &DispatchEnvelope) -> &'a [RouteId] {
+        self.events[envelope.index.event_type as usize].as_slice()
     }
 }
 
@@ -144,22 +153,18 @@ impl ScopedRouteTables {
 
     fn candidates<'a>(
         &'a self,
-        event: &EventEnvelope,
+        event: &DispatchEnvelope,
         identity: &BotIdentity,
     ) -> [&'a [RouteId]; 6] {
         let empty: &'a [RouteId] = &[];
         let platform = self.platforms.get(&identity.platform);
         let bot = self.bots.get(identity);
         [
-            &self.global.generic[event.index.kind as usize],
+            self.global.event(event),
             self.global.exact(event),
-            platform.map_or(empty, |routes| {
-                routes.generic[event.index.kind as usize].as_slice()
-            }),
+            platform.map_or(empty, |routes| routes.event(event)),
             platform.map_or(empty, |routes| routes.exact(event)),
-            bot.map_or(empty, |routes| {
-                routes.generic[event.index.kind as usize].as_slice()
-            }),
+            bot.map_or(empty, |routes| routes.event(event)),
             bot.map_or(empty, |routes| routes.exact(event)),
         ]
     }
@@ -178,6 +183,82 @@ fn next_route_id(lists: &[&[RouteId]; 6], positions: &mut [usize; 6]) -> Option<
     let (index, route_id) = selected?;
     positions[index] = positions[index].saturating_add(1);
     Some(route_id)
+}
+
+pub(crate) fn reply_target(event: &Event) -> Option<SendMessageTarget> {
+    match event {
+        Event::MessageEvent(event) => Some(
+            event
+                .group
+                .as_ref()
+                .map(|group| SendMessageTarget::Group(group.id.clone()))
+                .unwrap_or_else(|| SendMessageTarget::Private(event.sender.id.clone())),
+        ),
+        Event::NoticeEvent(event) => match event {
+            NoticeEvent::GroupMemberIncreseEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupMemberDecreaseEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupAdminChangeEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupMuteChangeEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupMemberMuteChangeEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupHightLightChangeEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::GroupMemberAliasChangeEvent(event) => {
+                Some(SendMessageTarget::Group(event.group.id.clone()))
+            }
+            NoticeEvent::MessageReactionsEvent(event) => Some(
+                event
+                    .group
+                    .as_ref()
+                    .map(|group| SendMessageTarget::Group(group.id.clone()))
+                    .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+            ),
+            NoticeEvent::MessageDeletedEvent(event) => event
+                .group
+                .as_ref()
+                .map(|group| SendMessageTarget::Group(group.id.clone()))
+                .or_else(|| {
+                    event
+                        .user
+                        .as_ref()
+                        .map(|user| SendMessageTarget::Private(user.id.clone()))
+                }),
+            NoticeEvent::MessageEditedEvent(event) => Some(
+                event
+                    .group
+                    .as_ref()
+                    .map(|group| SendMessageTarget::Group(group.id.clone()))
+                    .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+            ),
+        },
+        Event::RequestEvent(RequestEvent::FriendAddEvent(event)) => {
+            Some(SendMessageTarget::Private(event.user.id.clone()))
+        }
+        Event::RequestEvent(RequestEvent::GroupAddEvent(event)) => {
+            Some(SendMessageTarget::Group(event.group.id.clone()))
+        }
+        Event::RequestEvent(RequestEvent::GroupInviteEvent(event)) => {
+            Some(SendMessageTarget::Private(event.user.id.clone()))
+        }
+        Event::InteractionEvent(event) => Some(
+            event
+                .group
+                .as_ref()
+                .map(|group| SendMessageTarget::Group(group.id.clone()))
+                .unwrap_or_else(|| SendMessageTarget::Private(event.user.id.clone())),
+        ),
+        Event::LifecycleEvent(_) | Event::MetaEvent(_) | Event::AnyEvent(_) => None,
+    }
 }
 
 /// Immutable router compiled into candidate indexes before adapters start.
@@ -236,10 +317,10 @@ where
         self.interest.bind(identity)
     }
 
-    /// Dispatches only the pre-indexed candidates. Generic and exact lists are
+    /// Dispatches only the pre-indexed candidates. Event and exact lists are
     /// merged by RouteId so registration order and `Outcome::stop()` semantics
     /// remain deterministic without allocating a temporary candidate vector.
-    pub(crate) async fn dispatch(&self, event: Arc<EventEnvelope>, bot: BotHandle) {
+    pub(crate) async fn dispatch(&self, event: Arc<DispatchEnvelope>, bot: BotHandle) {
         let identity = bot.identity();
         let candidates = self.routes.candidates(&event, identity);
         let candidate_count = candidates.iter().map(|routes| routes.len()).sum::<usize>();
@@ -249,7 +330,9 @@ where
         }
 
         for filter in &self.filters {
-            match catch_unwind(AssertUnwindSafe(|| filter.accepts(&event, &self.state))) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                filter.accepts(event.event(), &self.state)
+            })) {
                 Ok(true) => {}
                 Ok(false) => return,
                 Err(_) => {
@@ -315,11 +398,17 @@ where
                     limit = self.max_handler_replies,
                     "handler outcome exceeded the deferred-reply limit"
                 );
-            } else if let Some(conversation) = event.index.conversation.clone() {
-                let target = MessageTarget::new(conversation);
-                for reply in outcome.replies {
-                    if let Err(error) = bot.enqueue_send(target.clone(), reply).await {
-                        tracing::warn!(event_id = %event.id, %error, "could not enqueue handler reply");
+            } else if let Some(target) = reply_target(event.event()) {
+                match bot.api() {
+                    Ok(api) => {
+                        for reply in outcome.replies {
+                            if let Err(error) = api.send_message(reply, target.clone()).await {
+                                tracing::warn!(event_id = %event.id, %error, "could not send handler reply");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(event_id = %event.id, %error, "adapter does not expose the OxideBot API");
                     }
                 }
             }

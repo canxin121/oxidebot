@@ -1,12 +1,19 @@
+#![allow(dead_code)] // Compatibility command queue retained while handlers use CallApiTrait directly.
+
 use crate::{
     budget::{HierarchicalLease, PriorityQueueLimiter, QueueAcquireError},
     CommandError, MetricsHandle, OverloadPolicy, PlatformError, PlatformErrorKind, QueueBudget,
 };
 use async_trait::async_trait;
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
+use oxidebot_core::event::kernel::MAX_ROUTE_KEY_BYTES;
+use oxidebot_core::message::{
+    MessageReceipt, MessageRef, MessageTarget, NativeData, OutgoingMessage,
+};
 use oxidebot_core::{
-    BotId, BotIdentity, BotSlot, ConversationKey, InvalidId, MessageReceipt, MessageRef,
-    MessageTarget, NativeData, OutgoingMessage, PlatformId, MAX_ROUTE_KEY_BYTES,
+    api::{payload::SendMessageTarget as EventMessageTarget, response::SendMessageResponse},
+    source::message::MessageSegment as EventMessageSegment,
+    BotId, BotIdentity, BotObject, BotSlot, CallApiTrait, ConversationKey, InvalidId, PlatformId,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -71,17 +78,18 @@ pub enum IdempotencyGuarantee {
 
 /// Coarse service capabilities available on one bot connection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct BotCapabilities {
+pub struct RuntimeCapabilities {
     pub messages: bool,
     pub interactions: bool,
     pub native_api: bool,
+    pub api: bool,
     pub send_idempotency: IdempotencyGuarantee,
     pub delete_idempotent: bool,
 }
 
 /// Portable message service implemented by an adapter.
 #[async_trait]
-pub trait MessageService: Send + Sync + 'static {
+pub(crate) trait MessageService: Send + Sync + 'static {
     async fn send(
         &self,
         target: &MessageTarget,
@@ -109,7 +117,7 @@ pub trait MessageService: Send + Sync + 'static {
 
 /// Interaction response service implemented by an adapter.
 #[async_trait]
-pub trait InteractionService: Send + Sync + 'static {
+pub(crate) trait InteractionService: Send + Sync + 'static {
     async fn respond(
         &self,
         interaction_id: &str,
@@ -119,7 +127,7 @@ pub trait InteractionService: Send + Sync + 'static {
 
 /// Lossless platform-native API service implemented by an adapter.
 #[async_trait]
-pub trait NativeService: Send + Sync + 'static {
+pub(crate) trait NativeService: Send + Sync + 'static {
     async fn call(
         &self,
         method: &str,
@@ -127,40 +135,149 @@ pub trait NativeService: Send + Sync + 'static {
     ) -> std::result::Result<NativeData, PlatformError>;
 }
 
-/// Split outbound services exposed by one adapter.
+struct ApiMessageService(Arc<dyn CallApiTrait>);
+
+fn event_message_target(target: &MessageTarget) -> EventMessageTarget {
+    target
+        .recipients
+        .first()
+        .map(|recipient| EventMessageTarget::Private(recipient.id.to_string()))
+        .unwrap_or_else(|| EventMessageTarget::Group(target.conversation.id.to_string()))
+}
+
+fn event_message_segments(message: &OutgoingMessage) -> Vec<EventMessageSegment> {
+    message
+        .content
+        .iter()
+        .map(|content| match content {
+            oxidebot_core::message::MessageContent::Text(text) => {
+                EventMessageSegment::text(text.to_string())
+            }
+            oxidebot_core::message::MessageContent::RichText(text) => {
+                EventMessageSegment::text(text.text.to_string())
+            }
+            other => EventMessageSegment::custom_string("runtime".to_owned(), format!("{other:?}")),
+        })
+        .collect()
+}
+
+fn platform_error(error: anyhow::Error) -> PlatformError {
+    match error.downcast::<PlatformError>() {
+        Ok(error) => error,
+        Err(error) => PlatformError::new(PlatformErrorKind::Permanent, error.to_string()),
+    }
+}
+
+#[async_trait]
+impl MessageService for ApiMessageService {
+    async fn send(
+        &self,
+        target: &MessageTarget,
+        message: &OutgoingMessage,
+    ) -> std::result::Result<MessageReceipt, PlatformError> {
+        let responses = self
+            .0
+            .send_message(
+                event_message_segments(message),
+                event_message_target(target),
+            )
+            .await
+            .map_err(platform_error)?;
+        let id = responses
+            .into_iter()
+            .next()
+            .map(|response: SendMessageResponse| response.sent_message_id)
+            .ok_or_else(|| {
+                PlatformError::new(
+                    PlatformErrorKind::Permanent,
+                    "send_message returned no message id",
+                )
+            })?;
+        Ok(MessageReceipt::new(MessageRef::new(
+            target.conversation.clone(),
+            id,
+        )))
+    }
+
+    async fn edit(
+        &self,
+        message: &MessageRef,
+        replacement: &OutgoingMessage,
+    ) -> std::result::Result<(), PlatformError> {
+        self.0
+            .edit_message(message.id.to_string(), event_message_segments(replacement))
+            .await
+            .map_err(platform_error)
+    }
+
+    async fn delete(&self, message: &MessageRef) -> std::result::Result<(), PlatformError> {
+        self.0
+            .delete_message(message.id.to_string())
+            .await
+            .map_err(platform_error)
+    }
+}
+
+/// Runtime services derived from one OxideBot API implementation.
 #[derive(Clone)]
 pub struct BotServices {
     pub(crate) messages: Arc<dyn MessageService>,
     pub(crate) interactions: Option<Arc<dyn InteractionService>>,
     pub(crate) native: Option<Arc<dyn NativeService>>,
-    capabilities: BotCapabilities,
+    pub(crate) api: Option<Arc<dyn CallApiTrait>>,
+    capabilities: RuntimeCapabilities,
 }
 
 impl BotServices {
+    /// Creates adapter services from the single OxideBot API object.
     #[must_use]
-    pub fn messages(messages: Arc<dyn MessageService>) -> Self {
+    pub fn new(api: Arc<dyn CallApiTrait>) -> Self {
         Self {
-            messages,
+            messages: Arc::new(ApiMessageService(Arc::clone(&api))),
             interactions: None,
             native: None,
-            capabilities: BotCapabilities {
+            api: Some(api),
+            capabilities: RuntimeCapabilities {
                 messages: true,
-                ..BotCapabilities::default()
+                api: true,
+                ..RuntimeCapabilities::default()
             },
         }
     }
 
     #[must_use]
-    pub fn interactions(mut self, interactions: Arc<dyn InteractionService>) -> Self {
+    pub(crate) fn messages(messages: Arc<dyn MessageService>) -> Self {
+        Self {
+            messages,
+            interactions: None,
+            native: None,
+            api: None,
+            capabilities: RuntimeCapabilities {
+                messages: true,
+                ..RuntimeCapabilities::default()
+            },
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn interactions(mut self, interactions: Arc<dyn InteractionService>) -> Self {
         self.interactions = Some(interactions);
         self.capabilities.interactions = true;
         self
     }
 
     #[must_use]
-    pub fn native(mut self, native: Arc<dyn NativeService>) -> Self {
+    pub(crate) fn native(mut self, native: Arc<dyn NativeService>) -> Self {
         self.native = Some(native);
         self.capabilities.native_api = true;
+        self
+    }
+
+    /// Attaches the complete OxideBot high-level and platform API.
+    #[must_use]
+    pub(crate) fn api(mut self, api: Arc<dyn CallApiTrait>) -> Self {
+        self.api = Some(api);
+        self.capabilities.api = true;
         self
     }
 
@@ -179,7 +296,7 @@ impl BotServices {
     }
 
     #[must_use]
-    pub fn capabilities(&self) -> BotCapabilities {
+    pub fn capabilities(&self) -> RuntimeCapabilities {
         self.capabilities
     }
 }
@@ -197,7 +314,8 @@ struct BotHandleInner {
     slot: BotSlot,
     identity: BotIdentity,
     descriptor: BotDescriptor,
-    capabilities: BotCapabilities,
+    capabilities: RuntimeCapabilities,
+    api: Option<Arc<dyn CallApiTrait>>,
     client: CommandClient,
 }
 
@@ -210,7 +328,8 @@ impl BotHandle {
     fn new(
         slot: BotSlot,
         descriptor: BotDescriptor,
-        capabilities: BotCapabilities,
+        capabilities: RuntimeCapabilities,
+        api: Option<Arc<dyn CallApiTrait>>,
         client: CommandClient,
     ) -> Self {
         let identity = descriptor.identity();
@@ -219,6 +338,7 @@ impl BotHandle {
             identity,
             descriptor,
             capabilities,
+            api,
             client,
         }))
     }
@@ -239,11 +359,20 @@ impl BotHandle {
     }
 
     #[must_use]
-    pub fn capabilities(&self) -> BotCapabilities {
+    pub fn capabilities(&self) -> RuntimeCapabilities {
         self.0.capabilities
     }
 
-    pub async fn send(
+    /// Returns the adapter's complete OxideBot API surface.
+    pub(crate) fn api(&self) -> std::result::Result<BotObject, CommandError> {
+        self.0
+            .api
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(CommandError::ApiUnsupported)
+    }
+
+    pub(crate) async fn send(
         &self,
         target: MessageTarget,
         message: impl Into<OutgoingMessage>,
@@ -262,7 +391,7 @@ impl BotHandle {
         }
     }
 
-    pub async fn edit(
+    pub(crate) async fn edit(
         &self,
         message: MessageRef,
         replacement: impl Into<OutgoingMessage>,
@@ -286,7 +415,10 @@ impl BotHandle {
         }
     }
 
-    pub async fn delete(&self, message: MessageRef) -> std::result::Result<(), CommandError> {
+    pub(crate) async fn delete(
+        &self,
+        message: MessageRef,
+    ) -> std::result::Result<(), CommandError> {
         message.validate_for(self.0.slot)?;
         match self
             .0
@@ -301,7 +433,7 @@ impl BotHandle {
         }
     }
 
-    pub async fn respond_interaction(
+    pub(crate) async fn respond_interaction(
         &self,
         interaction_id: impl Into<Arc<str>>,
         response: NativeData,
@@ -328,7 +460,7 @@ impl BotHandle {
         }
     }
 
-    pub async fn call_native(
+    pub(crate) async fn call_native(
         &self,
         method: impl Into<Arc<str>>,
         request: NativeData,
@@ -636,7 +768,7 @@ impl CommandOperation {
         }
     }
 
-    fn idempotent(&self, capabilities: BotCapabilities) -> bool {
+    fn idempotent(&self, capabilities: RuntimeCapabilities) -> bool {
         match self {
             Self::Send { message, .. } => {
                 message.options.idempotency_key.is_some()
@@ -862,8 +994,9 @@ impl CommandWorker {
             sequence: Arc::new(AtomicU64::new(0)),
         };
         let capabilities = services.capabilities();
+        let api = services.api.clone();
         let platform = descriptor.platform.clone();
-        let bot = BotHandle::new(slot, descriptor, capabilities, client);
+        let bot = BotHandle::new(slot, descriptor, capabilities, api, client);
         (
             bot,
             Self {

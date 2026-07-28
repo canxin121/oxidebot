@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use oxidebot_core::{BotId, EventId, MessageCreated, PlatformId};
-use oxidebot_runtime::{message, on, Context, Outcome, OxideBot, RuntimeProfile};
+use oxidebot::{
+    message, on, BotId, EventId, MessageContext, Outcome, OxideBot, PlatformId, RuntimeProfile,
+};
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};
 
 const EVENTS_PER_SAMPLE: usize = 1_024;
@@ -40,9 +41,7 @@ fn benchmark_exact_command_runtime(c: &mut Criterion) {
                         for route in 0..route_count {
                             app = app.handler(on(
                                 message().command(format!("route-{route}")),
-                                |_context: Context<MessageCreated>| async {
-                                    Ok(Outcome::continue_())
-                                },
+                                |_context: MessageContext| async { Ok(Outcome::continue_()) },
                             ));
                         }
                         app.build().expect("benchmark application builds")
