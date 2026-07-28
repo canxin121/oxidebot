@@ -319,3 +319,55 @@ their `Display` text to users. User-facing and extractor errors inherit the matc
 kind's normal propagation policy: failed commands and interactions block, while
 failed observers leave later observers available. OxideBot deliberately has no
 blanket `Result<T, E: Display>` reply conversion.
+
+## Frozen authoring phases
+
+Module guards and before/after hooks remain the normal endpoint phases. The
+application builder also accepts narrow cross-cutting authoring phases:
+
+```rust
+OxideBot::with_state(state)
+    .message_normalizer(normalize_message)
+    .command_rewriter(rewrite_legacy_commands)
+    .command_middleware(audit_parsed_command)
+    .command_output_middleware(theme_help)
+    .delivery_middleware(inspect_delivery)
+    .command_renderer(render_commands)
+    .locale_resolver(resolve_locale);
+```
+
+Async functions implement these traits through ownership-based blanket
+implementations. The lists are frozen by `build`; there is no global extension
+registry or load-order-dependent mutation after startup.
+
+Use the narrowest phase:
+
+- `MessageNormalizer` for canonical inbound-message cleanup;
+- `CommandRewriter` for deliberate legacy, shortcut, or natural-language input
+  translation;
+- `CommandMiddleware` for an already parsed `CommandMatch`;
+- `CommandOutputMiddleware` for structured help, error, or completion output;
+- `DeliveryMiddleware` for a bounded, capability-checked `DeliveryPlan`.
+
+Endpoint-specific permission and rate-limit checks remain module guards.
+
+## Standard modules
+
+The built-in conveniences are ordinary modules and share the same state,
+command IR, scheduler, and delivery pipeline:
+
+```rust
+let admin = Module::new()
+    .include(command_admin_module())
+    .include(shortcut_admin_module())
+    .include(diagnostics_module())
+    .guard(admin_only);
+
+let features = Module::new()
+    .include(echo_module())
+    .include(language_module())
+    .include(admin)
+    .help();
+```
+
+Administrative modules intentionally have no implicit permission policy.

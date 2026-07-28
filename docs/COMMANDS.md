@@ -257,3 +257,135 @@ At startup, the command catalog converts the same grammar to
 A platform-native invocation is mapped back to the same `CommandMatch`; it does
 not need a second slash-command handler. Native autocomplete uses the same
 field IDs, choices, locale, and completion items.
+
+## Branch-specific handlers
+
+A large command tree does not need one giant `match`. Derive-generated branch
+markers bind themselves to the owning command tree:
+
+```rust
+async fn add(
+    BranchArgs(args): BranchArgs<todo_command_branches::Add>,
+) -> String {
+    args.text.join(" ")
+}
+
+let module = Module::new()
+    .command_branch(todo_command_branches::Add, add)
+    .command_branch(todo_command_branches::List, list);
+```
+
+The root command is still parsed only once. Nested subcommand markers can opt
+into descendant matching, and `BranchArgs` validates the selected stable path
+before constructing its typed arguments.
+
+## Function commands
+
+For a small leaf command, `#[oxidebot::command]` derives the private argument
+schema from the function signature:
+
+```rust
+#[oxidebot::command("echo")]
+async fn echo(
+    #[arg(rest, required = true)] text: Vec<String>,
+    Sender(user): Sender,
+) -> String {
+    format!("{}: {}", user.id, text.join(" "))
+}
+
+let module = Module::new().command(echo_command(), echo);
+```
+
+Parameters carrying `#[arg(...)]` are command values. Other parameters remain
+ordinary extractors. Generic functions and methods intentionally use the
+explicit `CommandArgs` path instead.
+
+## Shortcuts and rewrites
+
+```rust
+let command = TodoCommand::command()
+    .shortcut(Shortcut::literal("待办列表", "/todo list"))
+    .shortcut(Shortcut::regex(
+        r"^添加(?P<text>.+)$",
+        "/todo add {text}",
+    )?);
+```
+
+Literal shortcuts may preserve a token-boundary tail or explicitly allow a
+compact tail. Regex replacements support `{0}`, named captures, and `{*}`.
+Runtime shortcuts are bounded in `CommandRegistry` and require
+`Module::runtime_shortcuts()`.
+
+`CommandRewriter<S>` is the explicit extension point for transformations that
+need the complete message or state. It returns another canonical message and
+never executes a command directly.
+
+## Dynamic completion
+
+Mark a field as autocomplete-capable and register a provider through its stable
+field ID:
+
+```rust
+async fn complete_projects(
+    context: Context<AppState>,
+    input: CompletionInput,
+) -> HandlerResult<Vec<CompletionItem>> {
+    Ok(context
+        .state()
+        .projects
+        .search(&input.partial)
+        .await?
+        .into_iter()
+        .map(|project| {
+            CompletionItem::new(
+                project.id,
+                CompletionKind::Choice,
+                input.replace,
+            )
+            .description(project.name)
+        })
+        .collect())
+}
+
+let command = DeployArgs::command("deploy");
+let app = OxideBot::with_state(state)
+    .completer_for(&command, &[], "project", complete_projects)?
+    .include(Module::new().command(command, deploy));
+```
+
+The same provider feeds textual `?` completion, missing-value dialogue, and
+platform-native autocomplete. Providers receive an owned clone-cheap `Context`
+and are bounded by the requested result limit.
+
+## Command overlays and lifecycle
+
+`CommandOverlay` changes data-only presentation and invocation metadata without
+replacing a handler:
+
+```rust
+let module = module.command_overlay(
+    CommandOverlay::new("deploy")
+        .description_translation("zh-CN", "部署服务")
+        .alias("ship")
+        .shortcut(Shortcut::literal("发版", "/deploy")),
+);
+```
+
+`CommandRegistry` exposes explicit enable/disable state, bounded shortcuts, a
+revision, and native-command republishing. Disabled commands do not appear in
+help, completion, text dispatch, or native command definitions.
+
+## Value patterns and async resolution
+
+`ValuePattern<T>` keeps pure validation and conversion synchronous:
+
+```rust
+let ticket = RegexTextPattern::new(
+    r"^[A-Z]+-[0-9]+$",
+    "an uppercase project key followed by a number",
+)?;
+```
+
+I/O-dependent conversion is explicit through `Resolve<T, S>` and
+`ResolveCommandValue<S>` so ordinary `Args<T>` remains a synchronous hot-path
+extractor.

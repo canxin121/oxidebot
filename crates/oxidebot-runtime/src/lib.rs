@@ -2,6 +2,7 @@
 
 mod adapter;
 mod app;
+mod authoring;
 mod bot;
 mod budget;
 mod cancellation;
@@ -24,9 +25,11 @@ mod reply;
 mod router;
 mod service;
 mod session;
+mod standard;
 
 pub use adapter::*;
 pub use app::*;
+pub use authoring::*;
 pub use bot::*;
 pub use budget::{OverloadPolicy, QueueBudget};
 pub use cancellation::ShutdownSignal;
@@ -49,3 +52,4 @@ pub use outcome::{IntoOutcome, Outcome, Propagation};
 pub use reply::*;
 pub use service::*;
 pub use session::{AskOptions, SessionEvent, SessionKey, SessionPolicy, SessionRegistry};
+pub use standard::*;

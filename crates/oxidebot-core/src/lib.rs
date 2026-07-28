@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod event;
 pub mod interaction;
 pub mod source;
+pub mod template;
 
 mod id;
 #[doc(hidden)]
@@ -80,3 +81,5 @@ pub use source::message::{
     FallbackPolicy, File, Folder, FsNode, IntoMessageSegment, Message, MessageOptions,
     MessageSegment, SegmentKind,
 };
+
+pub use template::*;

@@ -1,20 +1,17 @@
 use crate::{
     command::tokenize_segments,
     function::IntoHandler,
-    handler::{ErasedHandler, RouteScope, RouteSpec},
+    handler::{ErasedHandler, HandlerCall, RouteScope, RouteSpec},
     hooks::{
         After, Before, Endpoint, Guard, GuardDecision, SharedAfter, SharedBefore, SharedGuard,
     },
-    BotHandle, BuildError, Command, CommandCatalog, CommandOutput, CommandParseError,
-    CommandRenderer, CommandResult, Context, DefaultCommandRenderer, Dialogue, Extract,
-    HandlerError, HandlerResult, Outcome, SessionRegistry, ShutdownSignal,
+    BuildError, Command, CommandCatalog, CommandOutput, CommandParseError, CommandResult,
+    CompletionInput, Context, Dialogue, Extract, HandlerError, HandlerResult, Outcome,
+    RewriteInput, SourceSpan,
 };
 use futures_util::future::BoxFuture;
 use oxidebot_core::{
-    event::{
-        kernel::{DispatchEnvelope, DispatchKind},
-        tags, EventTag, EventType,
-    },
+    event::{kernel::DispatchKind, tags, EventTag, EventType},
     interaction::InteractionKind,
     BotIdentity, Event, PlatformId,
 };
@@ -36,6 +33,8 @@ where
     default_scope: RouteScope,
     scope_errors: Vec<String>,
     has_help: bool,
+    runtime_shortcuts: bool,
+    overlays: Vec<crate::CommandOverlay>,
 }
 
 impl<S> Default for Module<S>
@@ -61,6 +60,8 @@ where
             default_scope: RouteScope::global(),
             scope_errors: Vec::new(),
             has_help: false,
+            runtime_shortcuts: false,
+            overlays: Vec::new(),
         }
     }
 
@@ -82,6 +83,7 @@ where
             after: Vec::new(),
             scope: self.default_scope.clone(),
             default_block: false,
+            branch_filter: None,
         });
         self
     }
@@ -109,6 +111,7 @@ where
             after: Vec::new(),
             scope: self.default_scope.clone(),
             default_block: true,
+            branch_filter: None,
         });
         self
     }
@@ -121,6 +124,31 @@ where
         H: IntoHandler<T, S>,
     {
         self.command(C::command(), handler)
+    }
+
+    /// Registers a handler for one statically generated branch of a command tree.
+    /// The command is still parsed once through the shared `CommandMatch`; the
+    /// branch filter is an integer/path comparison, not a second parser.
+    #[must_use]
+    pub fn command_branch<B, H, T>(mut self, _branch: B, handler: H) -> Self
+    where
+        B: crate::CommandBranchTag,
+        H: IntoHandler<T, S>,
+    {
+        self.handlers.push(HandlerDefinition {
+            selector: Selector::Command(<B::Command as crate::command::CommandTree>::command()),
+            endpoint: EndpointKind::Handler(handler.into_endpoint()),
+            guards: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
+            scope: self.default_scope.clone(),
+            default_block: true,
+            branch_filter: Some((
+                B::PATH.iter().map(|value| Arc::from(*value)).collect(),
+                B::MATCH_DESCENDANTS,
+            )),
+        });
+        self
     }
 
     /// Handles one interaction custom identifier.
@@ -137,6 +165,7 @@ where
             after: Vec::new(),
             scope: self.default_scope.clone(),
             default_block: true,
+            branch_filter: None,
         });
         self
     }
@@ -155,6 +184,7 @@ where
             after: Vec::new(),
             scope: self.default_scope.clone(),
             default_block: false,
+            branch_filter: None,
         });
         self
     }
@@ -189,7 +219,30 @@ where
             });
         }
         self.has_help |= other.has_help;
+        self.runtime_shortcuts |= other.runtime_shortcuts;
+        self.overlays.append(&mut other.overlays);
         self.handlers.append(&mut other.handlers);
+        self
+    }
+
+    /// Enables the bounded runtime shortcut registry for this application.
+    /// Added shortcuts select only their owning command IDs before parsing;
+    /// they do not move unrelated commands onto the broad message path.
+    #[must_use]
+    pub const fn runtime_shortcuts(mut self) -> Self {
+        self.runtime_shortcuts = true;
+        self
+    }
+
+    pub(crate) const fn runtime_shortcuts_enabled(&self) -> bool {
+        self.runtime_shortcuts
+    }
+
+    /// Applies a data-only metadata overlay to matching commands regardless of
+    /// whether the overlay is declared before or after included modules.
+    #[must_use]
+    pub fn command_overlay(mut self, overlay: crate::CommandOverlay) -> Self {
+        self.overlays.push(overlay);
         self
     }
 
@@ -267,22 +320,55 @@ where
             after: Vec::new(),
             scope: self.default_scope.clone(),
             default_block: true,
+            branch_filter: None,
         });
         self
     }
 
     #[must_use]
     pub fn catalog(&self) -> CommandCatalog {
+        let mut seen = std::collections::HashSet::new();
         CommandCatalog::scoped(self.handlers.iter().filter_map(|handler| {
             if let Selector::Command(command) = &handler.selector {
-                Some((command.clone(), handler.scope.clone()))
+                let command = self.apply_overlays_to(command.clone());
+                let key = (command.id(), handler.scope.clone());
+                if seen.insert(key) {
+                    Some((command, handler.scope.clone()))
+                } else {
+                    None
+                }
             } else {
                 None
             }
         }))
     }
 
+    fn apply_overlays_to(&self, mut command: Command) -> Command {
+        for overlay in &self.overlays {
+            if overlay.matches(&command) {
+                command = overlay.apply(command);
+            }
+        }
+        command
+    }
+
+    fn apply_overlays(&mut self) {
+        let overlays = self.overlays.clone();
+        for handler in &mut self.handlers {
+            let Selector::Command(command) = &mut handler.selector else {
+                continue;
+            };
+            for overlay in &overlays {
+                if overlay.matches(command) {
+                    *command = overlay.apply(command.clone());
+                }
+            }
+        }
+    }
+
     pub(crate) fn into_handlers(mut self) -> Result<Vec<Arc<dyn ErasedHandler<S>>>, BuildError> {
+        self.apply_overlays();
+        self.overlays.clear();
         if let Some(error) = self.scope_errors.first().cloned() {
             return Err(BuildError::InvalidRoute(error));
         }
@@ -311,6 +397,7 @@ where
                         after: definition.after.into(),
                         command: None,
                         default_block: definition.default_block,
+                        branch_filter: definition.branch_filter.clone(),
                     }));
                 }
                 Selector::Interaction(custom_id) => {
@@ -324,6 +411,7 @@ where
                         after: definition.after.into(),
                         command: None,
                         default_block: definition.default_block,
+                        branch_filter: definition.branch_filter.clone(),
                     }));
                 }
                 Selector::Native(kind) => {
@@ -337,6 +425,7 @@ where
                         after: definition.after.into(),
                         command: None,
                         default_block: definition.default_block,
+                        branch_filter: definition.branch_filter.clone(),
                     }));
                 }
                 Selector::Command(command) => {
@@ -356,6 +445,7 @@ where
                             after: definition.after.clone().into(),
                             command: Some(command.clone()),
                             default_block: definition.default_block,
+                            branch_filter: definition.branch_filter.clone(),
                         }));
                     }
                     output.push(Arc::new(ModuleHandler {
@@ -368,6 +458,7 @@ where
                         after: definition.after.into(),
                         command: Some(command),
                         default_block: definition.default_block,
+                        branch_filter: definition.branch_filter.clone(),
                     }));
                 }
             }
@@ -386,6 +477,7 @@ where
                 after: Arc::from([]),
                 command: None,
                 default_block: true,
+                branch_filter: None,
             }));
         }
         Ok(output)
@@ -443,7 +535,10 @@ where
     let mut globals = HashMap::<Arc<str>, Arc<str>>::new();
     let mut platforms = HashMap::<(PlatformId, Arc<str>), Arc<str>>::new();
     let mut bots = HashMap::<(BotIdentity, Arc<str>), Arc<str>>::new();
-    let commands = commands.collect::<Vec<_>>();
+    let mut seen_commands = std::collections::HashSet::new();
+    let commands = commands
+        .filter(|(command, scope)| seen_commands.insert((command.id(), (*scope).clone())))
+        .collect::<Vec<_>>();
     for (command, _) in &commands {
         command.validate()?;
     }
@@ -559,6 +654,7 @@ where
     after: Vec<SharedAfter<S>>,
     scope: RouteScope,
     default_block: bool,
+    branch_filter: Option<(Arc<[Arc<str>]>, bool)>,
 }
 
 struct ModuleHandler<S>
@@ -574,6 +670,19 @@ where
     after: Arc<[SharedAfter<S>]>,
     command: Option<Command>,
     default_block: bool,
+    branch_filter: Option<(Arc<[Arc<str>]>, bool)>,
+}
+
+fn bind_delivery<S>(context: &Context<S>, outcome: Outcome) -> Outcome
+where
+    S: Send + Sync + 'static,
+{
+    let pipeline: Arc<dyn crate::authoring::ErasedDeliveryPipeline> =
+        Arc::new(crate::authoring::BoundDeliveryPipeline {
+            runtime: context.authoring_arc(),
+            context: context.clone(),
+        });
+    outcome.with_delivery_pipeline(pipeline)
 }
 
 impl<S> ErasedHandler<S> for ModuleHandler<S>
@@ -596,39 +705,81 @@ where
         self.default_block
     }
 
-    fn call(
-        &self,
-        event: Arc<DispatchEnvelope>,
-        state: Arc<S>,
-        bot: BotHandle,
-        sessions: SessionRegistry,
-        shutdown: ShutdownSignal,
-    ) -> BoxFuture<'static, HandlerResult<Outcome>> {
+    fn command_id(&self) -> Option<crate::CommandId> {
+        self.command.as_ref().map(Command::id)
+    }
+
+    fn call(&self, call: HandlerCall<S>) -> BoxFuture<'static, HandlerResult<Outcome>> {
+        let HandlerCall {
+            event,
+            state,
+            bot,
+            sessions,
+            shutdown,
+            authoring,
+            command_input,
+        } = call;
         let endpoint = Arc::clone(&self.endpoint);
         let guards = Arc::clone(&self.guards);
         let before = Arc::clone(&self.before);
         let after = Arc::clone(&self.after);
         let command = self.command.clone();
+        let branch_filter = self.branch_filter.clone();
 
         Box::pin(async move {
+            let base_context = Context::new(
+                Arc::clone(&event),
+                Arc::clone(&state),
+                bot.clone(),
+                sessions.clone(),
+                shutdown.clone(),
+                None,
+                Arc::clone(&authoring),
+            );
             let command = if let Some(command) = command {
-                match match_command_event(&command, event.event()) {
+                if !authoring.registry.is_enabled(command.id()) {
+                    return Ok(Outcome::continue_());
+                }
+                match match_command_event(
+                    &command,
+                    event.event(),
+                    &base_context,
+                    command_input.as_deref(),
+                )
+                .await
+                {
                     Ok(Some(result)) => Some(result),
                     Ok(None) => return Ok(Outcome::continue_()),
-                    Err(error) => {
-                        return Ok(command_parse_outcome(
-                            &command,
-                            &[],
-                            error,
-                            event_locale(event.event()),
-                        ));
+                    Err(CommandEventError::Parse(error)) => {
+                        let outcome =
+                            command_parse_outcome(&base_context, &command, &[], error).await?;
+                        return Ok(bind_delivery(&base_context, outcome));
                     }
+                    Err(CommandEventError::Handler(error)) => return Err(error),
                 }
             } else {
                 None
             };
+            if let (Some((filter, descendants)), Some(command)) = (&branch_filter, &command) {
+                let matches = if *descendants {
+                    command.branch_names().len() >= filter.len()
+                        && command
+                            .branch_names()
+                            .iter()
+                            .take(filter.len())
+                            .zip(filter.iter())
+                            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+                } else {
+                    let expected = filter.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+                    command.is_branch(&expected)
+                };
+                if !matches {
+                    return Ok(Outcome::continue_());
+                }
+            }
 
-            let mut context = Context::new(event, state, bot, sessions, shutdown, command);
+            let mut context =
+                Context::new(event, state, bot, sessions, shutdown, command, authoring);
 
             // Admission runs before interactive completion. An unauthorized or
             // rate-limited user must never be prompted for missing arguments.
@@ -637,15 +788,26 @@ where
                     GuardDecision::Allow => {}
                     GuardDecision::Skip => return Ok(Outcome::continue_()),
                     GuardDecision::Deny(outcome) => {
-                        return Ok(outcome.with_propagation(crate::Propagation::Stop));
+                        return Ok(bind_delivery(
+                            &context,
+                            outcome.with_propagation(crate::Propagation::Stop),
+                        ));
                     }
                 }
             }
 
+            if let Some((input, cursor)) = explicit_completion_input(context.event()) {
+                if context.command().is_some() {
+                    let outcome = command_completion_outcome(&context, &input, cursor).await?;
+                    return Ok(bind_delivery(&context, outcome));
+                }
+            }
             if context.command().is_some() {
-                match prepare_command(context).await? {
+                match prepare_command(context.clone()).await? {
                     CommandPreparation::Ready(ready) => context = ready,
-                    CommandPreparation::Respond(outcome) => return Ok(outcome),
+                    CommandPreparation::Respond(outcome) => {
+                        return Ok(bind_delivery(&context, outcome));
+                    }
                 }
             }
             for hook in before.iter() {
@@ -656,7 +818,7 @@ where
             for hook in after.iter() {
                 outcome = hook.call(context.clone(), outcome).await?;
             }
-            Ok(outcome)
+            Ok(bind_delivery(&context, outcome))
         })
     }
 }
@@ -674,18 +836,18 @@ where
     S: Send + Sync + 'static,
 {
     fn call(&self, context: Context<S>) -> BoxFuture<'static, HandlerResult<Outcome>> {
-        let catalog = self.catalog.for_identity(context.bot_identity());
+        let catalog = self
+            .catalog
+            .for_identity(context.bot_identity())
+            .enabled(&context.authoring().registry);
         let query = context
             .command()
             .map(|command| command.text_values().collect::<Vec<_>>().join(" "))
             .filter(|query| !query.is_empty());
-        let locale = context
-            .command()
-            .and_then(CommandResult::locale)
-            .map(ToOwned::to_owned)
-            .or_else(|| event_locale(context.event()).map(ToOwned::to_owned));
         Box::pin(async move {
-            Ok(Outcome::new().reply(catalog.render_message(query.as_deref(), locale.as_deref())))
+            let output = catalog.output(query.as_deref());
+            let message = context.authoring().render(&context, output).await?;
+            Ok(Outcome::new().reply(message))
         })
     }
 }
@@ -703,7 +865,10 @@ where
     S: Send + Sync + 'static,
 {
     fn call(&self, context: Context<S>) -> BoxFuture<'static, HandlerResult<Outcome>> {
-        let catalog = self.catalog.for_identity(context.bot_identity());
+        let catalog = self
+            .catalog
+            .for_identity(context.bot_identity())
+            .enabled(&context.authoring().registry);
         Box::pin(async move {
             let Event::LifecycleEvent(oxidebot_core::event::LifecycleEvent::SuggestionRequested(
                 request,
@@ -712,7 +877,42 @@ where
                 return Ok(Outcome::continue_());
             };
             let request = request.clone();
-            let suggestions = catalog.native_suggestions(&request);
+            let mut suggestions = catalog.native_suggestions(&request);
+            let command = request
+                .command_id
+                .as_deref()
+                .and_then(|id| catalog.find_by_id(id))
+                .or_else(|| {
+                    request
+                        .command_name
+                        .as_deref()
+                        .and_then(|name| catalog.find(name))
+                });
+            if let (Some(command), Some(field)) = (command, request.field_id.as_deref()) {
+                let field = field
+                    .trim_start_matches("oxidebot:")
+                    .parse::<u32>()
+                    .ok()
+                    .map(crate::CommandFieldId);
+                if let Some(field) = field {
+                    let input = CompletionInput {
+                        command: command.clone(),
+                        field,
+                        partial: Arc::from(request.query.as_str()),
+                        replace: SourceSpan::default(),
+                        locale: request.locale.as_deref().map(Arc::from),
+                        limit: request.limit.unwrap_or(25).min(100) as usize,
+                    };
+                    let dynamic = context.authoring().complete(&context, input).await?;
+                    let offset = suggestions.len();
+                    suggestions.extend(
+                        dynamic.into_iter().enumerate().map(|(index, item)| {
+                            item.into_suggestion(offset.saturating_add(index))
+                        }),
+                    );
+                    suggestions.truncate(request.limit.unwrap_or(25).min(100) as usize);
+                }
+            }
             context
                 .bot()?
                 .answer_suggestion_request(request, suggestions, None)
@@ -721,6 +921,81 @@ where
             Ok(Outcome::stop())
         })
     }
+}
+
+fn explicit_completion_input(event: &Event) -> Option<(String, usize)> {
+    let Event::MessageEvent(message) = event else {
+        return None;
+    };
+    let raw = message.message.get_raw_text();
+    let trimmed = raw.trim_end();
+    let input = trimmed.strip_suffix('?')?;
+    if !input.chars().last().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let input = input.trim_end().to_owned();
+    let cursor = input.len();
+    Some((input, cursor))
+}
+
+async fn command_completion_outcome<S>(
+    context: &Context<S>,
+    input: &str,
+    cursor: usize,
+) -> HandlerResult<Outcome>
+where
+    S: Send + Sync + 'static,
+{
+    let Some(result) = context.command() else {
+        return Ok(Outcome::continue_());
+    };
+    let locale = context.authoring().locale(context).await;
+    let mut items = result.command().suggest(input, cursor, locale.as_deref());
+    let dynamic_fields = items
+        .iter()
+        .filter_map(|item| item.field_id.map(|field| (field, item.replace)))
+        .collect::<Vec<_>>();
+    for (field, replace) in dynamic_fields {
+        let partial = input
+            .get(replace.start.min(input.len())..replace.end.min(input.len()))
+            .unwrap_or_default();
+        let mut dynamic = context
+            .authoring()
+            .complete(
+                context,
+                CompletionInput {
+                    command: result.command().clone(),
+                    field,
+                    partial: Arc::from(partial),
+                    replace,
+                    locale: locale.clone(),
+                    limit: 25,
+                },
+            )
+            .await?;
+        items.append(&mut dynamic);
+    }
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert((item.value.clone(), item.replace.start, item.replace.end)));
+    items.truncate(25);
+    let output = if items.is_empty() {
+        CommandOutput::Message(oxidebot_core::Message::text(
+            if locale
+                .as_deref()
+                .is_some_and(|value| value.to_ascii_lowercase().starts_with("zh"))
+            {
+                "当前输入位置没有可用补全"
+            } else {
+                "No completions are available at the current input position"
+            },
+        ))
+    } else {
+        CommandOutput::Suggestions {
+            items: items.into(),
+        }
+    };
+    let message = context.authoring().render(context, output).await?;
+    Ok(Outcome::stop().reply(message))
 }
 
 // The ready context is consumed immediately by the dispatcher, so boxing it
@@ -734,7 +1009,7 @@ where
     Respond(Outcome),
 }
 
-async fn prepare_command<S>(mut context: Context<S>) -> Result<CommandPreparation<S>, HandlerError>
+async fn prepare_command<S>(context: Context<S>) -> Result<CommandPreparation<S>, HandlerError>
 where
     S: Send + Sync + 'static,
 {
@@ -744,21 +1019,20 @@ where
 
     match result.parse_active() {
         Ok(arguments) => {
-            context.command = Some(result.with_parsed(arguments));
-            return Ok(CommandPreparation::Ready(context));
+            return finalize_command(context, result, arguments).await;
         }
         Err(error) if error.missing_prompt().is_none() => {
-            return Ok(CommandPreparation::Respond(command_match_error_outcome(
-                &result, error,
-            )));
+            return Ok(CommandPreparation::Respond(
+                command_match_error_outcome(&context, &result, error).await?,
+            ));
         }
         Err(error)
             if result.completion_ref().is_none()
                 || matches!(result.source(), crate::CommandSource::Native(_)) =>
         {
-            return Ok(CommandPreparation::Respond(command_match_error_outcome(
-                &result, error,
-            )));
+            return Ok(CommandPreparation::Respond(
+                command_match_error_outcome(&context, &result, error).await?,
+            ));
         }
         Err(_) => {}
     }
@@ -781,21 +1055,55 @@ where
     for _ in 0..completion.max_rounds {
         let error = match result.parse_active() {
             Ok(arguments) => {
-                context.command = Some(result.with_parsed(arguments));
-                return Ok(CommandPreparation::Ready(context));
+                return finalize_command(context, result, arguments).await;
             }
             Err(error) => error,
         };
         let Some(prompt) = error.missing_prompt() else {
-            return Ok(CommandPreparation::Respond(command_match_error_outcome(
-                &result, error,
-            )));
+            return Ok(CommandPreparation::Respond(
+                command_match_error_outcome(&context, &result, error).await?,
+            ));
         };
         let missing_name = error
             .missing_name()
             .expect("a missing prompt always belongs to a missing argument")
             .to_owned();
-        let response = dialogue.ask_message(prompt).await?;
+        let mut prompt_message = oxidebot_core::Message::text(prompt);
+        if let Some(argument) = result
+            .schema()
+            .find(&missing_name)
+            .filter(|argument| argument.is_autocomplete())
+        {
+            let locale = context.authoring().locale(&context).await;
+            let dynamic = context
+                .authoring()
+                .complete(
+                    &context,
+                    CompletionInput {
+                        command: result.command().clone(),
+                        field: argument.id(),
+                        partial: Arc::from(""),
+                        replace: SourceSpan::default(),
+                        locale,
+                        limit: 12,
+                    },
+                )
+                .await?;
+            if !dynamic.is_empty() {
+                let suggestions = context
+                    .authoring()
+                    .render(
+                        &context,
+                        CommandOutput::Suggestions {
+                            items: dynamic.into(),
+                        },
+                    )
+                    .await?;
+                prompt_message = prompt_message.then("\n");
+                prompt_message.extend(suggestions.segments);
+            }
+        }
+        let response = dialogue.ask_message(prompt_message).await?;
         let Event::MessageEvent(message) = response.event() else {
             return Err(HandlerError::internal(
                 "command completion received a non-message event",
@@ -803,51 +1111,109 @@ where
         };
         let raw_text = message.message.get_raw_text();
         if completion.is_cancelled(&raw_text) {
-            return Ok(CommandPreparation::Respond(command_match_error_outcome(
-                &result,
-                CommandParseError::Cancelled,
-            )));
+            return Ok(CommandPreparation::Respond(
+                command_match_error_outcome(&context, &result, CommandParseError::Cancelled)
+                    .await?,
+            ));
         }
         let values = match tokenize_segments(&message.message.segments) {
             Ok(values) => values,
             Err(error) => {
-                return Ok(CommandPreparation::Respond(command_match_error_outcome(
-                    &result, error,
-                )));
+                return Ok(CommandPreparation::Respond(
+                    command_match_error_outcome(&context, &result, error).await?,
+                ));
             }
         };
         result = result.with_answer(&missing_name, values);
     }
 
     match result.parse_active() {
-        Ok(arguments) => {
-            context.command = Some(result.with_parsed(arguments));
-            Ok(CommandPreparation::Ready(context))
-        }
+        Ok(arguments) => finalize_command(context, result, arguments).await,
         Err(error) if error.missing_prompt().is_some() => Ok(CommandPreparation::Respond(
-            command_match_error_outcome(&result, CommandParseError::CompletionExhausted),
+            command_match_error_outcome(&context, &result, CommandParseError::CompletionExhausted)
+                .await?,
         )),
-        Err(error) => Ok(CommandPreparation::Respond(command_match_error_outcome(
-            &result, error,
-        ))),
+        Err(error) => Ok(CommandPreparation::Respond(
+            command_match_error_outcome(&context, &result, error).await?,
+        )),
     }
 }
 
-fn match_command_event(
+enum CommandEventError {
+    Parse(CommandParseError),
+    Handler(HandlerError),
+}
+
+impl From<CommandParseError> for CommandEventError {
+    fn from(value: CommandParseError) -> Self {
+        Self::Parse(value)
+    }
+}
+
+impl From<HandlerError> for CommandEventError {
+    fn from(value: HandlerError) -> Self {
+        Self::Handler(value)
+    }
+}
+
+async fn match_command_event<S>(
     command: &Command,
     event: &Event,
-) -> Result<Option<CommandResult>, CommandParseError> {
+    context: &Context<S>,
+    command_input: Option<&tokio::sync::OnceCell<RewriteInput>>,
+) -> Result<Option<CommandResult>, CommandEventError>
+where
+    S: Send + Sync + 'static,
+{
     match event {
-        Event::MessageEvent(message) => command.match_event(message),
+        Event::MessageEvent(message_event) => {
+            let shortcuts = context.authoring().registry.runtime_shortcuts(command.id());
+            if let Some(command_input) = command_input {
+                let input = command_input
+                    .get_or_try_init(|| async {
+                        let mut message = explicit_completion_input(event)
+                            .map(|(input, _)| oxidebot_core::Message::text(input))
+                            .unwrap_or_else(|| message_event.message.clone());
+                        for normalizer in context.authoring().normalizers.iter() {
+                            message = normalizer.normalize(context, message).await?;
+                        }
+                        let mut input = RewriteInput {
+                            message,
+                            locale: event_locale(event).map(Arc::from),
+                        };
+                        for rewriter in context.authoring().rewriters.iter() {
+                            input = rewriter.rewrite(context, input).await?;
+                        }
+                        Ok::<RewriteInput, HandlerError>(input)
+                    })
+                    .await?;
+                return command
+                    .match_message_with_shortcuts(&input.message, &shortcuts)
+                    .map(|matched| matched.map(|matched| matched.with_locale(input.locale.clone())))
+                    .map_err(Into::into);
+            }
+            let input = RewriteInput {
+                message: explicit_completion_input(event)
+                    .map(|(input, _)| oxidebot_core::Message::text(input))
+                    .unwrap_or_else(|| message_event.message.clone()),
+                locale: event_locale(event).map(Arc::from),
+            };
+            command
+                .match_message_with_shortcuts(&input.message, &shortcuts)
+                .map(|matched| matched.map(|matched| matched.with_locale(input.locale)))
+                .map_err(Into::into)
+        }
         Event::InteractionEvent(interaction)
             if interaction.kind == InteractionKind::Command && interaction.command.is_some() =>
         {
-            command.match_invocation(
-                interaction
-                    .command
-                    .as_ref()
-                    .expect("guarded interaction command exists"),
-            )
+            command
+                .match_invocation(
+                    interaction
+                        .command
+                        .as_ref()
+                        .expect("guarded interaction command exists"),
+                )
+                .map_err(Into::into)
         }
         _ => Ok(None),
     }
@@ -864,25 +1230,48 @@ fn event_locale(event: &Event) -> Option<&str> {
     }
 }
 
-fn command_match_error_outcome(result: &CommandResult, error: CommandParseError) -> Outcome {
-    command_parse_outcome(
-        result.command(),
-        result.branch_names(),
-        error,
-        result.locale(),
-    )
+async fn finalize_command<S>(
+    mut context: Context<S>,
+    result: CommandResult,
+    arguments: crate::ParsedArguments,
+) -> Result<CommandPreparation<S>, HandlerError>
+where
+    S: Send + Sync + 'static,
+{
+    let parsed = result.with_parsed(arguments);
+    let parsed = context
+        .authoring()
+        .apply_command_middleware(&context, parsed)
+        .await?;
+    context.command = Some(parsed);
+    Ok(CommandPreparation::Ready(context))
 }
 
-fn command_parse_outcome(
+async fn command_match_error_outcome<S>(
+    context: &Context<S>,
+    result: &CommandResult,
+    error: CommandParseError,
+) -> Result<Outcome, HandlerError>
+where
+    S: Send + Sync + 'static,
+{
+    command_parse_outcome(context, result.command(), result.branch_names(), error).await
+}
+
+async fn command_parse_outcome<S>(
+    context: &Context<S>,
     command: &Command,
     branch_names: &[Arc<str>],
     error: CommandParseError,
-    locale: Option<&str>,
-) -> Outcome {
+) -> Result<Outcome, HandlerError>
+where
+    S: Send + Sync + 'static,
+{
     let output = CommandOutput::ParseError {
         command: command.clone(),
         branch_names: branch_names.to_vec().into(),
         error,
     };
-    Outcome::stop().reply(DefaultCommandRenderer.render(&output, locale))
+    let message = context.authoring().render(context, output).await?;
+    Ok(Outcome::stop().reply(message))
 }

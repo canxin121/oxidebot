@@ -1,5 +1,6 @@
+use crate::authoring::ErasedDeliveryPipeline;
 use oxidebot_core::source::message::{Message, MessageSegment};
-use std::{borrow::Cow, convert::Infallible};
+use std::{borrow::Cow, convert::Infallible, fmt, sync::Arc};
 
 /// Whether one handler inherits or overrides its kind's normal event flow.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -19,10 +20,22 @@ pub enum Propagation {
 /// handler's normal propagation policy. Commands and interactions stop by
 /// default; ordinary event observers continue by default. Returning a message
 /// controls the reply only, rather than secretly changing event flow.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Outcome {
     pub(crate) propagation: Propagation,
     pub(crate) replies: Vec<Message>,
+    pub(crate) delivery: Option<Arc<dyn ErasedDeliveryPipeline>>,
+}
+
+impl fmt::Debug for Outcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Outcome")
+            .field("propagation", &self.propagation)
+            .field("replies", &self.replies)
+            .field("has_delivery_context", &self.delivery.is_some())
+            .finish()
+    }
 }
 
 impl Outcome {
@@ -32,6 +45,7 @@ impl Outcome {
         Self {
             propagation: Propagation::Inherit,
             replies: Vec::new(),
+            delivery: None,
         }
     }
 
@@ -41,6 +55,7 @@ impl Outcome {
         Self {
             propagation: Propagation::Continue,
             replies: Vec::new(),
+            delivery: None,
         }
     }
 
@@ -50,6 +65,7 @@ impl Outcome {
         Self {
             propagation: Propagation::Stop,
             replies: Vec::new(),
+            delivery: None,
         }
     }
 
@@ -87,6 +103,9 @@ impl Outcome {
             self.propagation = next.propagation;
         }
         self.replies.append(&mut next.replies);
+        if next.delivery.is_some() {
+            self.delivery = next.delivery.take();
+        }
         self
     }
 
@@ -94,6 +113,18 @@ impl Outcome {
     pub const fn with_propagation(mut self, propagation: Propagation) -> Self {
         self.propagation = propagation;
         self
+    }
+
+    pub(crate) fn with_delivery_pipeline(
+        mut self,
+        pipeline: Arc<dyn ErasedDeliveryPipeline>,
+    ) -> Self {
+        self.delivery = Some(pipeline);
+        self
+    }
+
+    pub(crate) fn delivery_pipeline(&self) -> Option<Arc<dyn ErasedDeliveryPipeline>> {
+        self.delivery.as_ref().map(Arc::clone)
     }
 
     pub(crate) const fn resolve(mut self, default_stop: bool) -> Self {

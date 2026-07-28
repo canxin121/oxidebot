@@ -292,7 +292,12 @@ where
         let target = reply_target(context.event())
             .ok_or_else(|| ExtractError::new("this event has no natural reply target"))?;
         let reply_to = context.message().map(|event| event.message.id.clone());
-        Ok(Self::new(api, target, reply_to))
+        let pipeline: Arc<dyn crate::authoring::ErasedDeliveryPipeline> =
+            Arc::new(crate::authoring::BoundDeliveryPipeline {
+                runtime: context.authoring_arc(),
+                context: context.clone(),
+            });
+        Ok(Self::new(api, target, reply_to, Some(pipeline)))
     }
 }
 
@@ -403,6 +408,10 @@ where
         conversation,
         actor,
         target,
+        Some(Arc::new(crate::authoring::BoundDeliveryPipeline {
+            runtime: context.authoring_arc(),
+            context: context.clone(),
+        })),
     ))
 }
 

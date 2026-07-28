@@ -1,11 +1,10 @@
-use crate::handler::RouteScope;
+use crate::{handler::RouteScope, Shortcut};
 use oxidebot_core::{
     application::{
         CommandChoice, CommandContext, CommandDefinition, CommandInvocation, CommandKind,
         CommandOption, CommandOptionType, Localized, Suggestion, SuggestionRequest,
     },
     conversation::{ConversationKind, ConversationRef},
-    event::MessageEvent,
     source::{
         message::{File, Message, MessageSegment},
         user::User,
@@ -410,6 +409,7 @@ pub struct Command {
     schema: Option<CommandSchema>,
     branches: Vec<CommandBranch>,
     completion: Option<CompletionConfig>,
+    shortcuts: Vec<Shortcut>,
 }
 
 /// Creates a command using `/` as its prefix.
@@ -435,6 +435,7 @@ impl Command {
             schema: None,
             branches: Vec::new(),
             completion: None,
+            shortcuts: Vec::new(),
         }
     }
 
@@ -538,6 +539,17 @@ impl Command {
     }
 
     #[must_use]
+    pub fn shortcut(mut self, shortcut: Shortcut) -> Self {
+        self.shortcuts.push(shortcut);
+        self
+    }
+
+    #[must_use]
+    pub fn shortcuts(&self) -> &[Shortcut] {
+        &self.shortcuts
+    }
+
+    #[must_use]
     pub fn subcommand(mut self, mut branch: CommandBranch) -> Self {
         branch.rebase(&format!("{}.{}", self.name, branch.name));
         self.branches.push(branch);
@@ -596,6 +608,19 @@ impl Command {
         self.completion.as_ref()
     }
 
+    /// Resolves a deterministic field ID from the same command tree used by
+    /// parsing, help, completion, and platform-native publication.
+    #[must_use]
+    pub fn field_id(&self, branch: &[&str], field: &str) -> Option<CommandFieldId> {
+        let branch_names = branch
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>();
+        self.schema_for_branch_names(&branch_names)
+            .find(field)
+            .map(ArgumentSpec::id)
+    }
+
     #[must_use]
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -605,6 +630,23 @@ impl Command {
     pub fn display_name(&self) -> String {
         let prefix = self.prefixes.first().map_or("", AsRef::as_ref);
         format!("{prefix}{}", self.name)
+    }
+
+    /// Stable-in-process structural fingerprint used to ensure one public
+    /// command ID never refers to different parser grammars in the shared
+    /// registry. Presentation-only metadata is intentionally excluded.
+    pub(crate) fn structural_fingerprint(&self) -> u64 {
+        let structure = format!(
+            "aliases={:?};prefixes={:?};case={};schema={:?};branches={:?};completion={:?};shortcuts={:?}",
+            self.aliases,
+            self.prefixes,
+            self.case_sensitive,
+            self.schema,
+            self.branches,
+            self.completion,
+            self.shortcuts,
+        );
+        stable_hash(structure.as_bytes())
     }
 
     /// Canonical root names used to reject ambiguous registrations across
@@ -697,6 +739,24 @@ impl Command {
                 return Err(format!(
                     "command `{}` contains a duplicate prefix",
                     self.name
+                ));
+            }
+        }
+
+        if self.shortcuts.len() > 256 {
+            return Err(format!(
+                "command `{}` contains more than 256 shortcuts",
+                self.name
+            ));
+        }
+        let mut shortcut_patterns = HashSet::new();
+        for shortcut in &self.shortcuts {
+            let identity = (shortcut.is_regex(), shortcut.pattern_text().to_owned());
+            if !shortcut_patterns.insert(identity) {
+                return Err(format!(
+                    "command `{}` contains a duplicate shortcut `{}`",
+                    self.name,
+                    shortcut.pattern_text(),
                 ));
             }
         }
@@ -794,12 +854,29 @@ impl Command {
         Some(keys)
     }
 
-    pub(crate) fn match_event(
+    pub(crate) fn match_message_with_shortcuts(
         &self,
-        event: &MessageEvent,
+        message: &Message,
+        runtime_shortcuts: &[Shortcut],
     ) -> Result<Option<CommandMatch>, CommandParseError> {
-        let tokens = tokenize_segments(&event.message.segments)?;
-        Ok(self.match_tokens(tokens))
+        let tokens = tokenize_segments(&message.segments)?;
+        if let Some(result) = self.match_tokens(tokens) {
+            return Ok(Some(result));
+        }
+        let input = message.extract_plain_text();
+        for shortcut in self.shortcuts.iter().chain(runtime_shortcuts) {
+            let Some(rewritten) = shortcut.rewrite(&input) else {
+                continue;
+            };
+            let tokens = tokenize_text(&rewritten)?
+                .into_iter()
+                .map(CommandValue::Text)
+                .collect();
+            if let Some(result) = self.match_tokens(tokens) {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
     }
 
     fn match_tokens(&self, tokens: Vec<CommandValue>) -> Option<CommandMatch> {
@@ -1184,7 +1261,7 @@ impl CompletionItem {
         self
     }
 
-    fn into_suggestion(self, index: usize) -> Suggestion {
+    pub(crate) fn into_suggestion(self, index: usize) -> Suggestion {
         Suggestion {
             id: format!("oxidebot-completion-{index}"),
             title: self.display.get_raw_text(),
@@ -2645,6 +2722,11 @@ impl CommandMatch {
         self.locale.as_deref()
     }
 
+    pub(crate) fn with_locale(mut self, locale: Option<Arc<str>>) -> Self {
+        self.locale = locale;
+        self
+    }
+
     #[must_use]
     pub fn branch_path(&self) -> &[CommandNodeId] {
         &self.branch_path
@@ -2653,6 +2735,37 @@ impl CommandMatch {
     #[must_use]
     pub fn branch_names(&self) -> &[Arc<str>] {
         &self.branch_names
+    }
+
+    /// Returns a lightweight owned view with leading command-tree branches
+    /// removed. Parsed values and the active schema remain shared.
+    #[must_use]
+    pub fn descend(&self, levels: usize) -> Self {
+        let branch_path = self
+            .branch_path
+            .iter()
+            .skip(levels)
+            .copied()
+            .collect::<Vec<_>>();
+        let branch_names = self
+            .branch_names
+            .iter()
+            .skip(levels)
+            .cloned()
+            .collect::<Vec<_>>();
+        Self {
+            command: self.command.clone(),
+            invoked_as: Arc::clone(&self.invoked_as),
+            prefix: Arc::clone(&self.prefix),
+            branch_path: branch_path.into(),
+            branch_names: branch_names.into(),
+            values: Arc::clone(&self.values),
+            schema: Arc::clone(&self.schema),
+            parsed: self.parsed.clone(),
+            completion: self.completion.clone(),
+            source: self.source.clone(),
+            locale: self.locale.clone(),
+        }
     }
 
     #[must_use]
@@ -3441,6 +3554,15 @@ pub trait CommandRenderer: Send + Sync + 'static {
     fn render(&self, output: &CommandOutput, locale: Option<&str>) -> Message;
 }
 
+impl<F> CommandRenderer for F
+where
+    F: Fn(&CommandOutput, Option<&str>) -> Message + Send + Sync + 'static,
+{
+    fn render(&self, output: &CommandOutput, locale: Option<&str>) -> Message {
+        (self)(output, locale)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultCommandRenderer;
 
@@ -3572,6 +3694,22 @@ impl CommandCatalog {
                         || normalize_native_name(alias).eq_ignore_ascii_case(name)
                 })
         })
+    }
+
+    #[must_use]
+    pub fn enabled(&self, registry: &crate::CommandRegistry) -> Self {
+        let mut commands = Vec::new();
+        let mut scopes = Vec::new();
+        for (command, scope) in self.commands.iter().zip(self.scopes.iter()) {
+            if registry.is_enabled(command.id()) {
+                commands.push(command.clone());
+                scopes.push(scope.clone());
+            }
+        }
+        Self {
+            commands: commands.into(),
+            scopes: scopes.into(),
+        }
     }
 
     #[must_use]

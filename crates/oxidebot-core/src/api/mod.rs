@@ -111,9 +111,21 @@ pub trait CallApiTrait: Send + Sync {
         policy: FallbackPolicy,
     ) -> Result<DeliveryReport> {
         let plan = self.plan_outgoing_message(&message, policy)?;
+        self.send_delivery_plan(target, plan).await
+    }
+
+    /// Executes a previously inspected or middleware-transformed delivery plan.
+    /// This is the shared transport boundary used by the runtime delivery
+    /// pipeline, previews, strict delivery, and legacy adapter compatibility.
+    async fn send_delivery_plan(
+        &self,
+        target: MessageTarget,
+        plan: DeliveryPlan,
+    ) -> Result<DeliveryReport> {
         let legacy_target = legacy_send_target(&target)?;
         let conversation = target.conversation.clone();
         let mut references = Vec::new();
+        let degradations = plan.degradations;
 
         for physical in plan.messages {
             let (segments, options) = physical.try_into_legacy()?;
@@ -127,7 +139,7 @@ pub trait CallApiTrait: Send + Sync {
 
         Ok(DeliveryReport {
             messages: references,
-            degradations: plan.degradations,
+            degradations,
         })
     }
 

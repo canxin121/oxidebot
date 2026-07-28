@@ -1,4 +1,4 @@
-use crate::HandlerError;
+use crate::{authoring::ErasedDeliveryPipeline, HandlerError};
 use oxidebot_core::{
     collaboration::{Reaction, ReactionOptions},
     conversation::{MessageRef, MessageTarget},
@@ -39,15 +39,22 @@ pub struct Reply {
     target: MessageTarget,
     reply_to: Option<String>,
     fallback: FallbackPolicy,
+    pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
 }
 
 impl Reply {
-    pub(crate) fn new(api: BotObject, target: MessageTarget, reply_to: Option<String>) -> Self {
+    pub(crate) fn new(
+        api: BotObject,
+        target: MessageTarget,
+        reply_to: Option<String>,
+        pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
+    ) -> Self {
         Self {
             api,
             target,
             reply_to,
             fallback: FallbackPolicy::Auto,
+            pipeline,
         }
     }
 
@@ -81,15 +88,21 @@ impl Reply {
                 message = message.reply_to(message_id.clone());
             }
         }
-        let report = self
-            .api
-            .send_outgoing_message_with(self.target.clone(), message, self.fallback)
-            .await
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
+        let report = if let Some(pipeline) = &self.pipeline {
+            pipeline
+                .deliver(&self.api, self.target.clone(), message, self.fallback)
+                .await?
+        } else {
+            self.api
+                .send_outgoing_message_with(self.target.clone(), message, self.fallback)
+                .await
+                .map_err(|error| HandlerError::Api(error.to_string()))?
+        };
         Ok(Receipt {
             api: Arc::clone(&self.api),
             target: self.target.clone(),
             report: Arc::new(report),
+            pipeline: self.pipeline.clone(),
         })
     }
 }
@@ -113,6 +126,7 @@ pub struct Receipt {
     api: BotObject,
     target: MessageTarget,
     report: Arc<DeliveryReport>,
+    pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
 }
 
 impl Receipt {
@@ -164,15 +178,27 @@ impl Receipt {
     }
 
     pub async fn send(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
-        let report = self
-            .api
-            .send_outgoing_message_with(self.target.clone(), message.into(), FallbackPolicy::Auto)
-            .await
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
+        let message = message.into();
+        let report = if let Some(pipeline) = &self.pipeline {
+            pipeline
+                .deliver(
+                    &self.api,
+                    self.target.clone(),
+                    message,
+                    FallbackPolicy::Auto,
+                )
+                .await?
+        } else {
+            self.api
+                .send_outgoing_message_with(self.target.clone(), message, FallbackPolicy::Auto)
+                .await
+                .map_err(|error| HandlerError::Api(error.to_string()))?
+        };
         Ok(Self {
             api: Arc::clone(&self.api),
             target: self.target.clone(),
             report: Arc::new(report),
+            pipeline: self.pipeline.clone(),
         })
     }
 

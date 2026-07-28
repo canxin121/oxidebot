@@ -19,8 +19,10 @@ anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+mime_guess.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt", "time"] }
 tracing.workspace = true

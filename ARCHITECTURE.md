@@ -16,17 +16,22 @@ decoded event payload is retained once and shared by every candidate through
 The public pipeline is:
 
 ```text
-Module match
+Module candidate match
 -> Context<S>
+-> MessageNormalizer / CommandRewriter
+-> one command-tree parse
 -> guards
--> command validation / optional completion
+-> CommandMiddleware / optional static or dynamic completion
 -> before hooks
--> synchronous Extract<S>
+-> synchronous Extract<S> / Args<T> / BranchArgs<B>
 -> ordinary async function
 -> IntoOutcome
 -> after hooks
+-> CommandOutputMiddleware / CommandRenderer where applicable
 -> handler-kind blocking default
--> canonical API effects
+-> DeliveryMiddleware
+-> capability-aware DeliveryPlan
+-> adapter transport / DeliveryReport
 ```
 
 `Context<S>` is the single common runtime view. It contains shared handles to:
@@ -71,8 +76,10 @@ Routes use existing indexes:
 - exact `EventType` handlers enter the stable 53-slot dense table;
 - normal `/name` commands enter the exact command-root table;
 - interaction IDs and platform-native names enter exact hash tables;
-- custom-prefix, no-prefix, or case-insensitive commands enter the broad message
-  candidate slot and perform a full match only after admission.
+- custom-prefix, no-prefix, case-insensitive commands, and applications with
+  arbitrary message normalization or command rewriting enter the broad message
+  candidate slot and perform a full match only after admission; static/runtime
+  shortcuts instead select only their owning command IDs before parsing.
 
 Global, platform, and bot-scoped candidate slices are merged by monotonically
 assigned route ID. Registration order is preserved without allocating a
@@ -190,3 +197,31 @@ Ingress, executor, session, and API command queues enforce item and retained-byt
 budgets. Global and per-bot permits are acquired together. Session namespaces,
 route keys, decoded envelopes, raw payloads, completion rounds, and handler
 reply counts are bounded or validated before downstream work.
+
+## Frozen authoring extensions
+
+Message normalization, command rewriting, parsed-command transformation, output
+rendering, locale resolution, dynamic completion, and delivery transformation
+are narrow traits stored in `AuthoringRuntime<S>`. The application builder
+freezes them before adapters start. Ordinary async functions implement these
+traits through ownership-based blanket implementations, so extension code does
+not borrow a transient request object or require dynamic parameter injection.
+
+Runtime shortcuts and command enablement live in a bounded `CommandRegistry`.
+Its revision is explicit, and native command publication is refreshed after an
+enablement change. Static shortcuts opt only matching command IDs into dynamic
+candidate lookup; arbitrary rewriters or normalizers deliberately select the
+broader message candidate path. Both remain cold paths and preserve the exact
+root-command index for ordinary commands.
+
+## Proactive delivery and media
+
+An `Address` combines a canonical `MessageTarget` with deterministic bot
+selection. Exact bot selection is preferred; platform selection rejects
+ambiguity rather than choosing randomly. `TargetDirectory` is a bounded
+application alias map, not a background global target crawler.
+
+Media access is explicit. `LocalMediaResolver` reads bounded local/base64 data;
+network fetching and hosting are caller-supplied `MediaFetcher` and `MediaHost`
+services. This keeps network access, credentials, file retention, and byte
+budgets outside the core parser and dispatcher.

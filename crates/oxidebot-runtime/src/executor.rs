@@ -398,6 +398,7 @@ mod tests {
     use crate::{
         bot::{BotDescriptor, BotServices, CommandWorker, GlobalCommandCapacity},
         handler::PreparedHandler,
+        router::RouterRuntime,
         session::SessionRegistry,
         RuntimeMetrics, ShutdownSignal,
     };
@@ -468,14 +469,17 @@ mod tests {
         let router = Arc::new(CompiledRouter::compile(
             Vec::<PreparedHandler<()>>::new(),
             Vec::new(),
-            Arc::new(()),
-            sessions,
-            ShutdownSignal::new(CancellationToken::new()),
+            RouterRuntime {
+                state: Arc::new(()),
+                sessions,
+                shutdown: ShutdownSignal::new(CancellationToken::new()),
+                metrics: Arc::clone(&metrics),
+                authoring: Arc::new(crate::authoring::AuthoringRuntime::default()),
+            },
             crate::router::RouterLimits {
                 handler_timeout: None,
                 max_handler_replies: 8,
             },
-            Arc::clone(&metrics),
         ));
 
         let platform = PlatformId::new("test").expect("static platform");

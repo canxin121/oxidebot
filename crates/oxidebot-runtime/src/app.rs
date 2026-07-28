@@ -5,11 +5,13 @@ use crate::{
     dedupe::{DedupeCache, DedupeCommit},
     executor::{ExecutorHandle, ExecutorSubmit},
     handler::{prepare_handler, PreparedHandler, RouteSpec},
-    router::{CompiledRouter, RouterLimits},
+    router::{CompiledRouter, RouterLimits, RouterRuntime},
     session::{SessionDelivery, SessionRegistry},
-    Adapter, BotDescriptor, BotDirectory, BotServices, BuildError, CommandCatalog, Filter,
-    MetricsHandle, Result, RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service,
-    ServiceContext, ServiceError, ShutdownSignal,
+    Adapter, AuthoringRuntime, BotDescriptor, BotDirectory, BotServices, BuildError,
+    CommandCatalog, CommandFieldId, CommandId, CommandMiddleware, CommandOutputMiddleware,
+    CommandRegistry, CommandRenderer, CommandRewriter, DeliveryMiddleware, DynamicCompleter,
+    Filter, LocaleResolver, MessageNormalizer, MetricsHandle, Result, RuntimeConfig, RuntimeError,
+    RuntimeMetrics, RuntimeProfile, Service, ServiceContext, ServiceError, ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
@@ -47,6 +49,7 @@ where
     filters: Vec<Arc<dyn Filter<S>>>,
     services: Vec<Arc<dyn Service<S>>>,
     metrics: MetricsHandle,
+    authoring: AuthoringRuntime<S>,
 }
 
 impl OxideBot<()> {
@@ -76,6 +79,7 @@ where
             filters: Vec::new(),
             services: Vec::new(),
             metrics: Arc::new(RuntimeMetrics::default()),
+            authoring: AuthoringRuntime::default(),
         }
     }
 
@@ -100,6 +104,113 @@ where
     #[must_use]
     pub fn metrics_handle(&self) -> MetricsHandle {
         Arc::clone(&self.metrics)
+    }
+
+    #[must_use]
+    pub fn command_renderer<R>(mut self, renderer: R) -> Self
+    where
+        R: CommandRenderer,
+    {
+        self.authoring.renderer = Arc::new(renderer);
+        self
+    }
+
+    #[must_use]
+    pub fn locale_resolver<R>(mut self, resolver: R) -> Self
+    where
+        R: LocaleResolver<S>,
+    {
+        self.authoring.locale_resolver = Arc::new(resolver);
+        self
+    }
+
+    #[must_use]
+    pub fn command_registry(mut self, registry: CommandRegistry) -> Self {
+        self.authoring.registry = registry;
+        self
+    }
+
+    #[must_use]
+    pub fn command_rewriter<R>(mut self, rewriter: R) -> Self
+    where
+        R: CommandRewriter<S>,
+    {
+        self.authoring.rewriters.push(Arc::new(rewriter));
+        self
+    }
+
+    #[must_use]
+    pub fn message_normalizer<N>(mut self, normalizer: N) -> Self
+    where
+        N: MessageNormalizer<S>,
+    {
+        self.authoring.normalizers.push(Arc::new(normalizer));
+        self
+    }
+
+    #[must_use]
+    pub fn command_middleware<M>(mut self, middleware: M) -> Self
+    where
+        M: CommandMiddleware<S>,
+    {
+        self.authoring.command_middleware.push(Arc::new(middleware));
+        self
+    }
+
+    #[must_use]
+    pub fn command_output_middleware<M>(mut self, middleware: M) -> Self
+    where
+        M: CommandOutputMiddleware<S>,
+    {
+        self.authoring.output_middleware.push(Arc::new(middleware));
+        self
+    }
+
+    #[must_use]
+    pub fn delivery_middleware<M>(mut self, middleware: M) -> Self
+    where
+        M: DeliveryMiddleware<S>,
+    {
+        self.authoring
+            .delivery_middleware
+            .push(Arc::new(middleware));
+        self
+    }
+
+    #[must_use]
+    pub fn completer<C>(mut self, command: CommandId, field: CommandFieldId, completer: C) -> Self
+    where
+        C: DynamicCompleter<S>,
+    {
+        self.authoring
+            .completers
+            .insert((command, field), Arc::new(completer));
+        self
+    }
+
+    /// Registers a dynamic completion provider by branch and field name while
+    /// resolving the stable IDs from the canonical command tree.
+    pub fn completer_for<C>(
+        mut self,
+        command: &crate::Command,
+        branch: &[&str],
+        field: &str,
+        completer: C,
+    ) -> std::result::Result<Self, BuildError>
+    where
+        C: DynamicCompleter<S>,
+    {
+        let field_id = command.field_id(branch, field).ok_or_else(|| {
+            BuildError::InvalidRoute(format!(
+                "command `{}` has no field `{field}` on branch `{}`",
+                command.name(),
+                branch.join(" "),
+            ))
+        })?;
+        self.authoring
+            .completers
+            .insert((command.id(), field_id), Arc::new(completer));
+        Ok(self)
     }
 
     #[must_use]
@@ -148,9 +259,25 @@ where
             filters,
             services,
             metrics,
+            authoring,
         } = self;
         config.validate()?;
+        let dynamic_shortcuts = module.runtime_shortcuts_enabled();
         let command_catalog = module.catalog();
+        let has_static_shortcuts = command_catalog
+            .commands()
+            .iter()
+            .any(|command| !command.shortcuts().is_empty());
+        authoring.registry.configure_matching(
+            dynamic_shortcuts || has_static_shortcuts,
+            !authoring.rewriters.is_empty() || !authoring.normalizers.is_empty(),
+        );
+        for command in command_catalog.commands() {
+            authoring
+                .registry
+                .register(command)
+                .map_err(|error| BuildError::InvalidRoute(error.to_string()))?;
+        }
         let handlers = module.into_handlers()?;
         if handlers.len() > MAX_RUNTIME_HANDLERS {
             return Err(BuildError::InvalidConfig(
@@ -178,6 +305,7 @@ where
             services,
             command_catalog,
             metrics,
+            authoring: Arc::new(authoring),
         })
     }
 
@@ -206,6 +334,7 @@ where
     services: Vec<Arc<dyn Service<S>>>,
     command_catalog: CommandCatalog,
     metrics: MetricsHandle,
+    authoring: Arc<AuthoringRuntime<S>>,
 }
 
 impl<S> Application<S>
@@ -522,15 +651,20 @@ fn adapt_native_options(options: &mut [CommandOption], localized: bool, autocomp
     }
 }
 
-async fn publish_command_definitions(bots: &BotDirectory, catalog: &CommandCatalog) -> Result<()> {
+pub(crate) async fn publish_command_definitions(
+    bots: &BotDirectory,
+    catalog: &CommandCatalog,
+    registry: &CommandRegistry,
+) -> Result<()> {
     if catalog.commands().is_empty() {
         return Ok(());
     }
     for bot in bots.iter() {
-        let definitions = catalog.for_identity(bot.identity()).definitions();
-        if definitions.is_empty() {
+        let scoped_catalog = catalog.for_identity(bot.identity());
+        if scoped_catalog.commands().is_empty() {
             continue;
         }
+        let definitions = scoped_catalog.enabled(registry).definitions();
         let Ok(api) = bot.api() else {
             continue;
         };
@@ -573,6 +707,7 @@ where
         services,
         command_catalog,
         metrics,
+        authoring,
     } = app;
 
     let (registered, command_workers, bot_directory) =
@@ -587,8 +722,14 @@ where
     for worker in command_workers {
         command_tasks.spawn(worker.run());
     }
-    if let Err(error) = publish_command_definitions(&bot_directory, &command_catalog).await {
+    authoring
+        .registry
+        .attach_publication(bot_directory.clone(), command_catalog.clone());
+    if let Err(error) =
+        publish_command_definitions(&bot_directory, &command_catalog, &authoring.registry).await
+    {
         cancellation.cancel();
+        authoring.registry.detach_publication();
         command_tasks.abort_all();
         while command_tasks.join_next().await.is_some() {}
         return Err(error);
@@ -603,14 +744,17 @@ where
     let router = Arc::new(CompiledRouter::compile(
         handlers,
         filters,
-        Arc::clone(&state),
-        sessions.clone(),
-        ShutdownSignal::new(cancellation.child_token()),
+        RouterRuntime {
+            state: Arc::clone(&state),
+            sessions: sessions.clone(),
+            shutdown: ShutdownSignal::new(cancellation.child_token()),
+            metrics: Arc::clone(&metrics),
+            authoring: Arc::clone(&authoring),
+        },
         RouterLimits {
             handler_timeout: config.handler_timeout,
             max_handler_replies: config.max_handler_replies,
         },
-        Arc::clone(&metrics),
     ));
     let mut session_tasks = JoinSet::new();
     for worker in session_workers {
@@ -798,6 +942,10 @@ where
         .await,
     );
 
+    // Publication keeps bot handles so runtime command changes can republish
+    // native definitions. Release that attachment before waiting for the
+    // per-bot command channels to close.
+    authoring.registry.detach_publication();
     drop(bot_directory);
     record_first(
         &mut fatal_error,

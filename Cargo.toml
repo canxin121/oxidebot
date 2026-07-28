@@ -28,6 +28,7 @@ futures-util = "0.3.31"
 mime_guess = "2.0.5"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
+regex = "1.11.1"
 syn = { version = "2.0.117", features = ["full"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }

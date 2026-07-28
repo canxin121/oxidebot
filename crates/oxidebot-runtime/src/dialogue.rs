@@ -1,4 +1,7 @@
-use crate::{AskOptions, HandlerError, SessionKey, SessionPolicy, SessionRegistry};
+use crate::{
+    authoring::ErasedDeliveryPipeline, AskOptions, HandlerError, SessionKey, SessionPolicy,
+    SessionRegistry,
+};
 use oxidebot_core::{
     conversation::MessageTarget, event::Event, source::message::Message, BotObject,
     ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
@@ -14,6 +17,7 @@ pub struct Dialogue {
     actor: UserKey,
     target: MessageTarget,
     options: AskOptions,
+    pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
 }
 
 impl Dialogue {
@@ -23,6 +27,7 @@ impl Dialogue {
         conversation: ConversationKey,
         actor: UserKey,
         target: MessageTarget,
+        pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
     ) -> Self {
         Self {
             api,
@@ -30,6 +35,7 @@ impl Dialogue {
             conversation,
             actor,
             target,
+            pipeline,
             options: AskOptions::new(Duration::from_secs(60)).namespace(
                 SessionNamespace::new("dialogue").expect("static dialogue namespace is valid"),
             ),
@@ -81,10 +87,17 @@ impl Dialogue {
             .sessions
             .register(key, self.options.timeout, self.options.policy)
             .await?;
-        self.api
-            .send_outgoing_message_with(self.target.clone(), prompt.into(), FallbackPolicy::Auto)
-            .await
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
+        let prompt = prompt.into();
+        if let Some(pipeline) = &self.pipeline {
+            pipeline
+                .deliver(&self.api, self.target.clone(), prompt, FallbackPolicy::Auto)
+                .await?;
+        } else {
+            self.api
+                .send_outgoing_message_with(self.target.clone(), prompt, FallbackPolicy::Auto)
+                .await
+                .map_err(|error| HandlerError::Api(error.to_string()))?;
+        }
         Ok(waiter.wait().await?)
     }
 

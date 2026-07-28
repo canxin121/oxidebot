@@ -1,6 +1,8 @@
 use crate::{
-    session::SessionRegistry, BotHandle, BuildError, Context, HandlerError, HandlerResult, Outcome,
-    SessionKey, ShutdownSignal,
+    authoring::{BoundDeliveryPipeline, ErasedDeliveryPipeline},
+    session::SessionRegistry,
+    BotHandle, BuildError, Context, HandlerError, HandlerResult, Outcome, SessionKey,
+    ShutdownSignal,
 };
 use futures_util::future::BoxFuture;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
@@ -31,6 +33,7 @@ where
     bot: BotHandle,
     sessions: SessionRegistry,
     shutdown: ShutdownSignal,
+    pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
     _tag: PhantomData<fn() -> T>,
 }
 
@@ -48,6 +51,10 @@ where
             bot: context.bot.clone(),
             sessions: context.sessions.clone(),
             shutdown: context.shutdown.clone(),
+            pipeline: Some(Arc::new(BoundDeliveryPipeline {
+                runtime: context.authoring_arc(),
+                context: context.clone(),
+            })),
             _tag: PhantomData,
         })
     }
@@ -95,6 +102,7 @@ where
             bot: self.bot.clone(),
             sessions: self.sessions.clone(),
             shutdown: self.shutdown.clone(),
+            pipeline: self.pipeline.clone(),
             _tag: PhantomData,
         }
     }
@@ -143,10 +151,16 @@ impl EventContext<tags::Message> {
             .unwrap_or_else(|| {
                 MessageTarget::new(ConversationRef::direct(self.event().sender.id.clone()))
             });
-        self.bot()?
-            .send_outgoing_message_with(target, message.into(), FallbackPolicy::Auto)
-            .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+        let api = self.bot()?;
+        if let Some(pipeline) = &self.pipeline {
+            pipeline
+                .deliver(&api, target, message.into(), FallbackPolicy::Auto)
+                .await
+        } else {
+            api.send_outgoing_message_with(target, message.into(), FallbackPolicy::Auto)
+                .await
+                .map_err(|error| HandlerError::Api(error.to_string()))
+        }
     }
 
     pub async fn reply(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
@@ -288,6 +302,20 @@ impl RouteScope {
 }
 
 #[doc(hidden)]
+pub(crate) struct HandlerCall<S>
+where
+    S: Send + Sync + 'static,
+{
+    pub(crate) event: Arc<DispatchEnvelope>,
+    pub(crate) state: Arc<S>,
+    pub(crate) bot: BotHandle,
+    pub(crate) sessions: SessionRegistry,
+    pub(crate) shutdown: ShutdownSignal,
+    pub(crate) authoring: Arc<crate::authoring::AuthoringRuntime<S>>,
+    pub(crate) command_input: Option<Arc<tokio::sync::OnceCell<crate::RewriteInput>>>,
+}
+
+#[doc(hidden)]
 pub(crate) trait ErasedHandler<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
@@ -296,14 +324,8 @@ where
     fn route_scope(&self) -> RouteScope;
     fn event_kind(&self) -> DispatchKind;
     fn default_block(&self) -> bool;
-    fn call(
-        &self,
-        event: Arc<DispatchEnvelope>,
-        state: Arc<S>,
-        bot: BotHandle,
-        sessions: SessionRegistry,
-        shutdown: ShutdownSignal,
-    ) -> BoxFuture<'static, HandlerResult<Outcome>>;
+    fn command_id(&self) -> Option<crate::CommandId>;
+    fn call(&self, call: HandlerCall<S>) -> BoxFuture<'static, HandlerResult<Outcome>>;
 }
 
 pub(crate) struct PreparedHandler<S>
@@ -314,6 +336,7 @@ where
     pub(crate) scope: RouteScope,
     pub(crate) event_kind: DispatchKind,
     pub(crate) default_block: bool,
+    pub(crate) command_id: Option<crate::CommandId>,
     pub(crate) handler: Arc<dyn ErasedHandler<S>>,
 }
 
@@ -323,20 +346,23 @@ pub(crate) fn prepare_handler<S>(
 where
     S: Send + Sync + 'static,
 {
-    let (spec, scope, event_kind, default_block) = catch_unwind(AssertUnwindSafe(|| {
-        (
-            handler.route_spec(),
-            handler.route_scope(),
-            handler.event_kind(),
-            handler.default_block(),
-        )
-    }))
-    .map_err(|_| BuildError::InvalidRoute("handler routing metadata panicked".into()))?;
+    let (spec, scope, event_kind, default_block, command_id) =
+        catch_unwind(AssertUnwindSafe(|| {
+            (
+                handler.route_spec(),
+                handler.route_scope(),
+                handler.event_kind(),
+                handler.default_block(),
+                handler.command_id(),
+            )
+        }))
+        .map_err(|_| BuildError::InvalidRoute("handler routing metadata panicked".into()))?;
     Ok(PreparedHandler {
         spec,
         scope,
         event_kind,
         default_block,
+        command_id,
         handler,
     })
 }

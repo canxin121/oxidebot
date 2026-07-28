@@ -1,9 +1,168 @@
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Expr, Field, Fields,
-    GenericArgument, LitChar, LitStr, PathArguments, Type,
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Expr, Field, Fields, FnArg,
+    GenericArgument, ItemFn, LitChar, LitStr, Pat, PathArguments, Type,
 };
+
+#[proc_macro_attribute]
+pub fn command(attribute: TokenStream, input: TokenStream) -> TokenStream {
+    match expand_command_function(attribute, parse_macro_input!(input as ItemFn)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn expand_command_function(
+    attribute: TokenStream,
+    mut function: ItemFn,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if function.sig.asyncness.is_none() {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "#[oxidebot::command] requires an async function",
+        ));
+    }
+    if !function.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            function.sig.generics.span(),
+            "#[oxidebot::command] does not support generic functions; use CommandArgs for reusable generic code",
+        ));
+    }
+
+    let command_name = if attribute.is_empty() {
+        function.sig.ident.to_string().replace('_', "-")
+    } else {
+        syn::parse::<LitStr>(attribute)?.value()
+    };
+    let original_ident = function.sig.ident.clone();
+    let implementation_ident = syn::Ident::new(
+        &format!("__oxidebot_{}_implementation", original_ident),
+        original_ident.span(),
+    );
+    let spec_ident = syn::Ident::new(
+        &format!("{}_command", original_ident),
+        original_ident.span(),
+    );
+    let args_ident = syn::Ident::new(
+        &format!(
+            "__OxideBot{}Args",
+            to_pascal_case(&original_ident.to_string())
+        ),
+        original_ident.span(),
+    );
+
+    let visibility = function.vis.clone();
+    let return_type = function.sig.output.clone();
+    let outer_attributes = function.attrs.clone();
+    let implementation_attributes = outer_attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    function.attrs = implementation_attributes.clone();
+    function.vis = syn::Visibility::Inherited;
+    function.sig.ident = implementation_ident.clone();
+
+    let mut command_fields = Vec::new();
+    let mut wrapper_inputs = Vec::new();
+    let mut call_arguments = Vec::new();
+
+    for argument in function.sig.inputs.iter_mut() {
+        let FnArg::Typed(typed) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "methods are not supported",
+            ));
+        };
+        let Pat::Ident(pattern) = typed.pat.as_ref() else {
+            return Err(syn::Error::new(
+                typed.pat.span(),
+                "command function parameters must use simple identifier patterns",
+            ));
+        };
+        let ident = pattern.ident.clone();
+        let ty = typed.ty.clone();
+        let (arg_attributes, other_attributes): (Vec<_>, Vec<_>) = typed
+            .attrs
+            .drain(..)
+            .partition(|attribute| attribute.path().is_ident("arg"));
+        typed.attrs = other_attributes.clone();
+        if arg_attributes.is_empty() {
+            let mut wrapper = typed.clone();
+            wrapper.attrs = other_attributes;
+            wrapper_inputs.push(quote! { #wrapper });
+            call_arguments.push(quote! { #ident });
+        } else {
+            command_fields.push(quote! {
+                #(#arg_attributes)*
+                #ident: #ty
+            });
+            call_arguments.push(quote! { __oxidebot_args.#ident });
+        }
+    }
+
+    let args_declaration = if command_fields.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            #(#implementation_attributes)*
+            #[doc(hidden)]
+            #[allow(non_camel_case_types)]
+            #[derive(::oxidebot::CommandArgs)]
+            #visibility struct #args_ident {
+                #(#command_fields,)*
+            }
+        }
+    };
+    let args_input = if command_fields.is_empty() {
+        quote! {}
+    } else {
+        quote! { ::oxidebot::Args(__oxidebot_args): ::oxidebot::Args<#args_ident>, }
+    };
+    let command_builder = if command_fields.is_empty() {
+        quote! { ::oxidebot::command(#command_name) }
+    } else {
+        quote! { ::oxidebot::command(#command_name).args::<#args_ident>() }
+    };
+
+    Ok(quote! {
+        #args_declaration
+
+        #[doc(hidden)]
+        #function
+
+        #(#outer_attributes)*
+        #visibility async fn #original_ident(
+            #args_input
+            #(#wrapper_inputs),*
+        ) #return_type {
+            #implementation_ident(#(#call_arguments),*).await
+        }
+
+        #(#implementation_attributes)*
+        #[must_use]
+        #visibility fn #spec_ident() -> ::oxidebot::Command {
+            #command_builder
+        }
+    })
+}
+
+fn to_pascal_case(value: &str) -> String {
+    value
+        .split('_')
+        .filter(|component| !component.is_empty())
+        .map(|component| {
+            let mut chars = component.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
 
 #[proc_macro_derive(BotCommand, attributes(command))]
 pub fn derive_bot_command(input: TokenStream) -> TokenStream {
@@ -363,7 +522,20 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 }
 
 fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "BotCommand does not support generic enums; wrap generic values in a concrete CommandArgs type",
+        ));
+    }
+    let visibility = input.vis.clone();
+    let branch_visibility: syn::Visibility = if matches!(visibility, syn::Visibility::Inherited) {
+        syn::parse_quote!(pub(super))
+    } else {
+        syn::parse_quote!(pub)
+    };
     let enum_name = input.ident;
+    let branch_module = format_ident!("{}_branches", ident_to_module_name(&enum_name.to_string()));
     let Data::Enum(data) = input.data else {
         return Err(syn::Error::new(
             enum_name.span(),
@@ -381,7 +553,9 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let root_builder = root_options.builder_tokens();
     let mut branch_builders = Vec::new();
     let mut match_arms = Vec::new();
+    let mut nested_match_arms = Vec::new();
     let mut inferred_bounds = Vec::<syn::WherePredicate>::new();
+    let mut branch_markers = Vec::new();
 
     for variant in data.variants {
         let ident = variant.ident;
@@ -399,6 +573,15 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 
         match variant.fields {
             Fields::Unit => {
+                branch_markers.push(quote! {
+                    #[derive(Clone, Copy, Debug, Default)]
+                    #branch_visibility struct #ident;
+                    impl ::oxidebot::CommandBranchTag for #ident {
+                        type Command = super::#enum_name;
+                        type Arguments = ::oxidebot::UnitBranch;
+                        const PATH: &'static [&'static str] = &[#branch_name];
+                    }
+                });
                 let mut builder = quote! {
                     let mut branch = ::oxidebot::CommandBranch::new(#branch_name);
                 };
@@ -429,42 +612,99 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 let ty = &fields.unnamed.first().expect("length checked").ty;
-                inferred_bounds.push(syn::parse_quote!(#ty: ::oxidebot::CommandArgs));
-                let mut builder = quote! {
-                    let mut branch = ::oxidebot::CommandBranch::new(#branch_name)
-                        .schema(<#ty as ::oxidebot::CommandArgs>::schema());
+                let branch_ty = match ty {
+                    Type::Path(path)
+                        if path.qself.is_none()
+                            && path.path.leading_colon.is_none()
+                            && path.path.segments.len() == 1 =>
+                    {
+                        quote!(super::#ty)
+                    }
+                    _ => quote!(#ty),
                 };
-                if let Some(description) = description {
-                    builder.extend(quote! {
-                        branch = branch.description(#description);
+                if options.subcommand {
+                    inferred_bounds.push(syn::parse_quote!(#ty: ::oxidebot::CommandTree));
+                    branch_markers.push(quote! {
+                        #[derive(Clone, Copy, Debug, Default)]
+                        #branch_visibility struct #ident;
+                        impl ::oxidebot::CommandBranchTag for #ident {
+                            type Command = super::#enum_name;
+                            type Arguments = #branch_ty;
+                            const PATH: &'static [&'static str] = &[#branch_name];
+                            const MATCH_DESCENDANTS: bool = true;
+                            const STRIP_PREFIX: usize = 1;
+                        }
+                    });
+                    let mut builder = quote! {
+                        let nested = <#ty as ::oxidebot::CommandTree>::command();
+                        let mut branch = ::oxidebot::CommandBranch::new(#branch_name);
+                        if let ::core::option::Option::Some(schema) = nested.schema_ref() {
+                            branch = branch.schema(schema.clone());
+                        }
+                        for child in nested.branches().iter().cloned() {
+                            branch = branch.subcommand(child);
+                        }
+                    };
+                    if let Some(description) = description {
+                        builder.extend(quote! { branch = branch.description(#description); });
+                    }
+                    for alias in aliases {
+                        builder.extend(quote! { branch = branch.alias(#alias); });
+                    }
+                    if hidden {
+                        builder.extend(quote! { branch = branch.hidden(); });
+                    }
+                    builder.extend(quote! { command = command.subcommand(branch); });
+                    branch_builders.push(builder);
+                    nested_match_arms.push(quote! {
+                        if __oxidebot_selected_branch
+                            .is_some_and(|value| value.eq_ignore_ascii_case(#branch_name))
+                        {
+                            let nested = result.descend(1);
+                            return ::core::result::Result::Ok(Self::#ident(
+                                <#ty as ::oxidebot::FromCommandMatch>::from_match(&nested)?,
+                            ));
+                        }
+                    });
+                } else {
+                    inferred_bounds.push(syn::parse_quote!(#ty: ::oxidebot::CommandArgs));
+                    branch_markers.push(quote! {
+                        #[derive(Clone, Copy, Debug, Default)]
+                        #branch_visibility struct #ident;
+                        impl ::oxidebot::CommandBranchTag for #ident {
+                            type Command = super::#enum_name;
+                            type Arguments = #branch_ty;
+                            const PATH: &'static [&'static str] = &[#branch_name];
+                        }
+                    });
+                    let mut builder = quote! {
+                        let mut branch = ::oxidebot::CommandBranch::new(#branch_name)
+                            .schema(<#ty as ::oxidebot::CommandArgs>::schema());
+                    };
+                    if let Some(description) = description {
+                        builder.extend(quote! { branch = branch.description(#description); });
+                    }
+                    for alias in aliases {
+                        builder.extend(quote! { branch = branch.alias(#alias); });
+                    }
+                    if hidden {
+                        builder.extend(quote! { branch = branch.hidden(); });
+                    }
+                    builder.extend(quote! { command = command.subcommand(branch); });
+                    branch_builders.push(builder);
+                    match_arms.push(quote! {
+                        ::core::option::Option::Some(#branch_name) => {
+                            let arguments = if let ::core::option::Option::Some(arguments) = result.arguments() {
+                                arguments.clone()
+                            } else {
+                                result.parse_active()?
+                            };
+                            ::core::result::Result::Ok(Self::#ident(
+                                <#ty as ::oxidebot::CommandArgs>::from_arguments(&arguments)?,
+                            ))
+                        },
                     });
                 }
-                for alias in aliases {
-                    builder.extend(quote! {
-                        branch = branch.alias(#alias);
-                    });
-                }
-                if hidden {
-                    builder.extend(quote! {
-                        branch = branch.hidden();
-                    });
-                }
-                builder.extend(quote! {
-                    command = command.subcommand(branch);
-                });
-                branch_builders.push(builder);
-                match_arms.push(quote! {
-                    ::core::option::Option::Some(#branch_name) => {
-                        let arguments = if let ::core::option::Option::Some(arguments) = result.arguments() {
-                            arguments.clone()
-                        } else {
-                            result.parse_active()?
-                        };
-                        ::core::result::Result::Ok(Self::#ident(
-                            <#ty as ::oxidebot::CommandArgs>::from_arguments(&arguments)?,
-                        ))
-                    },
-                });
             }
             Fields::Unnamed(fields) => {
                 return Err(syn::Error::new(
@@ -489,15 +729,31 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
+        #visibility mod #branch_module {
+            #(#branch_markers)*
+        }
+
         impl #impl_generics ::oxidebot::FromCommandMatch for #enum_name #type_generics #where_clause {
             fn from_match(
                 result: &::oxidebot::CommandMatch,
             ) -> ::core::result::Result<Self, ::oxidebot::CommandParseError> {
-                match result.selected_branch_name() {
+                let __oxidebot_command = <Self as ::oxidebot::CommandTree>::command();
+                let __oxidebot_selected_branch = result.branch_names().iter().find_map(|actual| {
+                    __oxidebot_command.branches().iter().find_map(|branch| {
+                        (branch.name().eq_ignore_ascii_case(actual)
+                            || branch
+                                .aliases_list()
+                                .iter()
+                                .any(|alias| alias.eq_ignore_ascii_case(actual)))
+                        .then_some(branch.name())
+                    })
+                });
+                #(#nested_match_arms)*
+                match __oxidebot_selected_branch {
                     #(#match_arms)*
                     ::core::option::Option::Some(_) => ::core::result::Result::Err(
                         ::oxidebot::CommandParseError::InvalidValue {
-                            value: result.selected_branch_name().unwrap_or_default().to_owned(),
+                            value: __oxidebot_selected_branch.unwrap_or_default().to_owned(),
                             expected: "known subcommand",
                             reason: "the selected command branch is not represented by this enum".to_owned(),
                         },
@@ -520,6 +776,21 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             }
         }
     })
+}
+
+fn ident_to_module_name(value: &str) -> String {
+    let mut output = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if character.is_uppercase() {
+            if index > 0 {
+                output.push('_');
+            }
+            output.extend(character.to_lowercase());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn ident_to_command_name(value: &str) -> String {
@@ -795,6 +1066,7 @@ struct CommandOptions {
     prefixes: Vec<String>,
     case_insensitive: bool,
     hidden: bool,
+    subcommand: bool,
 }
 
 impl CommandOptions {
@@ -825,6 +1097,8 @@ impl CommandOptions {
                     output.case_insensitive = true;
                 } else if meta.path.is_ident("hidden") {
                     output.hidden = true;
+                } else if meta.path.is_ident("subcommand") {
+                    output.subcommand = true;
                 } else {
                     return Err(meta.error("unknown #[command(...)] option"));
                 }

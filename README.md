@@ -403,6 +403,205 @@ conversation, actor, and namespace keys. It supports custom timeouts,
 consume-versus-tap policy, typed parsing, confirmation, choices, and complete
 reply events.
 
+## Alconna-inspired authoring capabilities
+
+The remaining useful ideas from plugin-alconna are integrated into the same
+`Message`, `Command`, `CommandMatch`, and `Module` pipeline rather than exposed
+as another matcher or plugin runtime.
+
+### Shortcuts and command rewriting
+
+Static shortcuts are compiled with a command and always flow back through the
+canonical parser:
+
+```rust
+let roll = RollArgs::command("roll")
+    .shortcut(Shortcut::literal("掷骰子", "/roll 1d6"))
+    .shortcut(
+        Shortcut::regex(r"^掷(?P<count>\\d+)个骰子$", "/roll {count}d6")?
+            .humanized("掷 N 个骰子"),
+    );
+```
+
+Application-wide natural-language or migration rules use a bounded
+`CommandRewriter`:
+
+```rust
+let app = OxideBot::with_state(state)
+    .command_rewriter(|context, mut input: RewriteInput| async move {
+        if input.message.extract_plain_text() == "查看状态" {
+            input.message = Message::text("/status");
+        }
+        Ok(input)
+    });
+```
+
+`shortcut_admin_module()` optionally manages runtime shortcuts through the
+bounded `CommandRegistry`. Static shortcuts remain immutable, duplicate patterns
+are rejected globally, and runtime shortcuts cannot silently shadow another
+command.
+
+### Branch handlers and simple function commands
+
+Large command trees do not need one giant `match` expression. The derive macro
+generates branch marker types that reuse the already parsed `CommandMatch`:
+
+```rust
+async fn add(
+    BranchArgs(args): BranchArgs<todo_command::Add>,
+    State(state): State<AppState>,
+) -> HandlerResult<Message> {
+    // `args` is AddTodoArgs; no second parse occurs.
+    todo_service::add(&state, args).await
+}
+
+let todo = Module::new()
+    .command_branch(todo_command::Add, add)
+    .command_branch(todo_command::Done, done)
+    .command_branch(todo_command::List, list);
+```
+
+Small commands may be generated directly from a function signature:
+
+```rust
+#[oxidebot::command("echo")]
+async fn echo(#[arg(rest)] content: Vec<String>) -> String {
+    content.join(" ")
+}
+```
+
+The attribute macro only treats command-value parameters as schema fields;
+normal `Extract<S>` parameters remain ordinary handler dependencies.
+
+### Dynamic completion
+
+Static choices, command branches, options, and usage are generated from the
+command IR. Fields that depend on application data can attach an asynchronous,
+bounded provider by stable field ID:
+
+```rust
+let deploy = DeployCommand::command();
+let app = OxideBot::with_state(state).completer_for(
+    &deploy,
+    &["start"],
+    "project",
+    |context, input: CompletionInput| async move {
+        let projects = context.state().projects.search(input.partial.as_ref()).await?;
+        let replace = input.replace;
+        let field = input.field;
+        Ok(projects
+            .into_iter()
+            .take(input.limit)
+            .map(|project| {
+                CompletionItem::new(
+                    project.id.to_string(),
+                    CompletionKind::Choice,
+                    replace,
+                )
+                .description(project.name)
+                .field(field)
+            })
+            .collect())
+    },
+)?;
+```
+
+The same provider serves text suggestions, bounded interactive completion, and
+platform-native autocomplete. It runs only on the completion cold path.
+
+### Configurable output, locale, and translations
+
+Help, usage, parse errors, shortcut output, and suggestions first become a
+structured `CommandOutput`. Applications may install a renderer and locale
+resolver without replacing command parsing:
+
+```rust
+OxideBot::with_state(state)
+    .command_renderer(MyRenderer)
+    .locale_resolver(StoredLocaleResolver)
+    .include(language_module());
+```
+
+`TranslationCatalog` and `LocalizedMessage` render structure-preserving message
+templates, so translated values may contain mentions, files, or other canonical
+segments instead of being flattened into text:
+
+```rust
+let template = message_template!("欢迎 {user:mention}，报告：{report:file}");
+let message = template.render(&message_args! {
+    user => TemplateValue::mention(user.id),
+    report => report_file,
+})?;
+```
+
+`CommandOverlay` is a data-only way to adjust descriptions, translations,
+aliases, prefixes, visibility, and shortcuts regardless of declaration order.
+It never loads executable code from configuration.
+
+### Narrow authoring extensions
+
+OxideBot deliberately avoids a giant dynamically typed extension object. Each
+phase has a narrow trait and a frozen build-time chain:
+
+```text
+canonical Message
+-> MessageNormalizer
+-> Shortcut / CommandRewriter
+-> Command parser
+-> CommandMiddleware
+-> dynamic or interactive completion
+-> typed handler
+-> CommandOutputMiddleware / CommandRenderer
+-> DeliveryMiddleware
+-> capability planner
+-> adapter transport
+```
+
+This supports normalization, permission-aware command transformations, themed
+output, audit metadata, and delivery policy without runtime parameter capture or
+global mutable plugin hooks.
+
+### Proactive targets and portable media
+
+Proactive sends use an explicit `Address` and deterministic bot selection:
+
+```rust
+bot_directory
+    .send_address(
+        Address::group("ops")
+            .through(BotSelection::Exact(bot_identity)),
+        Message::text("deployment complete"),
+        FallbackPolicy::Auto,
+    )
+    .await?;
+```
+
+A platform-only selection succeeds only when exactly one connected bot matches.
+`TargetDirectory` is an optional bounded alias directory; it is not part of the
+dispatch hot path.
+
+`MediaResolver`, `MediaFetcher`, and `MediaHost` form an optional, policy-owned
+media pipeline. The core local resolver enforces a byte limit and supports local
+paths and retained base64 data. Network fetching and object hosting are explicit
+application services rather than hidden framework I/O.
+
+### Standard modules and runtime command control
+
+The facade includes ordinary reusable modules:
+
+```rust
+let features = Module::new()
+    .include(echo_module())
+    .include(language_module())
+    .include(command_admin_module())
+    .include(shortcut_admin_module())
+    .include(diagnostics_module());
+```
+
+Administrative modules must be wrapped in the application's own permission
+guard. Command enable/disable changes update help, completion, dispatch, and
+platform-native command publication through the same bounded registry.
+
 ## Complete event and API access
 
 Typed handlers can use a concrete view of the original event allocation:
@@ -443,6 +642,32 @@ handler contract such as “this command requires a group chat” or invalid typ
 arguments. Their replies inherit the matched handler kind's normal propagation
 policy.
 
+## Advanced command and message authoring
+
+The unified IR also drives the higher-level facilities that make large bot
+projects practical:
+
+- `Shortcut` and `CommandRewriter<S>` for bounded literal, regex, legacy, or
+  natural-language command rewrites;
+- `Module::command_branch(marker, handler)` and `BranchArgs<Marker>` for
+  separately implemented command-tree branches without reparsing;
+- dynamic completion providers shared by text `?` completion, dialogue
+  recovery, and platform-native autocomplete;
+- `#[oxidebot::command("name")]` for small function-signature commands;
+- configurable `CommandRenderer`, `LocaleResolver`, `TranslationCatalog`, and
+  the optional language module;
+- `MessageNormalizer`, `CommandMiddleware`, `CommandOutputMiddleware`, and
+  `DeliveryMiddleware` as narrow, build-time-frozen extension phases;
+- structure-preserving `MessageTemplate`, typed message selectors, recursive
+  transformation, explicit media resolution/hosting, deterministic `Address`
+  targeting, and a bounded `CommandRegistry`;
+- built-in help plus ordinary standard modules for echo, language, shortcut administration,
+  command administration, and diagnostics.
+
+These are all ordinary Rust values or traits attached before `build`; none of
+them introduces a second plugin runtime or a global mutable extension table.
+See [the domain-native Alconna design notes](docs/ALCONNA-DESIGN.md).
+
 ## Runtime performance model
 
 The smaller authoring API still compiles into the existing bounded runtime:
@@ -456,12 +681,14 @@ The smaller authoring API still compiles into the existing bounded runtime:
 - bounded ingress, executor, session, and API command queues;
 - per-conversation virtual-actor ordering;
 - broad message matching only for commands that request custom prefixes,
-  no-prefix matching, or case-insensitive matching.
+  no-prefix matching, case-insensitive matching, or application-wide message
+  normalization/rewriting; static and runtime shortcuts otherwise select only
+  their owning command IDs before parsing.
 
 ## Workspace
 
 - `oxidebot-core`: complete 0.1.8 events, messages, content models, and API;
-- `oxidebot-macros`: `CommandArgs` derive;
+- `oxidebot-macros`: `CommandArgs`, `BotCommand`, and function-command macros;
 - `oxidebot-runtime`: modules, extractors, commands, compiled dispatch, bounded
   queues, sessions, and supervision;
 - `oxidebot`: batteries-included facade and prelude;
@@ -474,3 +701,4 @@ Additional documentation:
 - [Command system](docs/COMMANDS.md)
 - [Migration from the Web-shaped draft API](docs/MIGRATION.md)
 - [Runtime architecture](ARCHITECTURE.md)
+- [Domain-native Alconna-inspired facilities](docs/ALCONNA-DESIGN.md)

@@ -1,6 +1,7 @@
 use oxidebot::prelude::*;
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};
 
+#[oxidebot::command("ping")]
 async fn ping() -> &'static str {
     "pong"
 }
@@ -24,6 +25,10 @@ struct AddArgs {
 
 #[derive(Debug, BotCommand)]
 #[command(name = "tools", description = "Small example tools")]
+#[expect(
+    dead_code,
+    reason = "the enum defines schemas consumed through generated branch tags"
+)]
 enum ToolsCommand {
     /// Echo text one or more times.
     Echo(EchoArgs),
@@ -32,15 +37,16 @@ enum ToolsCommand {
     Add(AddArgs),
 }
 
-async fn tools(Args(command): Args<ToolsCommand>) -> Message {
-    match command {
-        ToolsCommand::Echo(args) => Message::text(
-            std::iter::repeat_n(args.text.join(" "), args.times)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        ToolsCommand::Add(args) => Message::text(format!("added: {}", args.text.join(" "))),
-    }
+async fn echo(BranchArgs(args): BranchArgs<tools_command_branches::Echo>) -> Message {
+    Message::text(
+        std::iter::repeat_n(args.text.join(" "), args.times)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+async fn add(BranchArgs(args): BranchArgs<tools_command_branches::Add>) -> Message {
+    Message::text(format!("added: {}", args.text.join(" ")))
 }
 
 async fn trace(context: Context, outcome: Outcome) -> Outcome {
@@ -70,12 +76,16 @@ async fn main() -> oxidebot::Result<()> {
 
     let features = Module::new()
         .command(
-            command("ping")
+            ping_command()
                 .description("Check whether the bot is alive")
                 .description_translation("zh-CN", "检查机器人是否在线"),
             ping,
         )
-        .command(ToolsCommand::command(), tools)
+        .command_branch(tools_command_branches::Echo, echo)
+        .command_branch(tools_command_branches::Add, add)
+        .command_overlay(
+            CommandOverlay::new("tools").shortcut(Shortcut::literal("repeat", "/tools echo")),
+        )
         .after(trace)
         .help();
 

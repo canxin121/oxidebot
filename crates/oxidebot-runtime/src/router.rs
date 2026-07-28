@@ -1,8 +1,8 @@
 use crate::{
     adapter::InterestPlan,
-    handler::{PreparedHandler, RouteSpec},
+    handler::{HandlerCall, PreparedHandler, RouteSpec},
     session::SessionRegistry,
-    BotHandle, Filter, MetricsHandle, Outcome, ShutdownSignal,
+    BotHandle, CommandId, Filter, MetricsHandle, Outcome, ShutdownSignal,
 };
 use futures_util::FutureExt;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
@@ -24,6 +24,17 @@ type RouteId = u32;
 pub(crate) struct RouterLimits {
     pub(crate) handler_timeout: Option<Duration>,
     pub(crate) max_handler_replies: usize,
+}
+
+pub(crate) struct RouterRuntime<S>
+where
+    S: Send + Sync + 'static,
+{
+    pub(crate) state: Arc<S>,
+    pub(crate) sessions: SessionRegistry,
+    pub(crate) shutdown: ShutdownSignal,
+    pub(crate) metrics: MetricsHandle,
+    pub(crate) authoring: Arc<crate::authoring::AuthoringRuntime<S>>,
 }
 
 enum RouteList {
@@ -170,18 +181,20 @@ impl ScopedRouteTables {
     }
 }
 
-fn next_route_id(lists: &[&[RouteId]; 6], positions: &mut [usize; 6]) -> Option<RouteId> {
-    let mut selected: Option<(usize, RouteId)> = None;
+fn next_route_id<const N: usize>(
+    lists: &[&[RouteId]; N],
+    positions: &mut [usize; N],
+) -> Option<RouteId> {
+    let route_id = lists
+        .iter()
+        .enumerate()
+        .filter_map(|(index, list)| list.get(positions[index]).copied())
+        .min()?;
     for (index, list) in lists.iter().enumerate() {
-        let Some(&route_id) = list.get(positions[index]) else {
-            continue;
-        };
-        if selected.is_none_or(|(_, current)| route_id < current) {
-            selected = Some((index, route_id));
+        if list.get(positions[index]).copied() == Some(route_id) {
+            positions[index] = positions[index].saturating_add(1);
         }
     }
-    let (index, route_id) = selected?;
-    positions[index] = positions[index].saturating_add(1);
     Some(route_id)
 }
 
@@ -258,6 +271,9 @@ where
     handler_timeout: Option<Duration>,
     max_handler_replies: usize,
     metrics: MetricsHandle,
+    authoring: Arc<crate::authoring::AuthoringRuntime<S>>,
+    command_routes: HashMap<CommandId, Vec<RouteId>>,
+    all_command_routes: Vec<RouteId>,
     interest: InterestPlan,
 }
 
@@ -268,18 +284,37 @@ where
     pub(crate) fn compile(
         handlers: Vec<PreparedHandler<S>>,
         filters: Vec<Arc<dyn Filter<S>>>,
-        state: Arc<S>,
-        sessions: SessionRegistry,
-        shutdown: ShutdownSignal,
+        runtime: RouterRuntime<S>,
         limits: RouterLimits,
-        metrics: MetricsHandle,
     ) -> Self {
+        let RouterRuntime {
+            state,
+            sessions,
+            shutdown,
+            metrics,
+            authoring,
+        } = runtime;
         let mut routes = ScopedRouteTables::new();
+        let mut command_routes: HashMap<CommandId, Vec<RouteId>> = HashMap::new();
+        let mut all_command_routes = Vec::new();
         let mut interest = InterestPlan::default();
         for (index, handler) in handlers.iter().enumerate() {
             let id = u32::try_from(index).expect("handler count must fit in u32");
             routes.insert(id, &handler.spec, &handler.scope);
             interest.add_route(&handler.spec, &handler.scope);
+            if let Some(command_id) = handler.command_id {
+                command_routes.entry(command_id).or_default().push(id);
+                all_command_routes.push(id);
+            }
+        }
+        if !all_command_routes.is_empty()
+            && (authoring.registry.dynamic_shortcuts_enabled()
+                || authoring.registry.broad_command_matching())
+        {
+            interest.add_route(
+                &RouteSpec::Event(EventType::Message),
+                &crate::handler::RouteScope::global(),
+            );
         }
         interest.set_session_interest(sessions.interest());
         Self {
@@ -292,6 +327,9 @@ where
             handler_timeout: limits.handler_timeout,
             max_handler_replies: limits.max_handler_replies,
             metrics,
+            authoring,
+            command_routes,
+            all_command_routes,
             interest,
         }
     }
@@ -305,7 +343,37 @@ where
     /// remain deterministic without allocating a temporary candidate vector.
     pub(crate) async fn dispatch(&self, event: Arc<DispatchEnvelope>, bot: BotHandle) {
         let identity = bot.identity();
-        let candidates = self.routes.candidates(&event, identity);
+        let base_candidates = self.routes.candidates(&event, identity);
+        let mut dynamic_candidates = Vec::new();
+        if matches!(event.index.kind, DispatchKind::Message) {
+            if self.authoring.registry.broad_command_matching() {
+                dynamic_candidates.extend_from_slice(&self.all_command_routes);
+            } else if self.authoring.registry.dynamic_shortcuts_enabled() {
+                if let Event::MessageEvent(message) = event.event() {
+                    let input = message.message.extract_plain_text();
+                    for command_id in self
+                        .authoring
+                        .registry
+                        .matching_shortcut_commands(&input, 64)
+                    {
+                        if let Some(routes) = self.command_routes.get(&command_id) {
+                            dynamic_candidates.extend_from_slice(routes);
+                        }
+                    }
+                }
+            }
+        }
+        dynamic_candidates.sort_unstable();
+        dynamic_candidates.dedup();
+        let candidates = [
+            base_candidates[0],
+            base_candidates[1],
+            base_candidates[2],
+            base_candidates[3],
+            base_candidates[4],
+            base_candidates[5],
+            dynamic_candidates.as_slice(),
+        ];
         let candidate_count = candidates.iter().map(|routes| routes.len()).sum::<usize>();
         self.metrics.route_candidates(candidate_count);
         if candidate_count == 0 {
@@ -326,20 +394,29 @@ where
             }
         }
 
-        let mut positions = [0_usize; 6];
+        let command_input = self
+            .authoring
+            .registry
+            .broad_command_matching()
+            .then(|| Arc::new(tokio::sync::OnceCell::new()));
+        let mut positions = [0_usize; 7];
         while let Some(route_id) = next_route_id(&candidates, &mut positions) {
             let prepared = &self.handlers[route_id as usize];
-            debug_assert!(prepared.scope.matches(identity));
+            if !prepared.scope.matches(identity) {
+                continue;
+            }
             let handler = &prepared.handler;
             self.metrics.handler_call();
             let future = match catch_unwind(AssertUnwindSafe(|| {
-                handler.call(
-                    Arc::clone(&event),
-                    Arc::clone(&self.state),
-                    bot.clone(),
-                    self.sessions.clone(),
-                    self.shutdown.clone(),
-                )
+                handler.call(HandlerCall {
+                    event: Arc::clone(&event),
+                    state: Arc::clone(&self.state),
+                    bot: bot.clone(),
+                    sessions: self.sessions.clone(),
+                    shutdown: self.shutdown.clone(),
+                    authoring: Arc::clone(&self.authoring),
+                    command_input: command_input.clone(),
+                })
             })) {
                 Ok(future) => future,
                 Err(_) => {
@@ -390,6 +467,7 @@ where
             }
             .resolve(prepared.default_block);
             let stop = outcome.is_stopped();
+            let delivery_pipeline = outcome.delivery_pipeline();
             if outcome.replies.len() > self.max_handler_replies {
                 self.metrics.handler_effect_rejection();
                 tracing::error!(
@@ -402,14 +480,27 @@ where
                 match bot.api() {
                     Ok(api) => {
                         for reply in outcome.replies {
-                            match api
-                                .send_outgoing_message_with(
-                                    target.clone(),
-                                    reply,
-                                    oxidebot_core::FallbackPolicy::Auto,
-                                )
-                                .await
-                            {
+                            let delivery = if let Some(pipeline) = &delivery_pipeline {
+                                pipeline
+                                    .deliver(
+                                        &api,
+                                        target.clone(),
+                                        reply,
+                                        oxidebot_core::FallbackPolicy::Auto,
+                                    )
+                                    .await
+                            } else {
+                                self.authoring
+                                    .deliver(
+                                        None,
+                                        &api,
+                                        target.clone(),
+                                        reply,
+                                        oxidebot_core::FallbackPolicy::Auto,
+                                    )
+                                    .await
+                            };
+                            match delivery {
                                 Ok(report) => {
                                     if report.degraded() {
                                         tracing::warn!(
