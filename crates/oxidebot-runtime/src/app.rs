@@ -55,6 +55,7 @@ where
 }
 
 impl OxideBot<()> {
+    /// Creates an application with unit root state and balanced defaults.
     #[must_use]
     pub fn new() -> Self {
         Self::with_state(())
@@ -71,6 +72,7 @@ impl<S> OxideBot<S>
 where
     S: Send + Sync + 'static,
 {
+    /// Creates an application with caller-owned immutable root state.
     #[must_use]
     pub fn with_state(state: S) -> Self {
         Self {
@@ -86,29 +88,34 @@ where
         }
     }
 
+    /// Replaces configuration with one predefined resource profile.
     #[must_use]
     pub fn profile(mut self, profile: RuntimeProfile) -> Self {
         self.config = RuntimeConfig::for_profile(profile);
         self
     }
 
+    /// Replaces complete runtime configuration.
     #[must_use]
     pub fn config(mut self, config: RuntimeConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Replaces runtime metrics implementation.
     #[must_use]
     pub fn metrics(mut self, metrics: MetricsHandle) -> Self {
         self.metrics = metrics;
         self
     }
 
+    /// Returns a clone of the configured metrics handle.
     #[must_use]
     pub fn metrics_handle(&self) -> MetricsHandle {
         Arc::clone(&self.metrics)
     }
 
+    /// Replaces the command output renderer.
     #[must_use]
     pub fn command_renderer<R>(mut self, renderer: R) -> Self
     where
@@ -118,6 +125,7 @@ where
         self
     }
 
+    /// Replaces locale resolution for application authoring.
     #[must_use]
     pub fn locale_resolver<R>(mut self, resolver: R) -> Self
     where
@@ -175,12 +183,14 @@ where
         )?))
     }
 
+    /// Replaces the command registry.
     #[must_use]
     pub fn command_registry(mut self, registry: CommandRegistry) -> Self {
         self.authoring.registry = registry;
         self
     }
 
+    /// Adds a command input rewriter.
     #[must_use]
     pub fn command_rewriter<R>(mut self, rewriter: R) -> Self
     where
@@ -190,6 +200,7 @@ where
         self
     }
 
+    /// Adds a portable message normalizer.
     #[must_use]
     pub fn message_normalizer<N>(mut self, normalizer: N) -> Self
     where
@@ -199,6 +210,7 @@ where
         self
     }
 
+    /// Adds command input middleware.
     #[must_use]
     pub fn command_middleware<M>(mut self, middleware: M) -> Self
     where
@@ -208,6 +220,7 @@ where
         self
     }
 
+    /// Adds command output middleware.
     #[must_use]
     pub fn command_output_middleware<M>(mut self, middleware: M) -> Self
     where
@@ -217,6 +230,7 @@ where
         self
     }
 
+    /// Adds delivery middleware.
     #[must_use]
     pub fn delivery_middleware<M>(mut self, middleware: M) -> Self
     where
@@ -228,6 +242,7 @@ where
         self
     }
 
+    /// Registers an adapter.
     #[must_use]
     pub fn adapter<A>(mut self, adapter: A) -> Self
     where
@@ -277,6 +292,7 @@ where
     }
 
     #[must_use]
+    /// Adds an application-wide event filter.
     pub fn filter<F>(mut self, filter: F) -> Self
     where
         F: Filter<S>,
@@ -286,6 +302,7 @@ where
     }
 
     #[must_use]
+    /// Adds a supervised background service.
     pub fn service<T>(mut self, service: T) -> Self
     where
         T: Service<S>,
@@ -294,6 +311,7 @@ where
         self
     }
 
+    /// Validates and compiles the immutable runnable application.
     pub fn build(self) -> std::result::Result<Application<S>, BuildError> {
         let Self {
             state,
@@ -358,6 +376,7 @@ where
 
     /// Runs until Ctrl-C (with the default `signal` feature), fatal failure, or
     /// natural completion of every finite adapter.
+    /// Runs until shutdown, fatal failure, or finite adapter completion.
     pub async fn run(self) -> Result<()> {
         self.build()?.run().await
     }
@@ -405,11 +424,13 @@ impl<S> Application<S>
 where
     S: Send + Sync + 'static,
 {
+    /// Returns a clone of this application's metrics handle.
     #[must_use]
     pub fn metrics(&self) -> MetricsHandle {
         Arc::clone(&self.metrics)
     }
 
+    /// Runs until Ctrl-C, fatal failure, or finite adapter completion.
     #[cfg(feature = "signal")]
     pub async fn run(self) -> Result<()> {
         self.run_internal(
@@ -423,11 +444,13 @@ where
         .await
     }
 
+    /// Runs until fatal failure or finite adapter completion when signals are disabled.
     #[cfg(not(feature = "signal"))]
     pub async fn run(self) -> Result<()> {
         self.run_internal(pending(), RunMode::Normal).await
     }
 
+    /// Runs only finite adapters until every adapter completes.
     pub async fn run_to_completion(self) -> Result<()> {
         if self
             .adapters
@@ -439,6 +462,7 @@ where
         self.run_internal(pending(), RunMode::Finite).await
     }
 
+    /// Runs until the caller-provided shutdown future resolves.
     pub async fn run_until<F>(self, shutdown_signal: F) -> Result<()>
     where
         F: Future<Output = ()>,
