@@ -75,18 +75,19 @@ jobs:
           for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
             cargo +stable doc -p "$package" --no-deps --all-features --locked
           done
-      - name: Package every publishable source crate
+      - name: Verify the publish-set root package
         run: |
           set -euo pipefail
-          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
-            cargo +stable package -p "$package" --locked
-          done
-      - name: Inspect packaged manifests and sources
+          # Dependent crates cannot be packaged against an empty crates.io
+          # release set: Cargo validates even dev-dependencies against the
+          # index before creating their archive. `cargo publish` below performs
+          # that same package validation in dependency order after each member
+          # exists; this root check proves archive construction independently.
+          cargo +stable package -p oxidebot-core --locked
+      - name: Inspect the root package manifest and sources
         run: |
           set -euo pipefail
-          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
-            cargo +stable package -p "$package" --list --locked
-          done
+          tar -tzf "target/package/oxidebot-core-${{ needs.validate.outputs.version }}.crate"
 
   publish:
     name: Publish crates.io release
