@@ -8,9 +8,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use oxidebot_core::{
-    source::message::{DeliveryItemResult, DeliveryPlan, DeliveryReport},
-    BotCapabilities, BotId, CallApiTrait, CallResult, ConversationRef, EventId, MessageRef,
-    MessageTarget, PlatformId, SupportLevel,
+    source::message::{DeliveryPlan, DeliveryReport},
+    BotCapabilities, BotId, CallApiTrait, CallResult, ConversationRef, DeliveryReportBuilder,
+    EventId, MessageRef, MessageTarget, PlatformId, SupportLevel,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -92,9 +92,8 @@ impl CallApiTrait for ConsoleApi {
         target: MessageTarget,
         plan: DeliveryPlan,
     ) -> CallResult<DeliveryReport> {
-        let mut messages = Vec::with_capacity(plan.messages.len());
-        let mut items = Vec::with_capacity(plan.messages.len());
-        for (index, message) in plan.messages.into_iter().enumerate() {
+        let mut report = DeliveryReportBuilder::new(&plan);
+        for message in plan.messages {
             let rendered = message.get_raw_text();
             if rendered.is_empty() {
                 println!("[bot -> {target:?}] {message:?}");
@@ -104,18 +103,9 @@ impl CallApiTrait for ConsoleApi {
             let id = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
             let sent = MessageRef::new(format!("console-{id}"))
                 .in_conversation(target.conversation.clone());
-            messages.push(sent.clone());
-            items.push(DeliveryItemResult {
-                index,
-                messages: vec![sent],
-                error: None,
-            });
+            report.delivered([sent]);
         }
-        Ok(DeliveryReport {
-            messages,
-            degradations: plan.degradations,
-            items,
-        })
+        report.finish()
     }
 }
 
