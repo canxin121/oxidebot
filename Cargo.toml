@@ -6,6 +6,7 @@ members = [
     "crates/oxidebot",
     "crates/oxidebot-testkit",
     "crates/oxidebot-adapter-console",
+    "crates/oxidebot-adapter-telegram",
     "examples/minimal",
     "examples/console-bot",
     "tests/renamed-facade",
@@ -34,6 +35,7 @@ proc-macro2 = "1.0.106"
 proc-macro-crate = "3.4.0"
 quote = "1.0.45"
 regex = "1.11.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "native-tls"] }
 syn = { version = "2.0.117", features = ["full"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }

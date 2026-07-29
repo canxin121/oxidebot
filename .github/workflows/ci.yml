@@ -81,7 +81,7 @@ jobs:
       - run: cargo +stable machete
       - name: Inspect every publishable source package
         run: |
-          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
             cargo +stable package -p "$package" --list --allow-dirty --locked
           done
 

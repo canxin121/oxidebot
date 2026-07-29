@@ -1,0 +1,25 @@
+[package]
+name = "oxidebot-adapter-telegram"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Telegram Bot API long-polling adapter for OxideBot"
+readme = "README.md"
+keywords = ["bot", "chatbot", "telegram", "oxidebot"]
+categories = ["asynchronous", "api-bindings"]
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true

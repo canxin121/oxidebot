@@ -26,7 +26,8 @@ bus. Every handler reads the same shared event that adapters decode.
 
 ## Run a bot immediately
 
-The workspace now includes a real stdin/stdout adapter and a copyable example:
+The workspace includes a real stdin/stdout development adapter, a Telegram Bot
+API long-polling adapter, and a copyable example:
 
 ```bash
 cargo run -p oxidebot-console-example
@@ -35,7 +36,8 @@ cargo run -p oxidebot-console-example
 Then type `/ping`, `/echo hello`, or `/help` in the terminal. The complete
 example is in [`examples/console-bot`](examples/console-bot), and the adapter is
 published as the independent `oxidebot-adapter-console` crate inside this
-workspace.
+workspace. Telegram integration lives in `oxidebot-adapter-telegram`; see its
+crate README before connecting production traffic.
 
 A minimal application is deliberately small:
 

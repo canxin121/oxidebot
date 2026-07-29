@@ -21,6 +21,9 @@ documented facade exports in `oxidebot`.
   implementations that split one logical message into physical sends.
 - `PluginBundle`, metadata, supervised plugin services, and build-time portable
   capability requirements.
+- `oxidebot-adapter-telegram`, a real Telegram Bot API long-polling adapter
+  with typed transport failures, portable text ingress/delivery, and recorded
+  protocol fixtures.
 - Separate application-build and end-to-end runtime benchmarks.
 
 ### Changed

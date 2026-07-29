@@ -16,6 +16,7 @@ The old `oxidebot` crate has become a workspace with explicit layers:
 | Derive and command macros | `oxidebot-macros` (re-exported by `oxidebot`) |
 | Deterministic fixtures | `oxidebot-testkit` |
 | Local console transport | `oxidebot-adapter-console` |
+| Telegram transport | `oxidebot-adapter-telegram` |
 
 Ordinary applications should begin with `use oxidebot::prelude::*;`. Adapter
 authors should use `oxidebot::adapter::prelude::*` and depend on the focused
