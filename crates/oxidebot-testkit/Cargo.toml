@@ -10,7 +10,6 @@ homepage.workspace = true
 description = "Deterministic adapter and API fixtures for OxideBot"
 
 [dependencies]
-anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }

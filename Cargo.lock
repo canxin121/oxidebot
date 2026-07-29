@@ -494,7 +494,6 @@ dependencies = [
 name = "oxidebot-runtime"
 version = "1.0.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "futures-util",
@@ -513,7 +512,6 @@ dependencies = [
 name = "oxidebot-testkit"
 version = "1.0.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "criterion",

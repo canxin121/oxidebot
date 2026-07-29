@@ -15,7 +15,6 @@ signal = ["tokio/signal"]
 multi-thread = ["tokio/rt-multi-thread"]
 
 [dependencies]
-anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
