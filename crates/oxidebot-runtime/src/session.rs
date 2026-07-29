@@ -39,12 +39,16 @@ impl ScopeKey {
 /// cancellation rather than multiplexing multiple next-message consumers.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionKey {
+    /// Conversation to which this session is scoped.
     pub conversation: ConversationKey,
+    /// User or actor to which this session is scoped.
     pub actor: UserKey,
+    /// Namespace that owns this exclusive session.
     pub namespace: SessionNamespace,
 }
 
 impl SessionKey {
+    /// Creates an exact conversation, actor, and namespace session key.
     #[must_use]
     pub fn new(conversation: ConversationKey, actor: UserKey, namespace: SessionNamespace) -> Self {
         Self {
@@ -65,20 +69,26 @@ impl SessionKey {
 /// Whether a matched session also reaches normal routing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SessionPolicy {
+    /// Deliver the matching event only to the session waiter.
     #[default]
     Consume,
+    /// Deliver the matching event to the waiter and continue normal routing.
     Tap,
 }
 
 /// Options for one ask/wait operation.
 #[derive(Clone, Debug)]
 pub struct AskOptions {
+    /// Maximum time for which the waiter remains active.
     pub timeout: Duration,
+    /// Namespace that identifies the session owner.
     pub namespace: SessionNamespace,
+    /// Whether a matching event continues through normal routing.
     pub policy: SessionPolicy,
 }
 
 impl AskOptions {
+    /// Creates options that consume the next matching event in the `ask` namespace.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Self {
@@ -88,12 +98,14 @@ impl AskOptions {
         }
     }
 
+    /// Replaces the namespace used to own the session.
     #[must_use]
     pub fn namespace(mut self, namespace: SessionNamespace) -> Self {
         self.namespace = namespace;
         self
     }
 
+    /// Sets whether a matching event is consumed or also routed normally.
     #[must_use]
     pub const fn policy(mut self, policy: SessionPolicy) -> Self {
         self.policy = policy;
@@ -109,6 +121,7 @@ pub struct SessionEvent {
 }
 
 impl SessionEvent {
+    /// Returns the canonical event delivered to this waiter.
     #[must_use]
     pub fn event(&self) -> &Event {
         self.event.event()

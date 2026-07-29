@@ -10,12 +10,16 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 /// One physical-message outcome from a bulk receipt mutation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MutationItemResult {
+    /// Zero-based position of the physical message in the receipt.
     pub index: usize,
+    /// Reference to the physical message that was mutated.
     pub message: MessageRef,
+    /// Stringified operation error, or `None` when the mutation succeeded.
     pub error: Option<String>,
 }
 
 impl MutationItemResult {
+    /// Returns whether this individual physical-message mutation succeeded.
     #[must_use]
     pub fn succeeded(&self) -> bool {
         self.error.is_none()
@@ -26,15 +30,18 @@ impl MutationItemResult {
 /// logical receipt that contains multiple physical messages.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MutationReport {
+    /// One outcome for each physical message in the logical receipt.
     pub items: Vec<MutationItemResult>,
 }
 
 impl MutationReport {
+    /// Returns whether every physical-message mutation succeeded.
     #[must_use]
     pub fn completed(&self) -> bool {
         self.items.iter().all(MutationItemResult::succeeded)
     }
 
+    /// Iterates over the physical-message mutations that failed.
     pub fn failures(&self) -> impl Iterator<Item = &MutationItemResult> {
         self.items.iter().filter(|item| !item.succeeded())
     }
@@ -55,7 +62,9 @@ impl MutationReport {
 /// Error retaining all successful and failed physical mutations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartialMutationError {
+    /// Operation that yielded a partial outcome.
     pub operation: &'static str,
+    /// Complete set of successful and failed per-message outcomes.
     pub report: MutationReport,
 }
 
@@ -83,6 +92,7 @@ impl std::error::Error for PartialMutationError {}
 pub struct Bot(pub BotObject);
 
 impl Bot {
+    /// Returns the underlying unified platform API object.
     #[must_use]
     pub fn into_inner(self) -> BotObject {
         self.0
@@ -129,6 +139,7 @@ impl Reply {
         }
     }
 
+    /// Returns the target to which this sender will deliver messages.
     #[must_use]
     pub fn target(&self) -> &MessageTarget {
         &self.target
@@ -161,10 +172,12 @@ impl Reply {
         self
     }
 
+    /// Sends a message to this reply target without attaching a reply reference.
     pub async fn send(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
         self.send_inner(message.into(), false).await
     }
 
+    /// Sends a message as a reply when the triggering event has a message reference.
     pub async fn reply(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
         self.send_inner(message.into(), true).await
     }
@@ -221,16 +234,19 @@ pub struct Receipt {
 }
 
 impl Receipt {
+    /// Returns the adapter delivery report for this logical send.
     #[must_use]
     pub fn report(&self) -> &DeliveryReport {
         &self.report
     }
 
+    /// Returns every physical message reference produced by this logical send.
     #[must_use]
     pub fn references(&self) -> &[MessageRef] {
         &self.report.messages
     }
 
+    /// Iterates over the identifiers of every delivered physical message.
     pub fn ids(&self) -> impl ExactSizeIterator<Item = &str> {
         self.report
             .messages
@@ -238,36 +254,43 @@ impl Receipt {
             .map(|message| message.id.as_str())
     }
 
+    /// Returns whether capability fallback degraded this delivery.
     #[must_use]
     pub fn degraded(&self) -> bool {
         self.report.degraded()
     }
 
+    /// Returns the capability degradations recorded for this delivery.
     #[must_use]
     pub fn degradations(&self) -> &[DeliveryDegradation] {
         &self.report.degradations
     }
 
+    /// Returns the capabilities of the adapter that delivered this receipt.
     #[must_use]
     pub fn capabilities(&self) -> BotCapabilities {
         self.bot.bot_capabilities().unwrap_or_default()
     }
 
+    /// Returns whether this adapter supports editing delivered messages.
     #[must_use]
     pub fn is_editable(&self) -> bool {
         self.capabilities().delivery.edit_messages.is_supported()
     }
 
+    /// Returns whether this adapter supports deleting delivered messages.
     #[must_use]
     pub fn is_deletable(&self) -> bool {
         self.capabilities().delivery.delete_messages.is_supported()
     }
 
+    /// Returns whether this adapter supports adding reactions to delivered messages.
     #[must_use]
     pub fn is_reactionable(&self) -> bool {
         self.capabilities().collaboration.reactions.is_supported()
     }
 
+    /// Sends another message to the same target as this receipt.
     pub async fn send(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
         let message = message.into();
         let report = if let Some(pipeline) = &self.pipeline {
@@ -293,6 +316,7 @@ impl Receipt {
         })
     }
 
+    /// Sends a reply to the last physical message in this receipt.
     pub async fn reply(&self, message: impl Into<Message>) -> Result<Receipt, HandlerError> {
         let Some(reference) = self.references().last() else {
             return Err(HandlerError::Api(
@@ -303,6 +327,7 @@ impl Receipt {
             .await
     }
 
+    /// Replaces every physical message, returning an error if any edit fails.
     pub async fn edit(&self, replacement: impl Into<Message>) -> Result<(), HandlerError> {
         self.edit_report(replacement).await.into_result("edit")
     }
@@ -328,6 +353,7 @@ impl Receipt {
         MutationReport { items }
     }
 
+    /// Replaces the physical message at `index`.
     pub async fn edit_at(
         &self,
         index: usize,
@@ -340,6 +366,7 @@ impl Receipt {
             .map_err(HandlerError::from)
     }
 
+    /// Deletes every physical message, returning an error if any deletion fails.
     pub async fn delete(&self) -> Result<(), HandlerError> {
         self.delete_report().await.into_result("delete")
     }
@@ -363,6 +390,7 @@ impl Receipt {
         MutationReport { items }
     }
 
+    /// Deletes the physical message at `index`.
     pub async fn delete_at(&self, index: usize) -> Result<(), HandlerError> {
         let reference = self.reference_at(index)?;
         self.bot
@@ -371,6 +399,7 @@ impl Receipt {
             .map_err(HandlerError::from)
     }
 
+    /// Adds a Unicode-emoji reaction to every physical message in the receipt.
     pub async fn react(&self, reaction: impl Into<String>) -> Result<(), HandlerError> {
         self.react_report(reaction).await.into_result("reaction")
     }
@@ -399,6 +428,7 @@ impl Receipt {
         MutationReport { items }
     }
 
+    /// Adds a Unicode-emoji reaction to the physical message at `index`.
     pub async fn react_at(
         &self,
         index: usize,
