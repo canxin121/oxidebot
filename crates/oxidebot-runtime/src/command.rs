@@ -3178,29 +3178,37 @@ pub enum CommandParseError {
         choices: Arc<str>,
     },
     #[error("`{argument}` is outside the accepted range")]
+    /// A value violates configured numeric bounds.
     OutOfRange { argument: Arc<str> },
     #[error("`{argument}` has length {actual}, expected {expected}")]
+    /// A value violates configured text-length bounds.
     InvalidLength {
         argument: Arc<str>,
         actual: usize,
         expected: Arc<str>,
     },
     #[error("`{argument}` requires `{required}`")]
+    /// A supplied argument requires another argument.
     Requires {
         argument: Arc<str>,
         required: Arc<str>,
     },
     #[error("`{left}` conflicts with `{right}`")]
+    /// Two mutually exclusive arguments were supplied together.
     Conflict { left: Arc<str>, right: Arc<str> },
     #[error("unterminated quote in command")]
+    /// Text tokenization ended while a quote was still open.
     UnterminatedQuote,
     #[error("interactive command completion was cancelled")]
+    /// Interactive recovery was cancelled by the caller.
     Cancelled,
     #[error("interactive command completion exceeded its configured rounds")]
+    /// Interactive recovery used all configured rounds without valid input.
     CompletionExhausted,
 }
 
 impl CommandParseError {
+    /// Returns the localized prompt for a missing required argument.
     #[must_use]
     pub fn missing_prompt(&self) -> Option<&str> {
         match self {
@@ -3209,6 +3217,7 @@ impl CommandParseError {
         }
     }
 
+    /// Returns the missing required argument name, when applicable.
     #[must_use]
     pub fn missing_name(&self) -> Option<&str> {
         match self {
@@ -3217,6 +3226,7 @@ impl CommandParseError {
         }
     }
 
+    /// Returns a localized human-readable error message.
     #[must_use]
     pub fn localized_message(&self, locale: Option<&str>) -> String {
         let chinese = locale.is_none_or(|locale| locale.starts_with("zh"));
@@ -3734,30 +3744,46 @@ pub fn tokenize_text(input: &str) -> Result<Vec<String>, CommandParseError> {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum CommandOutput {
+    /// Catalog of discoverable commands.
     Catalog {
+        /// Commands included in the catalog.
         commands: Arc<[Command]>,
     },
+    /// Help for one command and optional branch path.
     Help {
+        /// Command being described.
         command: Command,
+        /// Selected branch names beneath the command root.
         branch_names: Arc<[Arc<str>]>,
     },
+    /// No command or branch matched the requested query.
     NotFound {
+        /// Original user query.
         query: Arc<str>,
+        /// Commands searched when rendering alternatives.
         commands: Arc<[Command]>,
     },
+    /// Parsing failed for a command invocation.
     ParseError {
+        /// Command whose invocation failed.
         command: Command,
+        /// Selected branch names at the failure point.
         branch_names: Arc<[Arc<str>]>,
+        /// Structured parse failure.
         error: CommandParseError,
     },
+    /// Completion items for a partially entered command.
     Suggestions {
+        /// Candidate completion items.
         items: Arc<[CompletionItem]>,
     },
+    /// Prebuilt canonical message output.
     Message(Message),
 }
 
 /// Converts structured command output into the canonical message IR.
 pub trait CommandRenderer: Send + Sync + 'static {
+    /// Renders structured output for an optional locale.
     fn render(&self, output: &CommandOutput, locale: Option<&str>) -> Message;
 }
 
@@ -3849,6 +3875,7 @@ pub struct CatalogCommandRenderer {
 }
 
 impl CatalogCommandRenderer {
+    /// Creates a resource-backed renderer with the default command key prefix.
     #[must_use]
     pub fn new(catalog: TranslationCatalog) -> Self {
         Self {
@@ -3857,6 +3884,7 @@ impl CatalogCommandRenderer {
         }
     }
 
+    /// Replaces the translation-key prefix used by this renderer.
     #[must_use]
     pub fn prefix(mut self, value: impl Into<Arc<str>>) -> Self {
         self.prefix = value.into();
@@ -3932,6 +3960,7 @@ pub struct CommandCatalog {
 }
 
 impl CommandCatalog {
+    /// Creates a global-scope catalog from command definitions.
     #[must_use]
     pub fn new(commands: impl IntoIterator<Item = Command>) -> Self {
         let commands = commands.into_iter().collect::<Vec<_>>();
@@ -3960,11 +3989,13 @@ impl CommandCatalog {
         )
     }
 
+    /// Returns commands in registration order.
     #[must_use]
     pub fn commands(&self) -> &[Command] {
         &self.commands
     }
 
+    /// Finds a command by its portable native command ID.
     #[must_use]
     pub fn find_by_id(&self, id: &str) -> Option<&Command> {
         self.commands
@@ -3972,6 +4003,7 @@ impl CommandCatalog {
             .find(|command| id == format!("oxidebot:{:016x}", command.id().0))
     }
 
+    /// Finds a command by canonical name or alias.
     #[must_use]
     pub fn find(&self, name: &str) -> Option<&Command> {
         let name = name.trim().trim_start_matches('/');
@@ -3985,6 +4017,7 @@ impl CommandCatalog {
         })
     }
 
+    /// Returns a catalog filtered to commands currently enabled in `registry`.
     #[must_use]
     pub fn enabled(&self, registry: &crate::CommandRegistry) -> Self {
         let mut commands = Vec::new();
@@ -4001,6 +4034,7 @@ impl CommandCatalog {
         }
     }
 
+    /// Converts discoverable commands to portable native definitions.
     #[must_use]
     pub fn definitions(&self) -> Vec<CommandDefinition> {
         self.commands
@@ -4010,6 +4044,7 @@ impl CommandCatalog {
             .collect()
     }
 
+    /// Builds catalog, help, or not-found output for a query.
     #[must_use]
     pub fn output(&self, query: Option<&str>) -> CommandOutput {
         let Some(query) = query.filter(|value| !value.trim().is_empty()) else {
@@ -4054,17 +4089,20 @@ impl CommandCatalog {
         }
     }
 
+    /// Renders catalog output to a canonical message in `locale`.
     #[must_use]
     pub fn render_message(&self, query: Option<&str>, locale: Option<&str>) -> Message {
         DefaultCommandRenderer.render(&self.output(query), locale)
     }
 
     /// Renders the catalog as plain text.
+    /// Suggests command, branch, option, and choice completions.
     #[must_use]
     pub fn render_text(&self, query: Option<&str>) -> String {
         self.render_message(query, None).get_raw_text()
     }
 
+    /// Produces portable native suggestions for an adapter request.
     #[must_use]
     pub fn suggest(&self, input: &str, cursor: usize, locale: Option<&str>) -> Vec<CompletionItem> {
         let (prefix, replace) = cursor_prefix(input, cursor);
