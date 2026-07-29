@@ -255,12 +255,21 @@ impl SessionRegistry {
                     TryAcquireError::NoPermits => SessionError::Full,
                     TryAcquireError::Closed => SessionError::Closed,
                 })?;
-        let registration_id = self
-            .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| SessionError::SequenceExhausted)?;
+        let mut current = self.sequence.load(Ordering::Relaxed);
+        let registration_id = loop {
+            let next = current
+                .checked_add(1)
+                .ok_or(SessionError::SequenceExhausted)?;
+            match self.sequence.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => break previous,
+                Err(observed) => current = observed,
+            }
+        };
         let shard = self.interest.shard_for(&scope);
         let cancellation = CancellationToken::new();
         let (event_sender, event_receiver) = oneshot::channel();

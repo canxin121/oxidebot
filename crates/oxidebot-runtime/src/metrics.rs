@@ -36,11 +36,18 @@ impl Gauge {
 
     #[inline]
     fn decrement(&self) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                Some(value.saturating_sub(1))
-            });
+        let mut current = self.0.load(Ordering::Relaxed);
+        loop {
+            match self.0.compare_exchange_weak(
+                current,
+                current.saturating_sub(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     #[inline]

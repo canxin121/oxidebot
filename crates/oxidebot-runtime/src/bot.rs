@@ -502,12 +502,21 @@ impl CommandClient {
             deadline,
         )
         .await?;
-        let sequence = self
-            .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| CommandError::SequenceExhausted)?;
+        let mut current = self.sequence.load(Ordering::Relaxed);
+        let sequence = loop {
+            let next = current
+                .checked_add(1)
+                .ok_or(CommandError::SequenceExhausted)?;
+            match self.sequence.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => break previous,
+                Err(observed) => current = observed,
+            }
+        };
         let envelope = CommandEnvelope {
             key: operation.key(sequence),
             sequence,

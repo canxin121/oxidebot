@@ -2309,13 +2309,22 @@ mod resource_limit_tests {
             _commands: Vec<CommandDefinition>,
         ) -> anyhow::Result<()> {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            if self
-                .failures
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                    value.checked_sub(1)
-                })
-                .is_ok()
-            {
+            let mut failures = self.failures.load(Ordering::Acquire);
+            let should_fail = loop {
+                let Some(next) = failures.checked_sub(1) else {
+                    break false;
+                };
+                match self.failures.compare_exchange_weak(
+                    failures,
+                    next,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break true,
+                    Err(observed) => failures = observed,
+                }
+            };
+            if should_fail {
                 return Err(crate::PlatformError::new(
                     crate::PlatformErrorKind::Temporary,
                     "scripted publication failure",

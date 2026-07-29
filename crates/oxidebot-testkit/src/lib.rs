@@ -417,14 +417,22 @@ impl ScriptedApi {
         message: Vec<MessageSegment>,
     ) -> Result<usize, PlatformError> {
         let attempt = self.0.attempts.fetch_add(1, Ordering::AcqRel) + 1;
-        if self
-            .0
-            .temporary_failures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
+        let mut failures = self.0.temporary_failures.load(Ordering::Acquire);
+        let should_fail = loop {
+            let Some(next) = failures.checked_sub(1) else {
+                break false;
+            };
+            match self.0.temporary_failures.compare_exchange_weak(
+                failures,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break true,
+                Err(observed) => failures = observed,
+            }
+        };
+        if should_fail {
             return Err(PlatformError::new(
                 PlatformErrorKind::Temporary,
                 "scripted temporary failure",
