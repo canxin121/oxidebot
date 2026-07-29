@@ -2627,16 +2627,19 @@ pub struct ParsedArguments {
 }
 
 impl ParsedArguments {
+    /// Returns whether the named field was supplied.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.present.contains(name)
     }
 
+    /// Returns whether the field with `id` was supplied.
     #[must_use]
     pub fn contains_id(&self, id: CommandFieldId) -> bool {
         self.present_ids.contains(&id)
     }
 
+    /// Converts the first value of a required named field.
     pub fn required<T>(&self, name: &str) -> Result<T, CommandParseError>
     where
         T: FromCommandValue,
@@ -2653,6 +2656,7 @@ impl ParsedArguments {
         T::from_command_value(value)
     }
 
+    /// Converts the first value of a required field identified by `id`.
     pub fn required_id<T>(&self, id: CommandFieldId) -> Result<T, CommandParseError>
     where
         T: FromCommandValue,
@@ -2666,6 +2670,7 @@ impl ParsedArguments {
         T::from_command_value(value)
     }
 
+    /// Converts the first named field value when it is present.
     pub fn optional<T>(&self, name: &str) -> Result<Option<T>, CommandParseError>
     where
         T: FromCommandValue,
@@ -2678,6 +2683,7 @@ impl ParsedArguments {
             .transpose()
     }
 
+    /// Converts the first field value by stable ID when it is present.
     pub fn optional_id<T>(&self, id: CommandFieldId) -> Result<Option<T>, CommandParseError>
     where
         T: FromCommandValue,
@@ -2690,6 +2696,7 @@ impl ParsedArguments {
             .transpose()
     }
 
+    /// Converts every value of a named field in input order.
     pub fn many<T>(&self, name: &str) -> Result<Vec<T>, CommandParseError>
     where
         T: FromCommandValue,
@@ -2703,6 +2710,7 @@ impl ParsedArguments {
             .collect()
     }
 
+    /// Converts every value of a field by stable ID in input order.
     pub fn many_id<T>(&self, id: CommandFieldId) -> Result<Vec<T>, CommandParseError>
     where
         T: FromCommandValue,
@@ -2716,31 +2724,37 @@ impl ParsedArguments {
             .collect()
     }
 
+    /// Returns a named boolean flag's value.
     #[must_use]
     pub fn flag(&self, name: &str) -> bool {
         self.flags.contains(name)
     }
 
+    /// Returns a boolean flag's value by stable field ID.
     #[must_use]
     pub fn flag_id(&self, id: CommandFieldId) -> bool {
         self.flag_ids.contains(&id)
     }
 
+    /// Returns the count action result for a named field.
     #[must_use]
     pub fn count(&self, name: &str) -> u32 {
         self.counts.get(name).copied().unwrap_or_default()
     }
 
+    /// Returns the count action result by stable field ID.
     #[must_use]
     pub fn count_id(&self, id: CommandFieldId) -> u32 {
         self.counts_by_id.get(&id).copied().unwrap_or_default()
     }
 
+    /// Borrows every lossless value of a named field.
     #[must_use]
     pub fn values(&self, name: &str) -> &[CommandValue] {
         self.values.get(name).map_or(&[], Vec::as_slice)
     }
 
+    /// Borrows every lossless value of a field by stable ID.
     #[must_use]
     pub fn values_id(&self, id: CommandFieldId) -> &[CommandValue] {
         self.values_by_id.get(&id).map_or(&[], Vec::as_slice)
@@ -2825,7 +2839,9 @@ impl ParsedArguments {
 /// Where a command match originated.
 #[derive(Clone, Debug)]
 pub enum CommandSource {
+    /// Command text was tokenized from a canonical message.
     Text,
+    /// Adapter provided a typed native command invocation.
     Native(Arc<CommandInvocation>),
 }
 
@@ -2847,41 +2863,49 @@ pub struct CommandMatch {
 }
 
 impl CommandMatch {
+    /// Returns the matched command definition.
     #[must_use]
     pub fn command(&self) -> &Command {
         &self.command
     }
 
+    /// Returns the root name or alias used by the caller.
     #[must_use]
     pub fn invoked_as(&self) -> &str {
         &self.invoked_as
     }
 
+    /// Returns the textual prefix used by the caller.
     #[must_use]
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
 
+    /// Returns lossless tokens after command and branch names.
     #[must_use]
     pub fn values(&self) -> &[CommandValue] {
         &self.values
     }
 
+    /// Returns the active argument schema.
     #[must_use]
     pub fn schema(&self) -> &CommandSchema {
         &self.schema
     }
 
+    /// Returns cached parsed arguments when parsing has already happened.
     #[must_use]
     pub fn arguments(&self) -> Option<&ParsedArguments> {
         self.parsed.as_deref()
     }
 
+    /// Returns whether this match came from text or a native invocation.
     #[must_use]
     pub fn source(&self) -> &CommandSource {
         &self.source
     }
 
+    /// Returns the adapter-reported locale, if present.
     #[must_use]
     pub fn locale(&self) -> Option<&str> {
         self.locale.as_deref()
@@ -2892,11 +2916,13 @@ impl CommandMatch {
         self
     }
 
+    /// Returns stable IDs for selected command-tree branches.
     #[must_use]
     pub fn branch_path(&self) -> &[CommandNodeId] {
         &self.branch_path
     }
 
+    /// Returns selected command-tree branch names.
     #[must_use]
     pub fn branch_names(&self) -> &[Arc<str>] {
         &self.branch_names
