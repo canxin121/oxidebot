@@ -212,8 +212,14 @@ pub struct TelegramApi {
 
 impl TelegramApi {
     fn new(config: &TelegramConfig) -> Result<Self, TelegramConfigError> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
+            .use_preconfigured_tls(tls)
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
                 "/",

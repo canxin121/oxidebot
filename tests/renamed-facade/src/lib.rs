@@ -1,3 +1,5 @@
+//! Compile-time smoke crate that consumes OxideBot through a renamed facade dependency.
+
 #![allow(
     dead_code,
     reason = "this crate exists only to compile public macros through a renamed dependency"

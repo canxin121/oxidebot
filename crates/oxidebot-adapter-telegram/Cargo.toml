@@ -18,11 +18,13 @@ chrono.workspace = true
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0" }
 oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0" }
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 oxidebot-testkit = { path = "../oxidebot-testkit", version = "1.0.0" }

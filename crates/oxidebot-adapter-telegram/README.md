@@ -30,4 +30,6 @@ let app = OxideBot::new().adapter(adapter);
 
 Use a Telegram test bot before production traffic. The adapter accepts a custom
 Bot API base URL through `TelegramConfig::api_base`, which makes recorded or
-local Bot API fixture testing possible.
+local Bot API fixture testing possible. TLS uses Rustls with the built-in
+Mozilla WebPKI root store, so Android runners do not need a system OpenSSL
+installation or Android's JNI-backed platform certificate verifier.

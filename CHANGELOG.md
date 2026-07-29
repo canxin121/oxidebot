@@ -28,6 +28,10 @@ documented facade exports in `oxidebot`.
 
 ### Changed
 
+- `oxidebot-adapter-telegram` now uses an explicitly configured Rustls client
+  with the built-in Mozilla WebPKI root store. This keeps TLS verification
+  intact while allowing Android cross-compilation without OpenSSL or JNI-backed
+  platform certificate initialization.
 - `oxidebot-adapter-telegram` now renders portable `RichText` as safely
   escaped Telegram `MarkdownV2`, preserving semantic emphasis for text-only
   adapters instead of flattening it to unformatted text.

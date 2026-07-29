@@ -1,3 +1,5 @@
+//! Finite, scripted minimal OxideBot application example.
+
 use oxidebot::commands::{CommandOverlay, Shortcut};
 use oxidebot::prelude::*;
 use oxidebot_testkit::{ScriptStep, ScriptedAdapter, TestFrame};

@@ -1,3 +1,5 @@
+//! Interactive console application demonstrating common OxideBot features.
+
 use oxidebot::{
     commands::prelude::{CompletionInput, CompletionItem, CompletionKind},
     message::prelude::TemplateValue,
