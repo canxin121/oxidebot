@@ -2216,66 +2216,79 @@ impl ArgumentSpec {
         self
     }
 
+    /// Returns this field's stable schema-local ID.
     #[must_use]
     pub const fn id(&self) -> CommandFieldId {
         self.id
     }
 
+    /// Returns the schema field name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the long option name without dashes, if any.
     #[must_use]
     pub fn long_name(&self) -> Option<&str> {
         self.long.as_deref()
     }
 
+    /// Returns the short option character, if any.
     #[must_use]
     pub const fn short_name(&self) -> Option<char> {
         self.short
     }
 
+    /// Returns whether parsing can yield multiple values for this field.
     #[must_use]
     pub const fn is_multiple(&self) -> bool {
         self.multiple || self.rest || matches!(self.action, ArgumentAction::Append)
     }
 
+    /// Returns whether this field is an option flag.
     #[must_use]
     pub const fn is_flag(&self) -> bool {
         self.flag
     }
 
+    /// Returns how repeated option appearances affect parsed values.
     #[must_use]
     pub const fn action_kind(&self) -> ArgumentAction {
         self.action
     }
 
+    /// Returns the portable value kind expected for this field.
     #[must_use]
     pub fn value_kind(&self) -> &CommandValueKind {
         &self.kind
     }
 
+    /// Returns declared enumerated choices.
     #[must_use]
     pub fn choices(&self) -> &[ArgumentChoice] {
         &self.choices
     }
 
+    /// Returns whether this field requests platform completion support.
     #[must_use]
     pub const fn is_autocomplete(&self) -> bool {
         self.autocomplete
     }
 
+    /// Resolves help text for `locale`.
     #[must_use]
     pub fn help_text(&self, locale: Option<&str>) -> &str {
         self.help.resolve(locale)
     }
 
+    /// Returns the default interactive prompt for this field.
     #[must_use]
     pub fn prompt_text(&self) -> String {
         self.prompt_text_for(None)
     }
 
+    /// Returns the localized interactive prompt for this field.
     #[must_use]
     pub fn prompt_text_for(&self, locale: Option<&str>) -> String {
         self.prompt.as_ref().map_or_else(
@@ -2290,11 +2303,13 @@ impl ArgumentSpec {
         )
     }
 
+    /// Returns whether this field is required after flag and default rules.
     #[must_use]
     pub fn is_required(&self) -> bool {
         self.required && self.default.is_none() && !self.flag
     }
 
+    /// Returns whether this field has neither long nor short option spelling.
     #[must_use]
     pub fn is_positional(&self) -> bool {
         self.long.is_none() && self.short.is_none()
@@ -2378,14 +2393,20 @@ impl ArgumentSpec {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommandValue {
+    /// Text token from command input.
     Text(String),
+    /// Mention token retaining its user ID.
     Mention(String),
+    /// File token retaining its portable descriptor.
     File(File),
+    /// Rich message segment supplied as a command token.
     Segment(MessageSegment),
+    /// Typed value supplied by a native platform invocation.
     Form(FormValue),
 }
 
 impl CommandValue {
+    /// Borrows text when this value is textual.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
@@ -2394,6 +2415,7 @@ impl CommandValue {
         }
     }
 
+    /// Converts this value to a canonical rich message segment.
     #[must_use]
     pub fn into_segment(self) -> MessageSegment {
         match self {
@@ -2447,6 +2469,7 @@ fn form_value_label(value: &FormValue) -> String {
 
 /// Converts one typed command token into a field value.
 pub trait FromCommandValue: Sized {
+    /// Converts one lossless command value into this typed argument value.
     fn from_command_value(value: CommandValue) -> Result<Self, CommandParseError>;
 }
 
