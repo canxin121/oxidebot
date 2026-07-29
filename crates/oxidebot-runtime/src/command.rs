@@ -749,6 +749,7 @@ impl Command {
         keys
     }
 
+    /// Builds root command usage text from its active schema.
     #[must_use]
     pub fn usage(&self) -> String {
         let mut usage = self.display_name();
@@ -1136,6 +1137,7 @@ impl Command {
         }))
     }
 
+    /// Converts this command grammar into a portable native command definition.
     #[must_use]
     pub fn definition(&self) -> CommandDefinition {
         let mut options = self
@@ -1160,11 +1162,13 @@ impl Command {
         }
     }
 
+    /// Suggests branch, option, argument, and choice completions for input.
     #[must_use]
     pub fn suggest(&self, input: &str, cursor: usize, locale: Option<&str>) -> Vec<CompletionItem> {
         suggest_for_command(self, input, cursor, locale)
     }
 
+    /// Builds usage text for a selected command-tree branch path.
     #[must_use]
     pub fn usage_for(&self, branch_names: &[Arc<str>]) -> String {
         let mut usage = self.display_name();
@@ -1260,8 +1264,11 @@ fn same_word(actual: &str, expected: &str, case_sensitive: bool) -> bool {
 /// Interactive recovery policy for missing required arguments.
 #[derive(Clone, Debug)]
 pub struct CompletionConfig {
+    /// Maximum time to wait for one interactive answer.
     pub timeout: Duration,
+    /// Maximum retry rounds for one incomplete invocation.
     pub max_rounds: usize,
+    /// Case-insensitive words that cancel interactive recovery.
     pub cancel_words: Arc<[Arc<str>]>,
 }
 
@@ -1325,6 +1332,7 @@ pub struct SourceSpan {
     pub end: usize,
 }
 
+/// Semantic category used to render a completion item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionKind {
     /// Top-level command name.
@@ -1358,6 +1366,7 @@ pub struct CompletionItem {
 }
 
 impl CompletionItem {
+    /// Creates a completion with text display equal to its inserted value.
     #[must_use]
     pub fn new(value: impl Into<String>, kind: CompletionKind, replace: SourceSpan) -> Self {
         let value = value.into();
@@ -1371,12 +1380,14 @@ impl CompletionItem {
         }
     }
 
+    /// Attaches rich explanatory text to this completion.
     #[must_use]
     pub fn description(mut self, description: impl Into<Message>) -> Self {
         self.description = Some(description.into());
         self
     }
 
+    /// Associates this completion with the field that requested it.
     #[must_use]
     pub const fn field(mut self, field_id: CommandFieldId) -> Self {
         self.field_id = Some(field_id);
@@ -2959,11 +2970,13 @@ impl CommandMatch {
         }
     }
 
+    /// Returns the deepest selected branch name, if a branch was selected.
     #[must_use]
     pub fn selected_branch_name(&self) -> Option<&str> {
         self.branch_names.last().map(AsRef::as_ref)
     }
 
+    /// Returns whether the selected branch path equals `path` case-insensitively.
     #[must_use]
     pub fn is_branch(&self, path: &[&str]) -> bool {
         self.branch_names.len() == path.len()
@@ -2974,11 +2987,13 @@ impl CommandMatch {
                 .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
     }
 
+    /// Returns the active interactive recovery policy, if configured.
     #[must_use]
     pub fn completion_ref(&self) -> Option<&CompletionConfig> {
         self.completion.as_ref()
     }
 
+    /// Iterates only textual lossless values in the invocation.
     pub fn text_values(&self) -> impl Iterator<Item = &str> {
         self.values.iter().filter_map(CommandValue::as_text)
     }
@@ -3005,6 +3020,7 @@ impl CommandMatch {
         ))
     }
 
+    /// Parses invocation values with an explicit schema.
     pub fn parse_with(&self, schema: &CommandSchema) -> Result<ParsedArguments, CommandParseError> {
         if let Some(error) = self.incomplete_branch_error() {
             return Err(error);
@@ -3017,6 +3033,7 @@ impl CommandMatch {
         parse_arguments(schema, &self.values, self.locale())
     }
 
+    /// Parses invocation values with the selected command or branch schema.
     pub fn parse_active(&self) -> Result<ParsedArguments, CommandParseError> {
         if let Some(error) = self.incomplete_branch_error() {
             return Err(error);
@@ -3070,19 +3087,24 @@ impl CommandMatch {
 
 /// Converts the shared structured match into one handler argument.
 pub trait FromCommandMatch: Sized + Send + 'static {
+    /// Converts one structured command match into this handler argument type.
     fn from_match(result: &CommandMatch) -> Result<Self, CommandParseError>;
 }
 
 /// Implemented by strongly typed flat command argument structs.
 pub trait CommandArgs: Sized + Send + 'static {
+    /// Returns the static schema for this flat argument struct.
     fn schema() -> CommandSchema;
+    /// Builds this struct from parsed values.
     fn from_arguments(arguments: &ParsedArguments) -> Result<Self, CommandParseError>;
 
+    /// Parses a command match using this type's static schema.
     fn parse(result: &CommandMatch) -> Result<Self, CommandParseError> {
         let arguments = result.parse_with(&Self::schema())?;
         Self::from_arguments(&arguments)
     }
 
+    /// Creates a command named `name` bound to this type's schema.
     #[must_use]
     fn command(name: impl Into<Arc<str>>) -> Command {
         Command::new(name).schema(Self::schema())
@@ -3118,6 +3140,7 @@ where
 /// The name deliberately describes the command grammar rather than colliding
 /// with the platform menu `BotCommand` model from `oxidebot-core`.
 pub trait CommandTree: FromCommandMatch {
+    /// Returns the complete typed command-tree grammar.
     fn command() -> Command;
 
     /// Defines and binds the complete typed command tree in one expression.
@@ -3135,67 +3158,131 @@ pub trait CommandTree: FromCommandMatch {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CommandParseError {
     #[error("message did not match command `{command}`")]
-    NotMatched { command: Arc<str> },
+    /// Input did not match this command.
+    NotMatched {
+        /// Canonical command name expected by the parser.
+        command: Arc<str>,
+    },
     #[error("missing required subcommand; expected one of: {choices}")]
-    MissingSubcommand { choices: Arc<str> },
+    /// A command tree requires a branch name.
+    MissingSubcommand {
+        /// Human-readable available branch choices.
+        choices: Arc<str>,
+    },
     #[error("unknown subcommand `{value}`{suggestion}; expected one of: {choices}")]
+    /// A supplied branch name is not part of the command grammar.
     UnknownSubcommand {
+        /// Unrecognized branch text.
         value: Arc<str>,
+        /// Closest matching branch suggestion, if any.
         suggestion: CompletionSuggestion,
+        /// Human-readable available branch choices.
         choices: Arc<str>,
     },
     #[error("missing required argument `{name}`")]
-    MissingArgument { name: Arc<str>, prompt: Arc<str> },
+    /// A required argument was absent.
+    MissingArgument {
+        /// Schema name of the missing argument.
+        name: Arc<str>,
+        /// Localized prompt suitable for interactive recovery.
+        prompt: Arc<str>,
+    },
     #[error("missing schema field {id:?}")]
-    MissingFieldId { id: CommandFieldId },
+    /// A required field ID was absent.
+    MissingFieldId {
+        /// Stable ID of the missing schema field.
+        id: CommandFieldId,
+    },
     #[error("unknown option `{option}`{suggestion}")]
+    /// A named text option is unknown to the active schema.
     UnknownOption {
+        /// Unrecognized option spelling.
         option: Arc<str>,
+        /// Closest matching option suggestion, if any.
         suggestion: CompletionSuggestion,
     },
     #[error("unknown native option `{option}`")]
-    UnknownNativeOption { option: Arc<str> },
+    /// A native platform option does not map to the active schema.
+    UnknownNativeOption {
+        /// Unrecognized native option name.
+        option: Arc<str>,
+    },
     #[error("option `{option}` requires a value")]
-    MissingOptionValue { option: Arc<str> },
+    /// A value-taking option was supplied without a value.
+    MissingOptionValue {
+        /// Option spelling that needs a following value.
+        option: Arc<str>,
+    },
     #[error("option `{option}` was provided more than once")]
-    DuplicateOption { option: Arc<str> },
+    /// A non-repeatable option was supplied more than once.
+    DuplicateOption {
+        /// Option spelling that was repeated.
+        option: Arc<str>,
+    },
     #[error("unexpected extra argument `{value}`")]
-    ExtraArgument { value: Arc<str> },
+    /// Input contained a positional value with no accepting field.
+    ExtraArgument {
+        /// Unexpected input value.
+        value: Arc<str>,
+    },
     #[error("expected {expected}, received {actual}")]
+    /// A typed command value has the wrong kind.
     UnexpectedValue {
+        /// Expected portable kind.
         expected: &'static str,
+        /// Actual portable kind.
         actual: &'static str,
     },
     #[error("could not parse `{value}` as {expected}: {reason}")]
+    /// Text conversion into a requested Rust type failed.
     InvalidValue {
+        /// Input value that could not be converted.
         value: String,
+        /// Expected Rust or portable type.
         expected: &'static str,
+        /// Conversion failure detail.
         reason: String,
     },
     #[error("`{argument}` must be one of: {choices}")]
+    /// A value is not in an argument's declared choices.
     InvalidChoice {
+        /// Argument whose choice validation failed.
         argument: Arc<str>,
+        /// Human-readable allowed choices.
         choices: Arc<str>,
     },
     #[error("`{argument}` is outside the accepted range")]
     /// A value violates configured numeric bounds.
-    OutOfRange { argument: Arc<str> },
+    OutOfRange {
+        /// Argument violating numeric bounds.
+        argument: Arc<str>,
+    },
     #[error("`{argument}` has length {actual}, expected {expected}")]
     /// A value violates configured text-length bounds.
     InvalidLength {
+        /// Argument violating length bounds.
         argument: Arc<str>,
+        /// Observed text length.
         actual: usize,
+        /// Human-readable accepted length range.
         expected: Arc<str>,
     },
     #[error("`{argument}` requires `{required}`")]
     /// A supplied argument requires another argument.
     Requires {
+        /// Supplied argument with an unmet requirement.
         argument: Arc<str>,
+        /// Required companion argument.
         required: Arc<str>,
     },
     #[error("`{left}` conflicts with `{right}`")]
     /// Two mutually exclusive arguments were supplied together.
-    Conflict { left: Arc<str>, right: Arc<str> },
+    Conflict {
+        /// First conflicting argument.
+        left: Arc<str>,
+        /// Second conflicting argument.
+        right: Arc<str>,
+    },
     #[error("unterminated quote in command")]
     /// Text tokenization ended while a quote was still open.
     UnterminatedQuote,
@@ -3303,6 +3390,7 @@ impl CompletionSuggestion {
         Self(value)
     }
 
+    /// Returns the suggested replacement text, if an edit-distance match exists.
     #[must_use]
     pub fn value(&self) -> Option<&str> {
         self.0.as_deref()
@@ -3796,6 +3884,7 @@ where
     }
 }
 
+/// Built-in renderer for catalog, help, diagnostics, and parse-error output.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultCommandRenderer;
 
@@ -4144,6 +4233,7 @@ impl CommandCatalog {
             .collect()
     }
 
+    /// Produces portable native suggestions for an adapter completion request.
     #[must_use]
     pub fn native_suggestions(&self, request: &SuggestionRequest) -> Vec<Suggestion> {
         let limit = request.limit.unwrap_or(25).min(100) as usize;
