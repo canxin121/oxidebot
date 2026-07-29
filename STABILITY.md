@@ -2,7 +2,8 @@
 
 OxideBot publishes the `oxidebot-core`, `oxidebot-runtime`,
 `oxidebot-macros`, `oxidebot`, `oxidebot-testkit`, and
-`oxidebot-adapter-console` crates as one versioned release set.
+`oxidebot-adapter-console`, and `oxidebot-adapter-telegram` crates as one
+versioned release set.
 
 ## Stable surface
 
