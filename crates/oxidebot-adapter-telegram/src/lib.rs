@@ -214,9 +214,19 @@ impl TelegramApi {
     fn new(config: &TelegramConfig) -> Result<Self, TelegramConfigError> {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        // Do not consult Rustls's process-global default provider here. A host
+        // application can legitimately combine this adapter's `ring` feature
+        // with another dependency's `aws-lc-rs` feature, in which case Rustls
+        // cannot infer a unique global provider and `ClientConfig::builder()`
+        // panics. This transport owns its TLS client, so choose `ring`
+        // explicitly for this client only.
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .expect("ring supports Rustls's default TLS protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .use_preconfigured_tls(tls)
