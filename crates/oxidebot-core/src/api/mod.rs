@@ -27,7 +27,7 @@ use crate::{
         MessageRef, MessageTarget, Page, PageRequest, PermissionSet, Thread, ThreadOptions,
     },
     event::RequestDecision,
-    source::message::{DeliveryPlan, DeliveryReport, FallbackPolicy, Message},
+    source::message::{DeliveryItemResult, DeliveryPlan, DeliveryReport, FallbackPolicy, Message},
 };
 use platform::{PlatformApiRequest, PlatformApiResponse, UnsupportedPlatformApiError};
 
@@ -148,6 +148,80 @@ impl From<UnsupportedInteractionError> for CallError {
 impl From<UnsupportedPlatformApiError> for CallError {
     fn from(value: UnsupportedPlatformApiError) -> Self {
         Self::unsupported(format!("platform-native API method {:?}", value.method))
+    }
+}
+
+/// Incrementally builds a complete [`DeliveryReport`] while executing one
+/// previously planned logical delivery.
+///
+/// An adapter must report every physical message in plan order, including the
+/// successful prefix when a later send fails. This helper centralizes that
+/// otherwise easy-to-get-wrong invariant and produces a typed
+/// [`CallError::PartialDelivery`] when appropriate.
+#[derive(Debug)]
+pub struct DeliveryReportBuilder {
+    degradations: Vec<crate::source::message::DeliveryDegradation>,
+    messages: Vec<MessageRef>,
+    items: Vec<DeliveryItemResult>,
+    expected: usize,
+}
+
+impl DeliveryReportBuilder {
+    /// Starts a report for exactly the physical messages in `plan`.
+    #[must_use]
+    pub fn new(plan: &DeliveryPlan) -> Self {
+        Self {
+            degradations: plan.degradations.clone(),
+            messages: Vec::new(),
+            items: Vec::with_capacity(plan.messages.len()),
+            expected: plan.messages.len(),
+        }
+    }
+
+    /// Records successful delivery of one planned physical message.
+    pub fn delivered(&mut self, messages: impl IntoIterator<Item = MessageRef>) {
+        let messages = messages.into_iter().collect::<Vec<_>>();
+        self.messages.extend(messages.iter().cloned());
+        self.items.push(DeliveryItemResult {
+            index: self.items.len(),
+            messages,
+            error: None,
+        });
+    }
+
+    /// Records a failed planned physical message and returns the typed partial
+    /// result containing every earlier successful reference.
+    #[must_use]
+    pub fn failed(mut self, error: impl Into<String>) -> CallError {
+        self.items.push(DeliveryItemResult {
+            index: self.items.len(),
+            messages: Vec::new(),
+            error: Some(error.into()),
+        });
+        CallError::PartialDelivery(crate::source::message::PartialDeliveryError {
+            report: DeliveryReport {
+                messages: self.messages,
+                degradations: self.degradations,
+                items: self.items,
+            },
+        })
+    }
+
+    /// Finishes an all-successful delivery. A missing or extra physical item
+    /// is an adapter contract error rather than a silently malformed report.
+    pub fn finish(self) -> CallResult<DeliveryReport> {
+        if self.items.len() != self.expected {
+            return Err(CallError::permanent(format!(
+                "delivery report contains {} physical results for {} planned messages",
+                self.items.len(),
+                self.expected
+            )));
+        }
+        Ok(DeliveryReport {
+            messages: self.messages,
+            degradations: self.degradations,
+            items: self.items,
+        })
     }
 }
 

@@ -8,7 +8,7 @@ use futures_util::FutureExt;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
 use oxidebot_core::{
     conversation::{ConversationRef, MessageTarget},
-    event::{EventType, NoticeEvent, RequestEvent},
+    event::{EventType, LifecycleEvent, RequestEvent},
     BotIdentity, Event, PlatformId,
 };
 use std::{
@@ -210,33 +210,34 @@ pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
 
     match event {
         Event::Message(event) => Some(target(&event.conversation)),
-        Event::Notice(event) => match event {
-            NoticeEvent::GroupMemberJoined(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupMemberLeft(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupAdminChanged(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupMuteChanged(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupMemberMuteChanged(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupHighlightChanged(event) => Some(target(&event.conversation)),
-            NoticeEvent::GroupMemberAliasChanged(event) => Some(target(&event.conversation)),
-            NoticeEvent::MessageReactionsChanged(event) => Some(
+        Event::Lifecycle(event) => match event {
+            LifecycleEvent::GroupMemberJoined(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupMemberLeft(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupAdminChanged(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupMuteChanged(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupMemberMuteChanged(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupHighlightChanged(event) => Some(target(&event.conversation)),
+            LifecycleEvent::GroupMemberAliasChanged(event) => Some(target(&event.conversation)),
+            LifecycleEvent::MessageReactionsChanged(event) => Some(
                 event
                     .conversation
                     .as_ref()
                     .map(target)
                     .unwrap_or_else(|| direct(&event.user.id)),
             ),
-            NoticeEvent::MessageDeleted(event) => event
+            LifecycleEvent::MessageDeleted(event) => event
                 .conversation
                 .as_ref()
                 .map(target)
                 .or_else(|| event.user.as_ref().map(|user| direct(&user.id))),
-            NoticeEvent::MessageEdited(event) => Some(
+            LifecycleEvent::MessageEdited(event) => Some(
                 event
                     .conversation
                     .as_ref()
                     .map(target)
                     .unwrap_or_else(|| direct(&event.user.id)),
             ),
+            _ => None,
         },
         Event::Request(RequestEvent::Friend(event)) => Some(direct(&event.user.id)),
         Event::Request(RequestEvent::GroupJoin(event)) => Some(target(&event.conversation)),
@@ -248,7 +249,7 @@ pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
                 .map(target)
                 .unwrap_or_else(|| direct(&event.user.id)),
         ),
-        Event::Lifecycle(_) | Event::Meta(_) | Event::Native(_) => None,
+        Event::Meta(_) | Event::Native(_) => None,
     }
 }
 

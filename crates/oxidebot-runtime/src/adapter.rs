@@ -165,47 +165,48 @@ impl EventFrame {
                 index.conversation = conversation.map(|value| conversation_key(bot, value));
             }
             Event::Native(event) => index.native_type = Some(Arc::from(event.kind.as_str())),
-            Event::Notice(event) => {
-                use oxidebot_core::event::NoticeEvent;
+            Event::Lifecycle(event) => {
+                use oxidebot_core::event::LifecycleEvent;
                 let (conversation, user) = match event {
-                    NoticeEvent::GroupMemberJoined(event) => {
+                    LifecycleEvent::GroupMemberJoined(event) => {
                         (Some(&event.conversation), Some(&event.user))
                     }
-                    NoticeEvent::GroupMemberLeft(event) => {
+                    LifecycleEvent::GroupMemberLeft(event) => {
                         (Some(&event.conversation), Some(&event.user))
                     }
-                    NoticeEvent::GroupAdminChanged(event) => {
+                    LifecycleEvent::GroupAdminChanged(event) => {
                         (Some(&event.conversation), Some(&event.user))
                     }
-                    NoticeEvent::GroupMuteChanged(event) => {
+                    LifecycleEvent::GroupMuteChanged(event) => {
                         (Some(&event.conversation), event.operator.as_ref())
                     }
-                    NoticeEvent::GroupMemberMuteChanged(event) => {
+                    LifecycleEvent::GroupMemberMuteChanged(event) => {
                         (Some(&event.conversation), Some(&event.user))
                     }
-                    NoticeEvent::GroupHighlightChanged(event) => (
+                    LifecycleEvent::GroupHighlightChanged(event) => (
                         Some(&event.conversation),
                         event.sender.as_ref().or(event.operator.as_ref()),
                     ),
-                    NoticeEvent::GroupMemberAliasChanged(event) => {
+                    LifecycleEvent::GroupMemberAliasChanged(event) => {
                         (Some(&event.conversation), Some(&event.user))
                     }
-                    NoticeEvent::MessageReactionsChanged(event) => {
+                    LifecycleEvent::MessageReactionsChanged(event) => {
                         (event.conversation.as_ref(), Some(&event.user))
                     }
-                    NoticeEvent::MessageDeleted(event) => (
+                    LifecycleEvent::MessageDeleted(event) => (
                         event.conversation.as_ref(),
                         event.user.as_ref().or(event.operator.as_ref()),
                     ),
-                    NoticeEvent::MessageEdited(event) => {
+                    LifecycleEvent::MessageEdited(event) => {
                         (event.conversation.as_ref(), Some(&event.user))
                     }
+                    _ => (None, None),
                 };
                 index.conversation = conversation.map(|value| conversation_key(bot, value));
                 index.actor =
                     user.map(|value| UserKey::new(bot, CompactId::from(value.id.clone())));
             }
-            Event::Lifecycle(_) | Event::Meta(_) => {}
+            Event::Meta(_) => {}
         }
         index
     }

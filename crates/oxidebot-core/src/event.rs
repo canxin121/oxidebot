@@ -11,15 +11,13 @@ pub mod lifecycle;
 pub mod message;
 pub mod meta;
 pub mod native;
-pub mod notice;
 pub mod request;
 
 pub use crate::interaction::InteractionEvent;
-pub use lifecycle::LifecycleEvent;
+pub use lifecycle::*;
 pub use message::MessageEvent;
 pub use meta::MetaEvent;
 pub use native::{NativeEvent, NativeEventData, NativeEventPayload};
-pub use notice::*;
 pub use request::*;
 
 /// The complete OxideBot event hierarchy.
@@ -27,7 +25,6 @@ pub use request::*;
 #[derive(Debug, Clone)]
 pub enum Event {
     Message(MessageEvent),
-    Notice(NoticeEvent),
     Request(RequestEvent),
     Interaction(InteractionEvent),
     Lifecycle(LifecycleEvent),
@@ -42,18 +39,6 @@ impl Event {
     pub const fn event_type(&self) -> EventType {
         match self {
             Self::Message(_) => EventType::Message,
-            Self::Notice(event) => match event {
-                NoticeEvent::GroupMemberJoined(_) => EventType::GroupMemberJoined,
-                NoticeEvent::GroupMemberLeft(_) => EventType::GroupMemberLeft,
-                NoticeEvent::GroupAdminChanged(_) => EventType::GroupAdminChanged,
-                NoticeEvent::GroupMuteChanged(_) => EventType::GroupMuteChanged,
-                NoticeEvent::GroupMemberMuteChanged(_) => EventType::GroupMemberMuteChanged,
-                NoticeEvent::GroupHighlightChanged(_) => EventType::GroupHighlightChanged,
-                NoticeEvent::GroupMemberAliasChanged(_) => EventType::GroupMemberAliasChanged,
-                NoticeEvent::MessageReactionsChanged(_) => EventType::MessageReactionsChanged,
-                NoticeEvent::MessageDeleted(_) => EventType::MessageDeleted,
-                NoticeEvent::MessageEdited(_) => EventType::MessageEdited,
-            },
             Self::Request(event) => match event {
                 RequestEvent::Friend(_) => EventType::FriendRequested,
                 RequestEvent::GroupJoin(_) => EventType::GroupJoinRequested,
@@ -61,6 +46,16 @@ impl Event {
             },
             Self::Interaction(_) => EventType::Interaction,
             Self::Lifecycle(event) => match event {
+                LifecycleEvent::GroupMemberJoined(_) => EventType::GroupMemberJoined,
+                LifecycleEvent::GroupMemberLeft(_) => EventType::GroupMemberLeft,
+                LifecycleEvent::GroupAdminChanged(_) => EventType::GroupAdminChanged,
+                LifecycleEvent::GroupMuteChanged(_) => EventType::GroupMuteChanged,
+                LifecycleEvent::GroupMemberMuteChanged(_) => EventType::GroupMemberMuteChanged,
+                LifecycleEvent::GroupHighlightChanged(_) => EventType::GroupHighlightChanged,
+                LifecycleEvent::GroupMemberAliasChanged(_) => EventType::GroupMemberAliasChanged,
+                LifecycleEvent::MessageReactionsChanged(_) => EventType::MessageReactionsChanged,
+                LifecycleEvent::MessageDeleted(_) => EventType::MessageDeleted,
+                LifecycleEvent::MessageEdited(_) => EventType::MessageEdited,
                 LifecycleEvent::MessageCreated(_) => EventType::LifecycleMessageCreated,
                 LifecycleEvent::MessageUpdated(_) => EventType::LifecycleMessageUpdated,
                 LifecycleEvent::MessagesDeleted { .. } => EventType::LifecycleMessagesDeleted,
@@ -303,7 +298,7 @@ pub mod tags {
         Connected => MetaConnected,
         Disconnected => MetaDisconnected,
     );
-    macro_rules! notice_tags {
+    macro_rules! lifecycle_payload_tags {
         ($( $name:ident => $variant:ident : $target:ty => $kind:ident ),+ $(,)?) => {$ (
             #[derive(Clone, Copy, Debug, Default)]
             pub struct $name;
@@ -312,7 +307,7 @@ pub mod tags {
                 const TYPE: EventType = EventType::$kind;
                 fn get(event: &Event) -> Option<&Self::Event> {
                     match event {
-                        Event::Notice(NoticeEvent::$variant(value)) => Some(value),
+                        Event::Lifecycle(LifecycleEvent::$variant(value)) => Some(value),
                         _ => None,
                     }
                 }
@@ -320,7 +315,7 @@ pub mod tags {
         )+};
     }
 
-    notice_tags!(
+    lifecycle_payload_tags!(
         GroupMemberJoined => GroupMemberJoined : GroupMemberJoinedEvent => GroupMemberJoined,
         GroupMemberLeft => GroupMemberLeft : GroupMemberLeftEvent => GroupMemberLeft,
         GroupAdminChanged => GroupAdminChanged : GroupAdminChangedEvent => GroupAdminChanged,

@@ -30,7 +30,7 @@ pub use api::platform::{
     PlatformApiFile, PlatformApiFileSource, PlatformApiRequest, PlatformApiResponse,
     UnsupportedPlatformApiError,
 };
-pub use api::{CallApiTrait, CallError, CallResult};
+pub use api::{CallApiTrait, CallError, CallResult, DeliveryReportBuilder};
 pub use application::{
     AppSurface, AppSurfaceKind, BotProfile, CommandChoice, CommandContext, CommandDefinition,
     CommandInvocation, CommandKind, CommandOption, CommandOptionType, Localized, MiniAppEvent,

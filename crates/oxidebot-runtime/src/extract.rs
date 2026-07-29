@@ -4,7 +4,7 @@ use crate::{
 };
 use oxidebot_core::{
     conversation::{ConversationRef, MessageTarget},
-    event::{EventTag, NoticeEvent, RequestEvent},
+    event::{EventTag, LifecycleEvent, RequestEvent},
     source::{message::MessageSegment, user::User},
     BotIdentity, Event, EventId,
 };
@@ -465,19 +465,22 @@ where
 fn sender_for_event(event: &Event) -> Option<&User> {
     match event {
         Event::Message(event) => Some(&event.sender),
-        Event::Notice(event) => match event {
-            NoticeEvent::GroupMemberJoined(event) => Some(&event.user),
-            NoticeEvent::GroupMemberLeft(event) => Some(&event.user),
-            NoticeEvent::GroupAdminChanged(event) => Some(&event.user),
-            NoticeEvent::GroupMuteChanged(event) => event.operator.as_ref(),
-            NoticeEvent::GroupMemberMuteChanged(event) => Some(&event.user),
-            NoticeEvent::GroupHighlightChanged(event) => {
+        Event::Lifecycle(event) => match event {
+            LifecycleEvent::GroupMemberJoined(event) => Some(&event.user),
+            LifecycleEvent::GroupMemberLeft(event) => Some(&event.user),
+            LifecycleEvent::GroupAdminChanged(event) => Some(&event.user),
+            LifecycleEvent::GroupMuteChanged(event) => event.operator.as_ref(),
+            LifecycleEvent::GroupMemberMuteChanged(event) => Some(&event.user),
+            LifecycleEvent::GroupHighlightChanged(event) => {
                 event.sender.as_ref().or(event.operator.as_ref())
             }
-            NoticeEvent::GroupMemberAliasChanged(event) => Some(&event.user),
-            NoticeEvent::MessageReactionsChanged(event) => Some(&event.user),
-            NoticeEvent::MessageDeleted(event) => event.user.as_ref().or(event.operator.as_ref()),
-            NoticeEvent::MessageEdited(event) => Some(&event.user),
+            LifecycleEvent::GroupMemberAliasChanged(event) => Some(&event.user),
+            LifecycleEvent::MessageReactionsChanged(event) => Some(&event.user),
+            LifecycleEvent::MessageDeleted(event) => {
+                event.user.as_ref().or(event.operator.as_ref())
+            }
+            LifecycleEvent::MessageEdited(event) => Some(&event.user),
+            _ => None,
         },
         Event::Request(event) => match event {
             RequestEvent::Friend(event) => Some(&event.user),
@@ -485,31 +488,29 @@ fn sender_for_event(event: &Event) -> Option<&User> {
             RequestEvent::GroupInvite(event) => Some(&event.user),
         },
         Event::Interaction(event) => Some(&event.user),
-        Event::Lifecycle(_) | Event::Meta(_) | Event::Native(_) => None,
+        Event::Meta(_) | Event::Native(_) => None,
     }
 }
 
 fn conversation_for_event(event: &Event) -> Option<&ConversationRef> {
     match event {
         Event::Message(event) => Some(&event.conversation),
-        Event::Notice(event) => match event {
-            NoticeEvent::GroupMemberJoined(event) => Some(&event.conversation),
-            NoticeEvent::GroupMemberLeft(event) => Some(&event.conversation),
-            NoticeEvent::GroupAdminChanged(event) => Some(&event.conversation),
-            NoticeEvent::GroupMuteChanged(event) => Some(&event.conversation),
-            NoticeEvent::GroupMemberMuteChanged(event) => Some(&event.conversation),
-            NoticeEvent::GroupHighlightChanged(event) => Some(&event.conversation),
-            NoticeEvent::GroupMemberAliasChanged(event) => Some(&event.conversation),
-            NoticeEvent::MessageReactionsChanged(event) => event.conversation.as_ref(),
-            NoticeEvent::MessageDeleted(event) => event.conversation.as_ref(),
-            NoticeEvent::MessageEdited(event) => event.conversation.as_ref(),
+        Event::Lifecycle(event) => match event {
+            LifecycleEvent::GroupMemberJoined(event) => Some(&event.conversation),
+            LifecycleEvent::GroupMemberLeft(event) => Some(&event.conversation),
+            LifecycleEvent::GroupAdminChanged(event) => Some(&event.conversation),
+            LifecycleEvent::GroupMuteChanged(event) => Some(&event.conversation),
+            LifecycleEvent::GroupMemberMuteChanged(event) => Some(&event.conversation),
+            LifecycleEvent::GroupHighlightChanged(event) => Some(&event.conversation),
+            LifecycleEvent::GroupMemberAliasChanged(event) => Some(&event.conversation),
+            LifecycleEvent::MessageReactionsChanged(event) => event.conversation.as_ref(),
+            LifecycleEvent::MessageDeleted(event) => event.conversation.as_ref(),
+            LifecycleEvent::MessageEdited(event) => event.conversation.as_ref(),
+            _ => None,
         },
         Event::Request(RequestEvent::GroupJoin(event)) => Some(&event.conversation),
         Event::Request(RequestEvent::GroupInvite(event)) => Some(&event.conversation),
         Event::Interaction(event) => event.conversation.as_ref(),
-        Event::Request(RequestEvent::Friend(_))
-        | Event::Lifecycle(_)
-        | Event::Meta(_)
-        | Event::Native(_) => None,
+        Event::Request(RequestEvent::Friend(_)) | Event::Meta(_) | Event::Native(_) => None,
     }
 }

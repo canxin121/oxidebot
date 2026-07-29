@@ -12,8 +12,8 @@ pub use oxidebot_runtime as runtime;
 // additions in core/runtime from silently becoming facade-level SemVer
 // commitments.
 pub use oxidebot_core::{
-    event, BotId, BotIdentity, CallApiTrait, CallError, CallResult, Event, EventId, Message,
-    PlatformId,
+    event, BotId, BotIdentity, CallApiTrait, CallError, CallResult, DeliveryReportBuilder, Event,
+    EventId, Message, PlatformId,
 };
 pub use oxidebot_runtime::{
     command, Adapter, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandTree,
