@@ -692,37 +692,65 @@ impl ReplyButton {
     }
 }
 
+/// Action initiated by selecting a [`ReplyButton`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ReplyButtonAction {
+    /// Send the button text as a message.
     SendText,
+    /// Ask the user to select users.
     RequestUsers(RequestUsers),
+    /// Ask the user to select a chat.
     RequestChat(RequestChat),
+    /// Ask the user to create or select a managed bot.
     RequestManagedBot(RequestManagedBot),
+    /// Ask the user to share a contact.
     RequestContact,
+    /// Ask the user to share a location.
     RequestLocation,
-    RequestPoll { kind: Option<PollKind> },
-    WebApp { url: String },
+    /// Ask the user to create a poll.
+    RequestPoll {
+        /// Optional required poll kind.
+        kind: Option<PollKind>,
+    },
+    /// Open a web application.
+    WebApp {
+        /// Web application URL.
+        url: String,
+    },
+    /// Lossless platform-native reply action.
     PlatformNative(PlatformNativeData),
 }
 
+/// Kind of poll requested by a reply button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PollKind {
+    /// Standard multiple-choice poll.
     Regular,
+    /// Quiz-style poll with a correct answer.
     Quiz,
 }
 
+/// Criteria and returned fields for a user-selection request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestUsers {
+    /// Platform request identifier echoed in the response.
     pub request_id: i32,
+    /// Optional constraint on whether selected users are bots.
     pub user_is_bot: Option<bool>,
+    /// Optional constraint on whether selected users are premium users.
     pub user_is_premium: Option<bool>,
+    /// Maximum selected user count.
     pub max_quantity: Option<u8>,
+    /// Request selected users' display names.
     pub request_name: bool,
+    /// Request selected users' usernames.
     pub request_username: bool,
+    /// Request selected users' profile photos.
     pub request_photo: bool,
 }
 
 impl RequestUsers {
+    /// Creates an unconstrained user-selection request.
     pub fn new(request_id: i32) -> Self {
         Self {
             request_id,
@@ -736,22 +764,33 @@ impl RequestUsers {
     }
 }
 
+/// Criteria and returned fields for a chat-selection request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestChat {
+    /// Platform request identifier echoed in the response.
     pub request_id: i32,
+    /// Whether the requested chat must be a channel.
     pub chat_is_channel: bool,
+    /// Optional constraint on forum capability.
     pub chat_is_forum: Option<bool>,
+    /// Optional constraint on public username availability.
     pub chat_has_username: Option<bool>,
+    /// Optional constraint on whether the user created the chat.
     pub chat_is_created: Option<bool>,
+    /// Whether the configured bot must already be a member.
     pub bot_is_member: bool,
+    /// Request selected chat title.
     pub request_title: bool,
+    /// Request selected chat username.
     pub request_username: bool,
+    /// Request selected chat photo.
     pub request_photo: bool,
     /// Adapter-specific criteria, for example Telegram administrator rights.
     pub platform_data: Option<PlatformNativeData>,
 }
 
 impl RequestChat {
+    /// Creates a chat-selection request with its required channel type.
     pub fn new(request_id: i32, chat_is_channel: bool) -> Self {
         Self {
             request_id,
@@ -768,14 +807,19 @@ impl RequestChat {
     }
 }
 
+/// Criteria for selecting or creating a managed bot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestManagedBot {
+    /// Platform request identifier echoed in the response.
     pub request_id: i32,
+    /// Optional suggested display name.
     pub suggested_name: Option<String>,
+    /// Optional suggested username.
     pub suggested_username: Option<String>,
 }
 
 impl RequestManagedBot {
+    /// Creates a managed-bot request with no naming suggestions.
     pub fn new(request_id: i32) -> Self {
         Self {
             request_id,
@@ -785,13 +829,17 @@ impl RequestManagedBot {
     }
 }
 
+/// Lossless platform-specific interaction data.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformNativeData {
+    /// Platform that owns the payload.
     pub platform: String,
+    /// JSON payload preserved without portable interpretation.
     pub data: Value,
 }
 
 impl PlatformNativeData {
+    /// Associates a platform name with a JSON payload.
     pub fn new(platform: impl Into<String>, data: impl Into<Value>) -> Self {
         Self {
             platform: platform.into(),
@@ -800,9 +848,12 @@ impl PlatformNativeData {
     }
 }
 
+/// Platform-visible bot command definition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BotCommand {
+    /// Command invocation text without a prefix.
     pub command: String,
+    /// User-visible command description.
     pub description: String,
     /// Whether responses to this command should be private to the invoking
     /// user on platforms that support ephemeral commands.
@@ -810,6 +861,7 @@ pub struct BotCommand {
 }
 
 impl BotCommand {
+    /// Creates a non-ephemeral command definition.
     pub fn new(command: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -818,38 +870,49 @@ impl BotCommand {
         }
     }
 
+    /// Sets whether responses should be private where supported.
     pub fn ephemeral(mut self, is_ephemeral: bool) -> Self {
         self.is_ephemeral = is_ephemeral;
         self
     }
 }
 
+/// Scope and locale query for retrieving bot commands.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BotCommandQuery {
+    /// Scope to query.
     pub scope: CommandScope,
+    /// Optional BCP 47 language code.
     pub language_code: Option<String>,
 }
 
 impl BotCommandQuery {
+    /// Replaces the command scope.
     pub fn scope(mut self, scope: CommandScope) -> Self {
         self.scope = scope;
         self
     }
 
+    /// Sets the command language code.
     pub fn language_code(mut self, language_code: impl Into<String>) -> Self {
         self.language_code = Some(language_code.into());
         self
     }
 }
 
+/// Command definitions installed for one scope and locale.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BotCommandSet {
+    /// Commands to install.
     pub commands: Vec<BotCommand>,
+    /// Scope in which the commands are visible.
     pub scope: CommandScope,
+    /// Optional BCP 47 language code.
     pub language_code: Option<String>,
 }
 
 impl BotCommandSet {
+    /// Creates a set with default scope and no locale override.
     pub fn new(commands: impl IntoIterator<Item = BotCommand>) -> Self {
         Self {
             commands: commands.into_iter().collect(),
@@ -858,60 +921,93 @@ impl BotCommandSet {
         }
     }
 
+    /// Replaces the command scope.
     pub fn scope(mut self, scope: CommandScope) -> Self {
         self.scope = scope;
         self
     }
 
+    /// Sets the command language code.
     pub fn language_code(mut self, language_code: impl Into<String>) -> Self {
         self.language_code = Some(language_code.into());
         self
     }
 }
 
+/// Platform scope in which bot commands are visible.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum CommandScope {
+    /// Platform default scope.
     #[default]
     Default,
+    /// All private chats.
     AllPrivateChats,
+    /// All group chats.
     AllGroupChats,
+    /// Administrators in all chats.
     AllChatAdministrators,
+    /// One specified chat.
     Chat {
+        /// Platform chat identifier.
         chat_id: String,
     },
+    /// Administrators in one specified chat.
     ChatAdministrators {
+        /// Platform chat identifier.
         chat_id: String,
     },
+    /// One specified member in one specified chat.
     ChatMember {
+        /// Platform chat identifier.
         chat_id: String,
+        /// Platform user identifier.
         user_id: String,
     },
+    /// Lossless platform-native command scope.
     PlatformNative(PlatformNativeData),
 }
 
+/// Platform chat-menu configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ChatMenu {
+    /// Platform default menu.
     Default,
+    /// Command list menu.
     Commands,
+    /// Web application menu item.
     WebApp {
+        /// User-visible menu text.
         text: String,
+        /// Web application URL.
         url: String,
     },
+    /// Custom action rows menu.
     Actions {
+        /// Optional user-visible menu label.
         label: Option<String>,
+        /// Action rows shown by the menu.
         rows: Vec<ActionRow>,
     },
+    /// Lossless platform-native menu configuration.
     PlatformNative(PlatformNativeData),
 }
 
+/// Normalized incoming button, command, select, or form interaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionEvent {
+    /// Platform interaction identifier.
     pub id: String,
+    /// Interaction category.
     pub kind: InteractionKind,
+    /// Clicked action or component identifier, if any.
     pub action_id: Option<String>,
+    /// Raw selected values supplied by the platform.
     pub values: Vec<String>,
+    /// User that initiated the interaction.
     pub user: User,
+    /// Conversation in which it occurred, if any.
     pub conversation: Option<ConversationRef>,
+    /// Originating message, if retained by the platform.
     pub message: Option<Message>,
     /// An inline-message, view, modal, or other platform context identifier.
     pub context_id: Option<String>,
@@ -921,71 +1017,114 @@ pub struct InteractionEvent {
     pub response: Option<InteractionResponseHandle>,
     /// Values keyed by component or form field identifier.
     pub fields: BTreeMap<String, Vec<FormValue>>,
+    /// Structured command invocation, when this is a command.
     pub command: Option<CommandInvocation>,
+    /// User locale, if supplied.
     pub locale: Option<String>,
+    /// Permissions known for the user in the conversation.
     pub permissions: BTreeSet<ConversationPermission>,
     /// Complete platform payload for fields that the common model cannot
     /// represent.
     pub data: Value,
 }
 
+/// Platform handle used to acknowledge or answer an interaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionResponseHandle {
+    /// Platform response identifier.
     pub id: String,
+    /// Platform acknowledgement deadline, if known.
     pub deadline: Option<DateTime<Utc>>,
+    /// Whether the platform requires an acknowledgement.
     pub ack_required: bool,
+    /// Whether follow-up responses are supported.
     pub followups_supported: bool,
+    /// Lossless platform-specific response metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Category of an incoming interaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractionKind {
+    /// Button click.
     Button,
+    /// Select-menu choice.
     Select,
+    /// Platform command invocation.
     Command,
+    /// Modal or form submission.
     Form,
+    /// Platform-native interaction kind.
     PlatformNative(String),
 }
 
+/// Initial response produced for an answerable interaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum InteractionResponse {
+    /// Acknowledge without visible content.
     Acknowledge,
+    /// Acknowledge and defer a later response.
     Defer {
+        /// Requested visibility for the later response.
         visibility: InteractionVisibility,
     },
+    /// Show a transient client notification.
     Notification {
+        /// Notification text.
         text: String,
+        /// Notification presentation style.
         style: InteractionNotificationStyle,
+        /// Optional client cache duration.
         cache_time: Option<Duration>,
     },
+    /// Ask the client to open a URL.
     OpenUrl {
+        /// URL to open.
         url: String,
+        /// Optional client cache duration.
         cache_time: Option<Duration>,
     },
+    /// Send an initial interaction message.
     Message {
+        /// Portable message content.
         message: Message,
+        /// Requested message visibility.
         visibility: InteractionVisibility,
     },
+    /// Replace the originating message.
     UpdateMessage {
+        /// Replacement portable message.
         message: Message,
     },
+    /// Open a modal dialog.
     OpenModal(Modal),
+    /// Associate field identifiers with validation messages.
     ValidationErrors(BTreeMap<String, String>),
+    /// Navigate within a client view stack.
     Navigate(ViewNavigation),
+    /// Close the current client view.
     CloseView,
+    /// Lossless platform-native response.
     PlatformNative(PlatformNativeData),
 }
 
+/// Navigation action performed by an interaction response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ViewNavigation {
+    /// Push a modal onto the view stack.
     Push(Modal),
+    /// Replace the current view with a modal.
     Replace(Modal),
+    /// Pop the current view.
     Pop,
+    /// Open a URL from the view.
     OpenUrl(String),
+    /// Lossless platform-native navigation.
     PlatformNative(PlatformNativeData),
 }
 
 impl InteractionResponse {
+    /// Creates a toast notification response.
     pub fn toast(text: impl Into<String>) -> Self {
         Self::Notification {
             text: text.into(),
@@ -994,6 +1133,7 @@ impl InteractionResponse {
         }
     }
 
+    /// Creates an alert notification response.
     pub fn alert(text: impl Into<String>) -> Self {
         Self::Notification {
             text: text.into(),
@@ -1003,98 +1143,164 @@ impl InteractionResponse {
     }
 }
 
+/// Presentation style for a transient interaction notification.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractionNotificationStyle {
+    /// Non-blocking toast notification.
     #[default]
     Toast,
+    /// Prominent alert notification.
     Alert,
 }
 
+/// Visibility requested for an interaction response.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractionVisibility {
+    /// Visible to the normal conversation audience.
     #[default]
     Public,
+    /// Visible only to the interacting user where supported.
     Ephemeral,
 }
 
+/// Modal dialog opened by an interaction response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Modal {
+    /// Stable modal identifier.
     pub id: String,
+    /// User-visible modal title.
     pub title: String,
+    /// Fields rendered by the modal.
     pub fields: Vec<ModalField>,
+    /// Optional submit button label.
     pub submit_label: Option<String>,
+    /// Optional close button label.
     pub close_label: Option<String>,
+    /// Lossless platform-specific modal metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// One form field rendered inside a [`Modal`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ModalField {
+    /// Text field.
     Text {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Optional input placeholder.
         placeholder: Option<String>,
+        /// Whether a value is required.
         required: bool,
+        /// Whether multiline input is allowed.
         multiline: bool,
+        /// Minimum text length, if constrained.
         min_length: Option<u32>,
+        /// Maximum text length, if constrained.
         max_length: Option<u32>,
     },
+    /// Select menu field.
     Select(SelectMenu),
+    /// Checkbox field.
     Checkbox {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Value returned when checked.
         value: String,
+        /// Whether acceptance is required.
         required: bool,
     },
+    /// Date field.
     Date {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Whether a date is required.
         required: bool,
     },
+    /// Time field.
     Time {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Whether a time is required.
         required: bool,
     },
+    /// Date-time field.
     DateTime {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Whether a date-time is required.
         required: bool,
     },
+    /// Numeric field.
     Number {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Whether a number is required.
         required: bool,
+        /// Inclusive minimum, if constrained.
         min: Option<f64>,
+        /// Inclusive maximum, if constrained.
         max: Option<f64>,
     },
+    /// Choice field.
     Choice {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Available choices.
         options: Vec<ChoiceOption>,
+        /// Whether multiple values may be selected.
         multiple: bool,
+        /// Whether a selection is required.
         required: bool,
     },
+    /// Boolean toggle field.
     Toggle {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Initial state.
         initial_value: bool,
     },
+    /// File-upload field.
     File {
+        /// Stable field identifier.
         id: String,
+        /// User-visible field label.
         label: String,
+        /// Whether a file is required.
         required: bool,
+        /// Accepted MIME types.
         accepted_mime_types: Vec<String>,
+        /// Maximum accepted file count.
         max_files: Option<u16>,
     },
+    /// Lossless platform-native modal field.
     PlatformNative(PlatformNativeData),
 }
 
+/// Error returned when an adapter cannot perform an interaction feature.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsupportedInteractionError {
+    /// Name of the unavailable interaction feature.
     pub feature: String,
 }
 
 impl UnsupportedInteractionError {
+    /// Creates an unsupported-interaction error for `feature`.
     pub fn new(feature: impl Into<String>) -> Self {
         Self {
             feature: feature.into(),
