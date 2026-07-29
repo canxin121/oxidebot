@@ -26,6 +26,7 @@ impl Default for AdminTools {
 }
 
 impl AdminTools {
+    /// Creates an enabled standard administrative-tool set with the `oxidebot` prefix.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -45,24 +46,28 @@ impl AdminTools {
         self
     }
 
+    /// Enables or disables the command-management submodule.
     #[must_use]
     pub const fn command_management(mut self, enabled: bool) -> Self {
         self.command_management = enabled;
         self
     }
 
+    /// Enables or disables the shortcut-management submodule.
     #[must_use]
     pub const fn shortcut_management(mut self, enabled: bool) -> Self {
         self.shortcut_management = enabled;
         self
     }
 
+    /// Enables or disables the diagnostics submodule.
     #[must_use]
     pub const fn diagnostics(mut self, enabled: bool) -> Self {
         self.diagnostics = enabled;
         self
     }
 
+    /// Builds the configured administrative tools as an ordinary module.
     #[must_use]
     pub fn module<S>(&self) -> Module<S>
     where
@@ -81,6 +86,7 @@ impl AdminTools {
         module
     }
 
+    /// Builds the configured administrative tools behind an application guard.
     #[must_use]
     pub fn protected<S, G>(&self, guard: G) -> Module<S>
     where
@@ -100,8 +106,10 @@ impl AdminTools {
     }
 }
 
+/// Parsed arguments accepted by the standard echo command.
 #[derive(Clone, Debug)]
 pub struct EchoArguments {
+    /// Remaining command words to return unchanged.
     pub content: Vec<String>,
 }
 
@@ -127,6 +135,7 @@ async fn echo_handler(Args(arguments): Args<EchoArguments>) -> Message {
     Message::text(arguments.content.join(" "))
 }
 
+/// Returns a module providing the `/echo` command.
 #[must_use]
 pub fn echo_module<S>() -> Module<S>
 where
@@ -140,12 +149,16 @@ where
     )
 }
 
+/// Application-state persistence required by the standard language command.
 #[async_trait]
 pub trait LocaleStorage: Send + Sync + 'static {
+    /// Persists `locale` as the preferred locale for `user_id`.
     async fn set_locale(&self, user_id: &str, locale: &str) -> HandlerResult<()>;
+    /// Loads the preferred locale for `user_id`, if one has been stored.
     async fn get_locale(&self, user_id: &str) -> HandlerResult<Option<Arc<str>>>;
 }
 
+/// Locale resolver that first consults [`LocaleStorage`] in application state.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StoredLocaleResolver;
 
@@ -170,8 +183,10 @@ where
     }
 }
 
+/// Parsed arguments accepted by the standard language command.
 #[derive(Clone, Debug)]
 pub struct LanguageArguments {
+    /// Optional locale to persist; omitted to display the current locale.
     pub locale: Option<String>,
 }
 
@@ -220,6 +235,7 @@ where
     ))
 }
 
+/// Returns a module providing the `/language` and `/lang` commands.
 #[must_use]
 pub fn language_module<S>() -> Module<S>
 where
@@ -235,9 +251,12 @@ where
     )
 }
 
+/// Parsed arguments accepted by the standard command-management command.
 #[derive(Clone, Debug)]
 pub struct CommandAdminArguments {
+    /// Requested operation: `list`, `enable`, or `disable`.
     pub action: String,
+    /// Command name or hexadecimal command ID for enable and disable operations.
     pub command: Option<String>,
 }
 
@@ -317,6 +336,7 @@ async fn command_admin_handler(
     }
 }
 
+/// Returns a module providing the command-management command.
 #[must_use]
 pub fn command_admin_module<S>() -> Module<S>
 where
@@ -335,13 +355,20 @@ where
     )
 }
 
+/// Parsed arguments accepted by the standard shortcut-management command.
 #[derive(Clone, Debug)]
 pub struct ShortcutArguments {
+    /// Requested operation: `list`, `add`, `remove`, or `clear`.
     pub action: String,
+    /// Name of the command whose shortcuts are being managed.
     pub command: String,
+    /// Literal or regular-expression shortcut pattern for add and remove.
     pub pattern: Option<String>,
+    /// Command text that replaces the pattern when adding a shortcut.
     pub replacement: Vec<String>,
+    /// Whether `pattern` is interpreted as a regular expression.
     pub regex: bool,
+    /// Whether literal replacement preserves only a compact tail.
     pub compact: bool,
 }
 
@@ -452,6 +479,7 @@ async fn shortcut_handler(
     }
 }
 
+/// Returns a module providing the shortcut-management command.
 #[must_use]
 pub fn shortcut_admin_module<S>() -> Module<S>
 where
@@ -481,6 +509,7 @@ async fn diagnostics_handler(registry: CommandRegistry) -> String {
     )
 }
 
+/// Returns a module providing read-only command registry diagnostics.
 #[must_use]
 pub fn diagnostics_module<S>() -> Module<S>
 where
