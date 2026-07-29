@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use thiserror::Error;
 
+/// Lossless platform-native request and response types.
 pub mod platform;
 
 use crate::interaction::{
@@ -42,30 +43,60 @@ pub type CallResult<T> = std::result::Result<T, CallError>;
 /// deterministic across every API method.
 #[derive(Debug, Error)]
 pub enum CallError {
+    /// A transient transport or remote-service failure that may be retried.
     #[error("temporary adapter failure: {message}")]
-    Temporary { message: Arc<str> },
+    Temporary {
+        /// Human-readable failure detail supplied by the adapter.
+        message: Arc<str>,
+    },
+    /// The remote platform rejected the request because its rate limit is exhausted.
     #[error("adapter rate limited the call: {message}")]
     RateLimited {
+        /// Human-readable failure detail supplied by the adapter.
         message: Arc<str>,
+        /// Suggested delay before another attempt, when supplied by the platform.
         retry_after: Option<Duration>,
     },
+    /// The adapter did not complete the call before its deadline.
     #[error("adapter call timed out: {message}")]
-    Timeout { message: Arc<str> },
+    Timeout {
+        /// Human-readable failure detail supplied by the adapter.
+        message: Arc<str>,
+    },
+    /// The request is invalid and retrying it unchanged cannot succeed.
     #[error("adapter rejected the request: {message}")]
-    InvalidRequest { message: Arc<str> },
+    InvalidRequest {
+        /// Human-readable validation failure detail.
+        message: Arc<str>,
+    },
+    /// The requested platform resource does not exist.
     #[error("adapter could not find the requested resource: {message}")]
-    NotFound { message: Arc<str> },
+    NotFound {
+        /// Human-readable missing-resource detail.
+        message: Arc<str>,
+    },
+    /// The adapter does not implement a requested capability.
     #[error("adapter does not support {feature}")]
-    Unsupported { feature: Arc<str> },
+    Unsupported {
+        /// Name of the unavailable feature.
+        feature: Arc<str>,
+    },
+    /// A non-retryable adapter or remote-service failure.
     #[error("adapter call failed permanently: {message}")]
-    Permanent { message: Arc<str> },
+    Permanent {
+        /// Human-readable failure detail supplied by the adapter.
+        message: Arc<str>,
+    },
+    /// Portable delivery planning could not produce a valid physical message plan.
     #[error(transparent)]
     Planning(#[from] crate::source::message::DeliveryPlanningError),
+    /// A multipart delivery failed after one or more physical messages succeeded.
     #[error(transparent)]
     PartialDelivery(#[from] crate::source::message::PartialDeliveryError),
 }
 
 impl CallError {
+    /// Creates a retryable temporary failure.
     #[must_use]
     pub fn temporary(message: impl Into<Arc<str>>) -> Self {
         Self::Temporary {
@@ -73,6 +104,7 @@ impl CallError {
         }
     }
 
+    /// Creates a rate-limit failure with an optional server-supplied delay.
     #[must_use]
     pub fn rate_limited(message: impl Into<Arc<str>>, retry_after: Option<Duration>) -> Self {
         Self::RateLimited {
@@ -81,6 +113,7 @@ impl CallError {
         }
     }
 
+    /// Creates a retryable timeout failure.
     #[must_use]
     pub fn timeout(message: impl Into<Arc<str>>) -> Self {
         Self::Timeout {
@@ -88,6 +121,7 @@ impl CallError {
         }
     }
 
+    /// Creates a non-retryable request-validation failure.
     #[must_use]
     pub fn invalid_request(message: impl Into<Arc<str>>) -> Self {
         Self::InvalidRequest {
@@ -95,6 +129,7 @@ impl CallError {
         }
     }
 
+    /// Creates a missing-resource failure.
     #[must_use]
     pub fn not_found(message: impl Into<Arc<str>>) -> Self {
         Self::NotFound {
@@ -102,6 +137,7 @@ impl CallError {
         }
     }
 
+    /// Creates an unsupported-capability failure.
     #[must_use]
     pub fn unsupported(feature: impl Into<Arc<str>>) -> Self {
         Self::Unsupported {
@@ -109,6 +145,7 @@ impl CallError {
         }
     }
 
+    /// Creates a non-retryable permanent failure.
     #[must_use]
     pub fn permanent(message: impl Into<Arc<str>>) -> Self {
         Self::Permanent {
@@ -116,6 +153,7 @@ impl CallError {
         }
     }
 
+    /// Returns whether the scheduler may retry this error.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         matches!(
@@ -124,6 +162,7 @@ impl CallError {
         )
     }
 
+    /// Returns the server-supplied rate-limit delay, if any.
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
@@ -250,6 +289,7 @@ pub trait CallApiTrait: Send + Sync {
         &[]
     }
 
+    /// Returns whether `method` appears in [`CallApiTrait::platform_api_methods`].
     fn supports_platform_api_method(&self, method: &str) -> bool {
         self.platform_api_methods().contains(&method)
     }
@@ -313,6 +353,7 @@ pub trait CallApiTrait: Send + Sync {
             .messages)
     }
 
+    /// Replaces the portable content of a previously sent message.
     async fn edit_outgoing_message(
         &self,
         message: MessageRef,
@@ -321,10 +362,12 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("editing messages").into())
     }
 
+    /// Deletes one previously sent message.
     async fn delete_message_ref(&self, message: MessageRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("deleting messages").into())
     }
 
+    /// Deletes each supplied message in sequence.
     async fn delete_messages(&self, messages: Vec<MessageRef>) -> CallResult<()> {
         for message in messages {
             self.delete_message_ref(message).await?;
@@ -332,6 +375,7 @@ pub trait CallApiTrait: Send + Sync {
         Ok(())
     }
 
+    /// Replaces or removes interactive components attached to a message.
     async fn edit_message_components(
         &self,
         message_id: String,
@@ -340,6 +384,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedInteractionError::new("editing message components").into())
     }
 
+    /// Sends the initial response for an answerable interaction.
     async fn answer_interaction(
         &self,
         interaction_id: String,
@@ -348,26 +393,32 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedInteractionError::new("answering interactions").into())
     }
 
+    /// Replaces the bot command set for its configured scope.
     async fn set_bot_commands(&self, commands: BotCommandSet) -> CallResult<()> {
         Err(UnsupportedInteractionError::new("bot commands").into())
     }
 
+    /// Retrieves bot commands matching a scope query.
     async fn get_bot_commands(&self, query: BotCommandQuery) -> CallResult<Vec<BotCommand>> {
         Err(UnsupportedInteractionError::new("bot commands").into())
     }
 
+    /// Deletes bot commands matching a scope query.
     async fn delete_bot_commands(&self, query: BotCommandQuery) -> CallResult<()> {
         Err(UnsupportedInteractionError::new("bot commands").into())
     }
 
+    /// Replaces the chat menu for one chat or the adapter default.
     async fn set_chat_menu(&self, chat_id: Option<String>, menu: ChatMenu) -> CallResult<()> {
         Err(UnsupportedInteractionError::new("chat menu").into())
     }
 
+    /// Retrieves the chat menu for one chat or the adapter default.
     async fn get_chat_menu(&self, chat_id: Option<String>) -> CallResult<ChatMenu> {
         Err(UnsupportedInteractionError::new("chat menu").into())
     }
 
+    /// Acknowledges an interaction while deferring its eventual response.
     async fn defer_interaction(
         &self,
         handle: InteractionResponseHandle,
@@ -377,6 +428,7 @@ pub trait CallApiTrait: Send + Sync {
             .await
     }
 
+    /// Sends a message after the initial interaction response.
     async fn send_interaction_followup(
         &self,
         handle: InteractionResponseHandle,
@@ -385,6 +437,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedInteractionError::new("interaction follow-up messages").into())
     }
 
+    /// Replaces the original response associated with an interaction.
     async fn edit_interaction_response(
         &self,
         handle: InteractionResponseHandle,
@@ -393,6 +446,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedInteractionError::new("editing the original interaction response").into())
     }
 
+    /// Deletes the original response associated with an interaction.
     async fn delete_interaction_response(
         &self,
         handle: InteractionResponseHandle,
@@ -400,6 +454,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedInteractionError::new("deleting the original interaction response").into())
     }
 
+    /// Replaces the reactions applied by the bot to a message.
     async fn set_message_reactions(
         &self,
         message: MessageRef,
@@ -408,6 +463,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("setting message reactions").into())
     }
 
+    /// Adds one reaction to a message.
     async fn add_message_reaction(
         &self,
         message: MessageRef,
@@ -417,6 +473,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("adding message reactions").into())
     }
 
+    /// Removes one reaction from a message.
     async fn remove_message_reaction(
         &self,
         message: MessageRef,
@@ -425,10 +482,12 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("removing message reactions").into())
     }
 
+    /// Removes all bot-managed reactions from a message.
     async fn clear_message_reactions(&self, message: MessageRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("clearing message reactions").into())
     }
 
+    /// Lists users that applied a particular reaction to a message.
     async fn list_reaction_users(
         &self,
         message: MessageRef,
@@ -438,18 +497,22 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("listing reaction users").into())
     }
 
+    /// Pins a message using the supplied platform-neutral options.
     async fn pin_message(&self, message: MessageRef, options: PinOptions) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("pinning messages").into())
     }
 
+    /// Removes a pin from one message.
     async fn unpin_message(&self, message: MessageRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("unpinning messages").into())
     }
 
+    /// Removes all pins in a conversation.
     async fn clear_pins(&self, conversation: ConversationRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("clearing pinned messages").into())
     }
 
+    /// Lists pinned messages in a conversation.
     async fn list_pins(
         &self,
         conversation: ConversationRef,
@@ -458,6 +521,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("listing pinned messages").into())
     }
 
+    /// Sets a temporary activity indicator in a conversation.
     async fn set_chat_activity(
         &self,
         conversation: ConversationRef,
@@ -467,6 +531,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("chat activity indicators").into())
     }
 
+    /// Marks a conversation read through an optional message.
     async fn mark_read(
         &self,
         conversation: ConversationRef,
@@ -475,6 +540,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("read receipts").into())
     }
 
+    /// Creates a voice, video, or platform-native call session.
     async fn create_call(
         &self,
         conversation: ConversationRef,
@@ -483,10 +549,12 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("creating calls or meetings").into())
     }
 
+    /// Ends a previously created call session.
     async fn end_call(&self, call: CallSession) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("ending calls or meetings").into())
     }
 
+    /// Lists participants in a call session.
     async fn list_call_participants(
         &self,
         call: CallSession,
@@ -495,14 +563,17 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("listing call participants").into())
     }
 
+    /// Stops a poll and returns its final state.
     async fn stop_poll(&self, message: MessageRef) -> CallResult<Poll> {
         Err(UnsupportedFeatureError::new("stopping polls").into())
     }
 
+    /// Replaces the checklist attached to a message.
     async fn edit_checklist(&self, message: MessageRef, checklist: Checklist) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("editing checklists").into())
     }
 
+    /// Creates a thread or topic under a parent conversation.
     async fn create_thread(
         &self,
         parent: ConversationRef,
@@ -511,6 +582,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("creating threads or topics").into())
     }
 
+    /// Replaces mutable metadata for a thread or topic.
     async fn edit_thread(
         &self,
         thread: ConversationRef,
@@ -519,18 +591,22 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("editing threads or topics").into())
     }
 
+    /// Closes a thread or topic.
     async fn close_thread(&self, thread: ConversationRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("closing threads or topics").into())
     }
 
+    /// Reopens a closed thread or topic.
     async fn reopen_thread(&self, thread: ConversationRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("reopening threads or topics").into())
     }
 
+    /// Deletes a thread or topic.
     async fn delete_thread(&self, thread: ConversationRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("deleting threads or topics").into())
     }
 
+    /// Lists threads or topics under a parent conversation.
     async fn list_threads(
         &self,
         parent: ConversationRef,
@@ -539,6 +615,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("listing threads or topics").into())
     }
 
+    /// Retrieves profile metadata for a conversation.
     async fn get_conversation_profile(
         &self,
         conversation: ConversationRef,
@@ -546,6 +623,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation profiles").into())
     }
 
+    /// Replaces profile metadata for a conversation.
     async fn set_conversation_profile(
         &self,
         conversation: ConversationRef,
@@ -554,6 +632,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation profiles").into())
     }
 
+    /// Retrieves one member of a conversation.
     async fn get_conversation_member(
         &self,
         conversation: ConversationRef,
@@ -562,6 +641,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation members").into())
     }
 
+    /// Lists members of a conversation.
     async fn list_conversation_members(
         &self,
         conversation: ConversationRef,
@@ -570,6 +650,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation members").into())
     }
 
+    /// Replaces explicit permissions for one conversation member.
     async fn set_member_permissions(
         &self,
         conversation: ConversationRef,
@@ -579,6 +660,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("member permissions").into())
     }
 
+    /// Replaces default permissions for conversation members.
     async fn set_default_permissions(
         &self,
         conversation: ConversationRef,
@@ -587,6 +669,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("default conversation permissions").into())
     }
 
+    /// Sets or removes a platform-specific member tag.
     async fn set_member_tag(
         &self,
         conversation: ConversationRef,
@@ -596,6 +679,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("member tags or labels").into())
     }
 
+    /// Removes a member from a conversation.
     async fn remove_conversation_member(
         &self,
         conversation: ConversationRef,
@@ -604,6 +688,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("removing conversation members").into())
     }
 
+    /// Bans a member, optionally for a duration and with history deletion.
     async fn ban_conversation_member(
         &self,
         conversation: ConversationRef,
@@ -614,6 +699,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("banning conversation members").into())
     }
 
+    /// Lifts a conversation-member ban.
     async fn unban_conversation_member(
         &self,
         conversation: ConversationRef,
@@ -622,6 +708,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("unbanning conversation members").into())
     }
 
+    /// Approves a pending request to join a conversation.
     async fn approve_conversation_join_request(
         &self,
         conversation: ConversationRef,
@@ -630,6 +717,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("approving conversation join requests").into())
     }
 
+    /// Declines a pending request to join a conversation.
     async fn decline_conversation_join_request(
         &self,
         conversation: ConversationRef,
@@ -638,10 +726,12 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("declining conversation join requests").into())
     }
 
+    /// Leaves a conversation as the configured bot.
     async fn leave_conversation(&self, conversation: ConversationRef) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("leaving conversations").into())
     }
 
+    /// Creates an invite link for a conversation.
     async fn create_invite_link(
         &self,
         conversation: ConversationRef,
@@ -650,6 +740,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation invite links").into())
     }
 
+    /// Replaces options for an existing invite link.
     async fn edit_invite_link(
         &self,
         invite: InviteLink,
@@ -658,14 +749,17 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("conversation invite links").into())
     }
 
+    /// Revokes an invite link.
     async fn revoke_invite_link(&self, invite: InviteLink) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("conversation invite links").into())
     }
 
+    /// Queries portable message history.
     async fn list_messages(&self, query: MessageQuery) -> CallResult<Page<MessageEnvelope>> {
         Err(UnsupportedFeatureError::new("message history").into())
     }
 
+    /// Forwards messages to a target conversation.
     async fn forward_messages(
         &self,
         messages: Vec<MessageRef>,
@@ -675,6 +769,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("forwarding messages").into())
     }
 
+    /// Copies messages to a target conversation without preserving forward origin.
     async fn copy_messages(
         &self,
         messages: Vec<MessageRef>,
@@ -684,6 +779,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("copying messages").into())
     }
 
+    /// Delivers multiple portable messages and records an independent result for each.
     async fn send_batch(&self, messages: Vec<BatchMessage>) -> CallResult<BatchSendResult> {
         let mut result = BatchSendResult::default();
         for (index, item) in messages.into_iter().enumerate() {
@@ -707,10 +803,12 @@ pub trait CallApiTrait: Send + Sync {
         Ok(result)
     }
 
+    /// Replaces platform-visible structured command definitions.
     async fn set_command_definitions(&self, commands: Vec<CommandDefinition>) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("structured application commands").into())
     }
 
+    /// Retrieves structured command definitions, optionally for one conversation.
     async fn get_command_definitions(
         &self,
         conversation: Option<ConversationRef>,
@@ -718,6 +816,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("structured application commands").into())
     }
 
+    /// Deletes structured command definitions, optionally for one conversation.
     async fn delete_command_definitions(
         &self,
         conversation: Option<ConversationRef>,
@@ -725,6 +824,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("structured application commands").into())
     }
 
+    /// Answers a dynamic suggestion request with a page of suggestions.
     async fn answer_suggestion_request(
         &self,
         request: SuggestionRequest,
@@ -734,14 +834,17 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("dynamic suggestions or inline queries").into())
     }
 
+    /// Publishes or updates an application surface.
     async fn publish_surface(&self, surface: AppSurface) -> CallResult<AppSurface> {
         Err(UnsupportedFeatureError::new("application surfaces").into())
     }
 
+    /// Deletes an application surface.
     async fn delete_surface(&self, surface: AppSurface) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("application surfaces").into())
     }
 
+    /// Answers a mini-app query with one portable message.
     async fn answer_mini_app_query(
         &self,
         event: MiniAppEvent,
@@ -750,14 +853,17 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("answering mini-app queries").into())
     }
 
+    /// Replaces the localized bot profile.
     async fn set_bot_profile(&self, profile: BotProfile) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("localized bot profiles").into())
     }
 
+    /// Retrieves the localized bot profile.
     async fn get_bot_profile(&self) -> CallResult<BotProfile> {
         Err(UnsupportedFeatureError::new("localized bot profiles").into())
     }
 
+    /// Sends an approval or denial decision for a platform request.
     async fn respond_to_request(
         &self,
         request_id: String,
@@ -766,6 +872,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("responding to requests").into())
     }
 
+    /// Sends an invoice to a message target.
     async fn send_invoice(
         &self,
         target: MessageTarget,
@@ -775,6 +882,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("invoices").into())
     }
 
+    /// Answers a shipping request with options or a rejection reason.
     async fn answer_shipping_request(
         &self,
         request_id: String,
@@ -784,6 +892,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("shipping requests").into())
     }
 
+    /// Approves or rejects a checkout request.
     async fn answer_checkout_request(
         &self,
         request: CheckoutRequest,
@@ -793,6 +902,7 @@ pub trait CallApiTrait: Send + Sync {
         Err(UnsupportedFeatureError::new("checkout requests").into())
     }
 
+    /// Requests a refund for a completed payment.
     async fn refund_payment(&self, payment: Payment) -> CallResult<()> {
         Err(UnsupportedFeatureError::new("payment refunds").into())
     }

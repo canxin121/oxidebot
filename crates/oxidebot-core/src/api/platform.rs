@@ -12,12 +12,16 @@ use serde_json::{Map, Value};
 /// behavior from [`super::CallApiTrait`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlatformApiRequest {
+    /// Platform-native method name to invoke.
     pub method: String,
+    /// Lossless JSON parameters passed to the native method.
     pub parameters: Value,
+    /// Multipart attachments referenced by the native parameters.
     pub files: Vec<PlatformApiFile>,
 }
 
 impl PlatformApiRequest {
+    /// Creates a request with an empty JSON-object parameter set.
     pub fn new(method: impl Into<String>) -> Self {
         Self {
             method: method.into(),
@@ -26,16 +30,19 @@ impl PlatformApiRequest {
         }
     }
 
+    /// Replaces the lossless JSON parameters for this request.
     pub fn parameters(mut self, parameters: impl Into<Value>) -> Self {
         self.parameters = parameters.into();
         self
     }
 
+    /// Appends one multipart attachment.
     pub fn file(mut self, file: PlatformApiFile) -> Self {
         self.files.push(file);
         self
     }
 
+    /// Appends multiple multipart attachments.
     pub fn files(mut self, files: impl IntoIterator<Item = PlatformApiFile>) -> Self {
         self.files.extend(files);
         self
@@ -48,19 +55,25 @@ pub struct PlatformApiFile {
     /// Multipart field name. Nested payloads can refer to it using the
     /// platform's attachment syntax, for example Telegram's `attach://name`.
     pub field: String,
+    /// File name exposed to the remote platform.
     pub file_name: String,
+    /// Optional MIME type supplied with the multipart part.
     pub mime_type: Option<String>,
+    /// Bytes or a filesystem path used as the attachment source.
     pub source: PlatformApiFileSource,
 }
 
+/// Source from which an adapter can produce a multipart attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlatformApiFileSource {
+    /// In-memory attachment bytes.
     Bytes(Vec<u8>),
     /// Stream this path when the adapter supports streaming multipart bodies.
     Path(PathBuf),
 }
 
 impl PlatformApiFile {
+    /// Creates an in-memory multipart attachment.
     pub fn bytes(
         field: impl Into<String>,
         file_name: impl Into<String>,
@@ -74,11 +87,13 @@ impl PlatformApiFile {
         }
     }
 
+    /// Sets the attachment MIME type.
     pub fn mime_type(mut self, mime_type: impl Into<String>) -> Self {
         self.mime_type = Some(mime_type.into());
         self
     }
 
+    /// Creates a path-backed attachment after validating the path is a file.
     pub async fn from_path(field: impl Into<String>, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let metadata = tokio::fs::metadata(path)
@@ -104,10 +119,12 @@ impl PlatformApiFile {
 /// Lossless platform-native API result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlatformApiResponse {
+    /// Lossless JSON result returned by the platform-native method.
     pub result: Value,
 }
 
 impl PlatformApiResponse {
+    /// Deserializes the lossless JSON result into a caller-selected type.
     pub fn deserialize<T: serde::de::DeserializeOwned>(self) -> Result<T> {
         serde_json::from_value(self.result).context("failed to decode platform API result")
     }
@@ -120,6 +137,7 @@ impl PlatformApiResponse {
 /// capability from a transport or remote API failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsupportedPlatformApiError {
+    /// Name of the platform-native method that is unavailable.
     pub method: String,
 }
 

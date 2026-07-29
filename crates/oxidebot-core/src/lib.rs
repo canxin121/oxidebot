@@ -1,9 +1,11 @@
 //! Canonical OxideBot event and API model with the optimized runtime kernel
 //! kept behind hidden implementation modules.
 
+/// Cross-platform adapter API contracts and platform-native escape hatch types.
 pub mod api;
 pub mod application;
 mod blob;
+/// Portable bot-profile object types.
 pub mod bot;
 pub mod capability;
 pub mod collaboration;
@@ -12,6 +14,7 @@ pub mod content;
 pub mod conversation;
 pub mod event;
 pub mod interaction;
+/// Portable source entities such as users and outgoing messages.
 pub mod source;
 pub mod template;
 

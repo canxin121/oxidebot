@@ -101,11 +101,14 @@ string_id!(
 /// Stable identity of one bot connection without lossy string concatenation.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct BotIdentity {
+    /// Platform that owns this bot connection.
     pub platform: PlatformId,
+    /// Platform-local identifier of the bot.
     pub bot: BotId,
 }
 
 impl BotIdentity {
+    /// Combines a platform and platform-local bot identifier.
     #[must_use]
     pub const fn new(platform: PlatformId, bot: BotId) -> Self {
         Self { platform, bot }
@@ -329,7 +332,9 @@ pub enum ExecutionKey {
     Conversation(ConversationKey),
     /// Order independently by actor inside one conversation.
     ConversationActor {
+        /// Conversation that provides the primary ordering scope.
         conversation: ConversationKey,
+        /// Actor whose work is ordered within the conversation.
         actor: UserKey,
     },
     /// Order by user when no conversation exists.

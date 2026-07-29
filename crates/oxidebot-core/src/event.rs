@@ -7,10 +7,15 @@
 
 #[doc(hidden)]
 pub mod kernel;
+/// Normalized state-change and domain lifecycle events.
 pub mod lifecycle;
+/// Incoming message event type.
 pub mod message;
+/// Adapter connection-state event type.
 pub mod meta;
+/// Lossless adapter-native event type.
 pub mod native;
+/// Answerable platform request event types.
 pub mod request;
 
 pub use crate::interaction::InteractionEvent;
@@ -24,11 +29,17 @@ pub use request::*;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// Incoming portable message.
     Message(MessageEvent),
+    /// Answerable platform request.
     Request(RequestEvent),
+    /// Answerable button, command, or other interaction.
     Interaction(InteractionEvent),
+    /// Normalized state-change or domain lifecycle event.
     Lifecycle(LifecycleEvent),
+    /// Adapter connection-state event.
     Meta(MetaEvent),
+    /// Lossless event with no portable OxideBot representation.
     Native(NativeEvent),
 }
 
@@ -273,6 +284,7 @@ pub mod tags {
 
     macro_rules! category_tags {
         ($variant:ident, $target:ty, $( $name:ident => $kind:ident ),+ $(,)?) => {$ (
+            #[doc = concat!("Compile-time marker for [`Event::", stringify!($variant), "`].")]
             #[derive(Clone, Copy, Debug, Default)]
             pub struct $name;
             impl EventTag for $name {
@@ -300,6 +312,7 @@ pub mod tags {
     );
     macro_rules! lifecycle_payload_tags {
         ($( $name:ident => $variant:ident : $target:ty => $kind:ident ),+ $(,)?) => {$ (
+            #[doc = concat!("Compile-time marker for [`LifecycleEvent::", stringify!($variant), "`].")]
             #[derive(Clone, Copy, Debug, Default)]
             pub struct $name;
             impl EventTag for $name {
@@ -330,6 +343,7 @@ pub mod tags {
 
     macro_rules! request_tags {
         ($( $name:ident => $variant:ident : $target:ty => $kind:ident ),+ $(,)?) => {$ (
+            #[doc = concat!("Compile-time marker for [`RequestEvent::", stringify!($variant), "`].")]
             #[derive(Clone, Copy, Debug, Default)]
             pub struct $name;
             impl EventTag for $name {
