@@ -11,18 +11,25 @@ use std::{
 
 type TranslationEntry = ((Arc<str>, Arc<str>), MessageTemplate);
 
+/// Maximum UTF-8 bytes in a translation locale identifier.
 pub const MAX_TRANSLATION_LOCALE_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in a translation key.
 pub const MAX_TRANSLATION_KEY_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes in one translation template source.
 pub const MAX_TRANSLATION_TEMPLATE_BYTES: usize = 1024 * 1024;
+/// Maximum UTF-8 bytes in one translation JSON document.
 pub const MAX_TRANSLATION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Compile-time selector for a portable message segment kind.
 pub trait SegmentSelector: Send + Sync + 'static {
+    /// Segment kind selected by this marker.
     const KIND: SegmentKind;
 }
 
 macro_rules! selectors {
     ($($name:ident => $kind:ident),* $(,)?) => {$(
         #[derive(Clone, Copy, Debug, Default)]
+        #[doc = concat!("Compile-time selector for [`SegmentKind::", stringify!($kind), "`].")]
         pub struct $name;
         impl SegmentSelector for $name {
             const KIND: SegmentKind = SegmentKind::$kind;
@@ -47,16 +54,19 @@ selectors! {
 }
 
 impl Message {
+    /// Returns whether the message contains a segment selected by `T`.
     #[must_use]
     pub fn has_type<T: SegmentSelector>(&self) -> bool {
         self.has(T::KIND)
     }
 
+    /// Returns the first segment selected by `T`.
     #[must_use]
     pub fn first_type<T: SegmentSelector>(&self) -> Option<&MessageSegment> {
         self.first(T::KIND)
     }
 
+    /// Iterates segments selected by `T`.
     pub fn segments_of<T: SegmentSelector>(
         &self,
     ) -> impl DoubleEndedIterator<Item = &MessageSegment> {
@@ -84,6 +94,7 @@ impl Message {
         output
     }
 
+    /// Returns whether every non-empty segment is selected by `T`.
     #[must_use]
     pub fn only_type<T: SegmentSelector>(&self) -> bool {
         !self.segments.is_empty()
@@ -93,6 +104,7 @@ impl Message {
                 .all(|segment| segment.kind() == T::KIND)
     }
 
+    /// Recursively transforms segments within custom forwarded messages.
     #[must_use]
     pub fn transform_recursive(
         &self,
@@ -130,29 +142,42 @@ impl Message {
     }
 }
 
+/// Result of transforming one message segment.
 #[derive(Clone, Debug)]
 pub enum SegmentTransform {
+    /// Preserve the segment unchanged.
     Keep,
+    /// Omit the segment.
     Drop,
+    /// Replace it with one segment.
     Replace(Box<MessageSegment>),
+    /// Replace it with multiple segments.
     Expand(Vec<MessageSegment>),
 }
 
+/// Typed value substituted into a [`MessageTemplate`].
 #[derive(Clone, Debug)]
 pub enum TemplateValue {
+    /// Plain text value.
     Text(String),
+    /// Complete portable message.
     Message(Box<Message>),
+    /// One portable segment.
     Segment(Box<MessageSegment>),
+    /// User identifier rendered as a mention.
     Mention(String),
+    /// File rendered as an attachment.
     File(File),
 }
 
 impl TemplateValue {
+    /// Creates a mention value.
     #[must_use]
     pub fn mention(user_id: impl Into<String>) -> Self {
         Self::Mention(user_id.into())
     }
 
+    /// Creates a text value.
     #[must_use]
     pub fn text(value: impl Into<String>) -> Self {
         Self::Text(value.into())
@@ -216,6 +241,7 @@ macro_rules! template_numbers {
 
 template_numbers!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64,);
 
+/// Parsed structure-preserving message template.
 #[derive(Clone, Debug)]
 pub struct MessageTemplate {
     source: Arc<str>,
@@ -239,6 +265,7 @@ enum TemplateKind {
 }
 
 impl MessageTemplate {
+    /// Parses a template with `{name[:kind]}` placeholders and escaped braces.
     pub fn parse(source: impl Into<Arc<str>>) -> Result<Self, TemplateError> {
         let source = source.into();
         let mut parts = Vec::new();
@@ -301,11 +328,13 @@ impl MessageTemplate {
         })
     }
 
+    /// Returns original template source.
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
     }
 
+    /// Renders the template into a portable message using supplied values.
     pub fn render(
         &self,
         values: &BTreeMap<Arc<str>, TemplateValue>,
@@ -361,12 +390,18 @@ fn render_value(
     Ok(())
 }
 
+/// Error while parsing or rendering a message template.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TemplateError {
+    /// Placeholder started but was not closed.
     UnclosedPlaceholder,
+    /// Placeholder name was empty.
     EmptyPlaceholder,
+    /// Placeholder kind was unknown.
     UnknownKind(String),
+    /// Required named value was absent.
     MissingValue(String),
+    /// Value cannot be rendered using requested placeholder kind.
     TypeMismatch(String),
 }
 
@@ -422,6 +457,7 @@ impl TranslationCatalog {
         Ok(catalog)
     }
 
+    /// Creates a count-bounded catalog with a derived byte limit.
     #[must_use]
     pub fn bounded(capacity: usize, default_locale: impl Into<Arc<str>>) -> Self {
         let capacity = capacity.max(1);
@@ -448,6 +484,7 @@ impl TranslationCatalog {
         }
     }
 
+    /// Parses and inserts one locale/key/template entry.
     pub fn insert(
         &self,
         locale: impl Into<Arc<str>>,
@@ -585,11 +622,13 @@ impl TranslationCatalog {
         Ok(count)
     }
 
+    /// Returns whether a template resolves for locale and key.
     #[must_use]
     pub fn contains(&self, locale: &str, key: &str) -> bool {
         self.find_template(locale, key).is_some()
     }
 
+    /// Resolves and renders a localized template.
     pub fn render(
         &self,
         locale: Option<&str>,
@@ -706,6 +745,7 @@ fn normalize_locale(locale: Arc<str>) -> Arc<str> {
     Arc::from(locale.trim().replace('_', "-"))
 }
 
+/// Keyed message that can be rendered by a translation catalog.
 #[derive(Clone, Debug)]
 pub struct LocalizedMessage {
     key: Arc<str>,
@@ -713,6 +753,7 @@ pub struct LocalizedMessage {
 }
 
 impl LocalizedMessage {
+    /// Creates a localized-message request for one template key.
     #[must_use]
     pub fn new(key: impl Into<Arc<str>>) -> Self {
         Self {
@@ -721,22 +762,26 @@ impl LocalizedMessage {
         }
     }
 
+    /// Adds or replaces one named template value.
     #[must_use]
     pub fn arg(mut self, name: impl Into<Arc<str>>, value: impl Into<TemplateValue>) -> Self {
         self.values.insert(name.into(), value.into());
         self
     }
 
+    /// Returns the template key.
     #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
 
+    /// Returns named template values.
     #[must_use]
     pub fn values(&self) -> &BTreeMap<Arc<str>, TemplateValue> {
         &self.values
     }
 
+    /// Renders this request using a catalog and optional locale.
     pub fn render(
         &self,
         catalog: &TranslationCatalog,
@@ -746,15 +791,32 @@ impl LocalizedMessage {
     }
 }
 
+/// Error while loading, storing, or resolving translations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TranslationError {
+    /// Entry count capacity would be exceeded.
     CapacityExceeded,
+    /// Retained-byte capacity would be exceeded.
     ByteCapacityExceeded,
-    DocumentTooLarge { limit: usize },
+    /// Translation JSON document exceeded its byte limit.
+    DocumentTooLarge {
+        /// Maximum permitted document bytes.
+        limit: usize,
+    },
+    /// Locale, key, or template value exceeded its byte limit.
     ValueTooLarge(&'static str),
-    MissingKey { locale: String, key: String },
+    /// No template could be resolved for locale and key.
+    MissingKey {
+        /// Requested locale.
+        locale: String,
+        /// Requested template key.
+        key: String,
+    },
+    /// Filesystem I/O failed.
     Io(String),
+    /// Translation document was malformed.
     Document(String),
+    /// Message template parsing or rendering failed.
     Template(TemplateError),
 }
 
