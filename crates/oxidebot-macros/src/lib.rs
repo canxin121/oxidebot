@@ -1,3 +1,6 @@
+//! Procedural macros for OxideBot commands, command values, state projection,
+//! and dialogue forms.
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
@@ -332,6 +335,10 @@ fn expand_branch_function(
     })
 }
 
+/// Turns an async function into a typed OxideBot command feature.
+///
+/// The optional string literal supplies the command name; otherwise the
+/// function name is converted from snake case to kebab case.
 #[proc_macro_attribute]
 pub fn command(attribute: TokenStream, input: TokenStream) -> TokenStream {
     match expand_command_function(attribute, parse_macro_input!(input as ItemFn)) {
@@ -609,6 +616,7 @@ fn to_pascal_case(value: &str) -> String {
         .collect()
 }
 
+/// Derives a complete command tree from an enum or struct command schema.
 #[proc_macro_derive(BotCommand, attributes(command))]
 pub fn derive_bot_command(input: TokenStream) -> TokenStream {
     match expand_bot_command(parse_macro_input!(input as DeriveInput)) {
@@ -617,6 +625,7 @@ pub fn derive_bot_command(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives typed command argument parsing for a struct.
 #[proc_macro_derive(CommandArgs, attributes(arg, command))]
 pub fn derive_command_args(input: TokenStream) -> TokenStream {
     match expand_command_args(parse_macro_input!(input as DeriveInput)) {
@@ -625,6 +634,7 @@ pub fn derive_command_args(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives efficient `FromState` projections for an application state type.
 #[proc_macro_derive(BotState, attributes(state))]
 pub fn derive_bot_state(input: TokenStream) -> TokenStream {
     match expand_bot_state(parse_macro_input!(input as DeriveInput)) {

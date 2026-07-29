@@ -23,10 +23,15 @@ use std::sync::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Clone, Debug)]
+/// Configuration for the finite stdin/stdout development adapter.
 pub struct ConsoleConfig {
+    /// Platform-owned identity used for the console bot.
     pub bot_id: String,
+    /// Identity assigned to each line read from standard input.
     pub user_id: String,
+    /// Direct-conversation identity assigned to console input.
     pub conversation_id: String,
+    /// Whether startup guidance is printed before the adapter reads input.
     pub prompt: bool,
 }
 
@@ -42,30 +47,35 @@ impl Default for ConsoleConfig {
 }
 
 impl ConsoleConfig {
+    /// Creates the default local development configuration.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     #[must_use]
+    /// Replaces the console bot identity.
     pub fn bot_id(mut self, value: impl Into<String>) -> Self {
         self.bot_id = value.into();
         self
     }
 
     #[must_use]
+    /// Replaces the simulated input-user identity.
     pub fn user_id(mut self, value: impl Into<String>) -> Self {
         self.user_id = value.into();
         self
     }
 
     #[must_use]
+    /// Replaces the simulated direct-conversation identity.
     pub fn conversation_id(mut self, value: impl Into<String>) -> Self {
         self.conversation_id = value.into();
         self
     }
 
     #[must_use]
+    /// Controls whether the adapter prints its interactive startup prompt.
     pub const fn prompt(mut self, enabled: bool) -> Self {
         self.prompt = enabled;
         self
@@ -73,6 +83,7 @@ impl ConsoleConfig {
 }
 
 #[derive(Clone, Default)]
+/// Outbound console API that renders planned messages to standard output.
 pub struct ConsoleApi {
     next_message: Arc<AtomicU64>,
 }
@@ -109,6 +120,7 @@ impl CallApiTrait for ConsoleApi {
     }
 }
 
+/// Finite stdin/stdout adapter intended for local development and examples.
 pub struct ConsoleAdapter {
     config: ConsoleConfig,
     platform: PlatformId,
@@ -117,6 +129,7 @@ pub struct ConsoleAdapter {
 }
 
 impl ConsoleAdapter {
+    /// Creates a console adapter after validating the configured identifiers.
     pub fn new(config: ConsoleConfig) -> Result<Self, oxidebot_core::InvalidId> {
         Ok(Self {
             platform: PlatformId::new("console")?,
@@ -126,10 +139,12 @@ impl ConsoleAdapter {
         })
     }
 
+    /// Creates the default interactive development adapter.
     pub fn development() -> Self {
         Self::new(ConsoleConfig::default()).expect("default console identifiers are valid")
     }
 
+    /// Creates a development adapter with one explicit bot identity.
     pub fn named(bot_id: impl Into<String>) -> Result<Self, oxidebot_core::InvalidId> {
         Self::new(ConsoleConfig::new().bot_id(bot_id))
     }
