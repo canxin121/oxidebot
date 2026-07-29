@@ -7,6 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-oxidebot = { path = "../../crates/oxidebot", version = "1.0.0-alpha.1", features = ["multi-thread"] }
-oxidebot-adapter-console = { path = "../../crates/oxidebot-adapter-console", version = "1.0.0-alpha.1" }
+oxidebot = { path = "../../crates/oxidebot", version = "1.0.0", features = ["multi-thread"] }
+oxidebot-adapter-console = { path = "../../crates/oxidebot-adapter-console", version = "1.0.0" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

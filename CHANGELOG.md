@@ -5,7 +5,7 @@ All notable user-visible changes are documented here. OxideBot follows
 surface consists of every public item in each published OxideBot crate and the
 documented facade exports in `oxidebot`.
 
-## Unreleased
+## [1.0.0] - 2026-07-29
 
 ### Added
 
@@ -28,6 +28,9 @@ documented facade exports in `oxidebot`.
 
 ### Changed
 
+- The workspace, every official adapter, examples, and test fixtures now use
+  the stable `1.0.0` release version.
+- The minimum supported Rust version is Rust 1.97.1.
 - All portable state-change events now live under
   `Event::Lifecycle(LifecycleEvent::...)`.
 - Bot-wide `BotCapabilities` are captured at adapter registration and reused in

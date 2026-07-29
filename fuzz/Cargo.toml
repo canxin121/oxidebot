@@ -1,8 +1,9 @@
 [package]
 name = "oxidebot-fuzz"
-version = "0.0.0"
+version = "1.0.0"
 publish = false
 edition = "2021"
+rust-version = "1.97.1"
 
 [package.metadata]
 cargo-fuzz = true

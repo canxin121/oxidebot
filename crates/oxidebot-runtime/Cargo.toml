@@ -18,7 +18,7 @@ multi-thread = ["tokio/rt-multi-thread"]
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0" }
 mime_guess.workspace = true
 regex.workspace = true
 serde.workspace = true

@@ -11,10 +11,10 @@ description = "Runnable stdin/stdout adapter for OxideBot examples, local bots, 
 
 [dependencies]
 async-trait.workspace = true
-oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
-oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+oxidebot-core = { path = "../oxidebot-core", version = "1.0.0" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0" }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync"] }
 
 [dev-dependencies]
-oxidebot-testkit = { path = "../oxidebot-testkit", version = "1.0.0-alpha.1" }
+oxidebot-testkit = { path = "../oxidebot-testkit", version = "1.0.0" }
 tokio = { workspace = true, features = ["macros", "rt"] }

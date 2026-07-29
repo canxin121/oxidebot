@@ -1,10 +1,10 @@
 [package]
 name = "oxidebot-renamed-facade-smoke"
-version = "0.0.0"
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-ob = { package = "oxidebot", path = "../../crates/oxidebot", version = "1.0.0-alpha.1" }
+ob = { package = "oxidebot", path = "../../crates/oxidebot", version = "1.0.0" }

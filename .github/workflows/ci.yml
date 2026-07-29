@@ -41,12 +41,12 @@ jobs:
           RUSTDOCFLAGS: -Dwarnings
 
   msrv:
-    name: MSRV 1.85
+    name: MSRV 1.97.1
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - run: cargo +1.85.0 check --workspace --all-targets --all-features --locked
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo +1.97.1 check --workspace --all-targets --all-features --locked
 
   features:
     name: Feature matrix

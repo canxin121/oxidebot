@@ -19,5 +19,5 @@ quote.workspace = true
 syn.workspace = true
 
 [dev-dependencies]
-oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0" }
 trybuild.workspace = true
