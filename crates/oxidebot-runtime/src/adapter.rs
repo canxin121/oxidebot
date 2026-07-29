@@ -23,12 +23,14 @@ use tokio_util::sync::CancellationToken;
 /// Routing metadata extracted before a platform frame is fully decoded.
 #[derive(Clone, Debug, Default)]
 pub struct FrameIndex {
+    /// Routing indexes for the events expected from this frame.
     pub events: Vec<DispatchIndex>,
     /// Conservative retained-byte upper bound for the fully decoded batch.
     pub estimated_bytes: usize,
 }
 
 impl FrameIndex {
+    /// Creates an index for a frame that contains exactly one event.
     #[must_use]
     pub fn one(event: DispatchIndex, estimated_bytes: usize) -> Self {
         Self {
@@ -281,6 +283,7 @@ pub struct EventBatchFrame {
 }
 
 impl EventBatchFrame {
+    /// Creates a batch from canonical events in one transport delivery.
     #[must_use]
     pub fn new(events: impl IntoIterator<Item = EventFrame>) -> Self {
         Self {
@@ -288,17 +291,20 @@ impl EventBatchFrame {
         }
     }
 
+    /// Appends one canonical event to this batch.
     #[must_use]
     pub fn push(mut self, event: EventFrame) -> Self {
         self.events.push(event);
         self
     }
 
+    /// Returns the number of canonical events in this batch.
     #[must_use]
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
+    /// Returns whether this batch contains no canonical events.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
@@ -371,6 +377,7 @@ pub struct MessageFrame {
 }
 
 impl MessageFrame {
+    /// Creates a message frame with a default sender carrying the supplied actor ID.
     #[must_use]
     pub fn new(
         id: EventId,
@@ -389,6 +396,7 @@ impl MessageFrame {
         .with_default_sender()
     }
 
+    /// Creates a message frame containing a text message with the given message ID.
     #[must_use]
     pub fn text(
         id: EventId,
@@ -411,6 +419,7 @@ impl MessageFrame {
         self
     }
 
+    /// Replaces the occurrence time reported by the adapter.
     #[must_use]
     pub fn occurred_at(mut self, occurred_at: SystemTime) -> Self {
         self.occurred_at = Some(occurred_at);
@@ -567,6 +576,7 @@ pub struct MessageFrameBuilder {
 }
 
 impl MessageFrameBuilder {
+    /// Starts a named builder for a canonical message frame.
     #[must_use]
     pub fn new(
         id: EventId,
@@ -579,18 +589,21 @@ impl MessageFrameBuilder {
         }
     }
 
+    /// Supplies the full sender profile for the frame.
     #[must_use]
     pub fn sender(mut self, sender: User) -> Self {
         self.frame = self.frame.sender(sender);
         self
     }
 
+    /// Supplies the occurrence time reported by the adapter.
     #[must_use]
     pub fn occurred_at(mut self, occurred_at: SystemTime) -> Self {
         self.frame = self.frame.occurred_at(occurred_at);
         self
     }
 
+    /// Finishes the builder and returns its canonical message frame.
     #[must_use]
     pub fn build(self) -> MessageFrame {
         self.frame
@@ -730,8 +743,13 @@ impl InterestPlan {
 /// Result of submitting one platform frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Submission {
+    /// The frame could not reach any route or active session and was not decoded.
     Ignored,
-    Accepted { events: usize },
+    /// The runtime admitted and decoded the frame.
+    Accepted {
+        /// Number of canonical events admitted from the frame.
+        events: usize,
+    },
 }
 
 pub(crate) struct IngressBatch {
@@ -834,21 +852,25 @@ impl AdapterContext {
         }
     }
 
+    /// Returns the runtime-assigned slot for this adapter's bot.
     #[must_use]
     pub const fn bot_slot(&self) -> BotSlot {
         self.slot
     }
 
+    /// Returns the routes and active sessions whose traffic this adapter should decode.
     #[must_use]
     pub fn interest(&self) -> &InterestPlan {
         &self.interest
     }
 
+    /// Returns the shared shutdown signal for this adapter run.
     #[must_use]
     pub fn shutdown(&self) -> &ShutdownSignal {
         &self.shutdown
     }
 
+    /// Returns whether runtime shutdown has been requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
@@ -1092,11 +1114,15 @@ pub enum AdapterMode {
 /// One platform transport and its outbound services.
 #[async_trait]
 pub trait Adapter: Send + 'static {
+    /// Describes the bot identity and platform represented by this adapter.
     fn descriptor(&self) -> BotDescriptor;
+    /// Returns the outbound API services implemented by this adapter.
     fn services(&self) -> BotServices;
+    /// Returns whether normal completion is valid for this transport.
     fn mode(&self) -> AdapterMode {
         AdapterMode::Persistent
     }
+    /// Runs inbound transport processing until shutdown or a terminal adapter error.
     async fn run(self: Box<Self>, context: AdapterContext)
         -> std::result::Result<(), AdapterError>;
 }
