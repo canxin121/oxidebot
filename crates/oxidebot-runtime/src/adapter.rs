@@ -73,6 +73,290 @@ pub trait InboundFrame: Send + 'static {
     }
 }
 
+/// A single already-decoded canonical OxideBot event.
+///
+/// This is the normal inbound boundary for adapters, importers, webhook
+/// handlers, and tests which have already mapped their wire payload into the
+/// public [`Event`] hierarchy.  The runtime derives the routing index,
+/// conversation partition, command key, interaction key, and native event key
+/// from that event; adapter authors do not need to use the hidden dispatch
+/// kernel types.
+///
+/// [`InboundFrame`] remains the escape hatch for high-throughput transports
+/// that can cheaply index a wire payload before decoding it.  Use
+/// [`EventFrame::retained_bytes`] only when an event can retain more than the
+/// conservative default, such as an importer attaching a large native value.
+pub struct EventFrame {
+    id: EventId,
+    event: Event,
+    occurred_at: Option<SystemTime>,
+    retained_bytes: usize,
+}
+
+impl EventFrame {
+    /// Conservative per-event default that keeps ordinary adapter code free
+    /// from manual allocation accounting.  A frame whose actual retained size
+    /// exceeds this bound is rejected with a precise error and can be retried
+    /// with [`Self::retained_bytes`].
+    pub const DEFAULT_RETAINED_BYTES: usize = 64 * 1024;
+
+    /// Creates a canonical frame with receive-time as its occurrence time.
+    #[must_use]
+    pub fn new(id: EventId, event: Event) -> Self {
+        Self {
+            id,
+            event,
+            occurred_at: Some(SystemTime::now()),
+            retained_bytes: Self::DEFAULT_RETAINED_BYTES,
+        }
+    }
+
+    /// Replaces the adapter-reported occurrence time.
+    #[must_use]
+    pub fn occurred_at(mut self, occurred_at: SystemTime) -> Self {
+        self.occurred_at = Some(occurred_at);
+        self
+    }
+
+    /// Omits an occurrence time when the transport does not provide one.
+    #[must_use]
+    pub fn without_occurrence_time(mut self) -> Self {
+        self.occurred_at = None;
+        self
+    }
+
+    /// Sets a conservative retained-byte charge for this event.
+    ///
+    /// The value includes all event-owned payload data but not the runtime's
+    /// small dispatch-envelope overhead. It must be non-zero.
+    #[must_use]
+    pub fn retained_bytes(mut self, retained_bytes: usize) -> Self {
+        self.retained_bytes = retained_bytes.max(std::mem::size_of::<Event>());
+        self
+    }
+
+    fn dispatch_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
+        let mut index = DispatchIndex::event(bot, platform.clone(), self.event.event_type());
+        match &self.event {
+            Event::Message(event) => {
+                index.conversation = Some(conversation_key(bot, &event.conversation));
+                index.actor = Some(UserKey::new(bot, CompactId::from(event.sender.id.clone())));
+                index.command = command_key(&event.message);
+            }
+            Event::Interaction(event) => {
+                index.conversation = event
+                    .conversation
+                    .as_ref()
+                    .map(|conversation| conversation_key(bot, conversation));
+                index.actor = Some(UserKey::new(bot, CompactId::from(event.user.id.clone())));
+                index.interaction = event.action_id.as_deref().map(Arc::from);
+            }
+            Event::Request(event) => {
+                let (user, conversation) = match event {
+                    oxidebot_core::event::RequestEvent::Friend(event) => (&event.user, None),
+                    oxidebot_core::event::RequestEvent::GroupJoin(event) => {
+                        (&event.user, Some(&event.conversation))
+                    }
+                    oxidebot_core::event::RequestEvent::GroupInvite(event) => {
+                        (&event.user, Some(&event.conversation))
+                    }
+                };
+                index.actor = Some(UserKey::new(bot, CompactId::from(user.id.clone())));
+                index.conversation = conversation.map(|value| conversation_key(bot, value));
+            }
+            Event::Native(event) => index.native_type = Some(Arc::from(event.kind.as_str())),
+            Event::Notice(event) => {
+                use oxidebot_core::event::NoticeEvent;
+                let (conversation, user) = match event {
+                    NoticeEvent::GroupMemberJoined(event) => {
+                        (Some(&event.conversation), Some(&event.user))
+                    }
+                    NoticeEvent::GroupMemberLeft(event) => {
+                        (Some(&event.conversation), Some(&event.user))
+                    }
+                    NoticeEvent::GroupAdminChanged(event) => {
+                        (Some(&event.conversation), Some(&event.user))
+                    }
+                    NoticeEvent::GroupMuteChanged(event) => {
+                        (Some(&event.conversation), event.operator.as_ref())
+                    }
+                    NoticeEvent::GroupMemberMuteChanged(event) => {
+                        (Some(&event.conversation), Some(&event.user))
+                    }
+                    NoticeEvent::GroupHighlightChanged(event) => (
+                        Some(&event.conversation),
+                        event.sender.as_ref().or(event.operator.as_ref()),
+                    ),
+                    NoticeEvent::GroupMemberAliasChanged(event) => {
+                        (Some(&event.conversation), Some(&event.user))
+                    }
+                    NoticeEvent::MessageReactionsChanged(event) => {
+                        (event.conversation.as_ref(), Some(&event.user))
+                    }
+                    NoticeEvent::MessageDeleted(event) => (
+                        event.conversation.as_ref(),
+                        event.user.as_ref().or(event.operator.as_ref()),
+                    ),
+                    NoticeEvent::MessageEdited(event) => {
+                        (event.conversation.as_ref(), Some(&event.user))
+                    }
+                };
+                index.conversation = conversation.map(|value| conversation_key(bot, value));
+                index.actor =
+                    user.map(|value| UserKey::new(bot, CompactId::from(value.id.clone())));
+            }
+            Event::Lifecycle(_) | Event::Meta(_) => {}
+        }
+        index
+    }
+}
+
+fn conversation_key(bot: BotSlot, conversation: &ConversationRef) -> ConversationKey {
+    if let Some(parent) = &conversation.parent {
+        ConversationKey::new(bot, CompactId::from(parent.id.clone()))
+            .in_subspace(CompactId::from(conversation.id.clone()))
+    } else {
+        ConversationKey::new(bot, CompactId::from(conversation.id.clone()))
+    }
+}
+
+fn command_key(message: &Message) -> Option<Arc<str>> {
+    message
+        .get_raw_text()
+        .strip_prefix('/')
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.split('@').next())
+        .filter(|value| !value.is_empty())
+        .map(Arc::from)
+}
+
+impl InboundFrame for EventFrame {
+    fn index(
+        &self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<FrameIndex, DecodeError> {
+        self.id
+            .validate()
+            .map_err(|error| DecodeError::new(format!("invalid event id: {error}")))?;
+        Ok(FrameIndex::one(
+            self.dispatch_index(bot, platform),
+            self.retained_bytes.saturating_add(2_048),
+        ))
+    }
+
+    fn decode(
+        self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        let indexed = FrameIndex::one(self.dispatch_index(bot, platform), 0);
+        self.decode_indexed(bot, platform, &indexed)
+    }
+
+    fn decode_indexed(
+        self,
+        _bot: BotSlot,
+        _platform: &PlatformId,
+        indexed: &FrameIndex,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        let index = indexed
+            .events
+            .first()
+            .cloned()
+            .ok_or_else(|| DecodeError::new("event frame index is empty"))?;
+        let mut draft = DispatchDraft::new(self.id, index, self.event, self.retained_bytes);
+        draft.occurred_at = self.occurred_at;
+        Ok(DispatchBatch::new([draft]))
+    }
+}
+
+/// A bounded batch of already-decoded canonical events from one transport
+/// delivery. This preserves one admission decision while still letting the
+/// runtime discard uninterested individual events after validation.
+#[derive(Default)]
+pub struct EventBatchFrame {
+    events: Vec<EventFrame>,
+}
+
+impl EventBatchFrame {
+    #[must_use]
+    pub fn new(events: impl IntoIterator<Item = EventFrame>) -> Self {
+        Self {
+            events: events.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn push(mut self, event: EventFrame) -> Self {
+        self.events.push(event);
+        self
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+impl InboundFrame for EventBatchFrame {
+    fn index(
+        &self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<FrameIndex, DecodeError> {
+        let mut events = Vec::with_capacity(self.events.len());
+        let mut estimated_bytes = 0_usize;
+        for frame in &self.events {
+            let index = frame.index(bot, platform)?;
+            events.extend(index.events);
+            estimated_bytes = estimated_bytes.saturating_add(index.estimated_bytes);
+        }
+        Ok(FrameIndex {
+            events,
+            estimated_bytes,
+        })
+    }
+
+    fn decode(
+        self,
+        bot: BotSlot,
+        platform: &PlatformId,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        let indexed = self.index(bot, platform)?;
+        self.decode_indexed(bot, platform, &indexed)
+    }
+
+    fn decode_indexed(
+        self,
+        _bot: BotSlot,
+        _platform: &PlatformId,
+        indexed: &FrameIndex,
+    ) -> std::result::Result<DispatchBatch, DecodeError> {
+        if indexed.events.len() != self.events.len() {
+            return Err(DecodeError::new(
+                "canonical event batch index does not match its event count",
+            ));
+        }
+        let events = self
+            .events
+            .into_iter()
+            .zip(indexed.events.iter().cloned())
+            .map(|(frame, index)| {
+                let mut draft =
+                    DispatchDraft::new(frame.id, index, frame.event, frame.retained_bytes);
+                draft.occurred_at = frame.occurred_at;
+                draft
+            });
+        Ok(DispatchBatch::new(events))
+    }
+}
+
 /// Canonical message frame for simple adapters, importers, console transports,
 /// and tests. High-throughput adapters may still implement [`InboundFrame`]
 /// directly to reuse offsets from their wire format.
@@ -569,6 +853,39 @@ impl AdapterContext {
         self.cancellation.is_cancelled()
     }
 
+    /// Submits one already-normalized standard event.
+    ///
+    /// This is the preferred adapter API once a wire payload has been mapped
+    /// to [`Event`]. The runtime derives routing metadata and admission
+    /// accounting; use [`Self::submit`] only when a transport can perform a
+    /// cheaper two-stage index/decode operation on its raw frame.
+    pub async fn submit_event(
+        &self,
+        id: EventId,
+        event: Event,
+    ) -> std::result::Result<Submission, AdapterError> {
+        self.submit(EventFrame::new(id, event)).await
+    }
+
+    /// Submits a canonical event with adapter-provided occurrence time and
+    /// retained-byte accounting.
+    pub async fn submit_event_frame(
+        &self,
+        frame: EventFrame,
+    ) -> std::result::Result<Submission, AdapterError> {
+        self.submit(frame).await
+    }
+
+    /// Submits several canonical events produced by the same transport
+    /// delivery. An empty batch is rejected, matching every other inbound
+    /// frame contract.
+    pub async fn submit_events(
+        &self,
+        events: impl IntoIterator<Item = EventFrame>,
+    ) -> std::result::Result<Submission, AdapterError> {
+        self.submit(EventBatchFrame::new(events)).await
+    }
+
     /// Submits one already-canonical portable message without requiring a
     /// simple adapter to implement the two-stage [`InboundFrame`] contract.
     pub async fn submit_message(
@@ -809,5 +1126,70 @@ mod retained_size_tests {
             });
 
         assert!(frame.retained_bytes() >= baseline_bytes.saturating_add(1024 * 1024));
+    }
+
+    #[test]
+    fn canonical_event_frame_derives_message_routing_metadata() {
+        let event = Event::Message(MessageEvent {
+            id: "message-1".into(),
+            time: None,
+            sender: User {
+                id: "alice".into(),
+                ..User::default()
+            },
+            conversation: ConversationRef::group("room"),
+            message: Message::text("/ping one"),
+        });
+        let frame = EventFrame::new(EventId::new("event-1").expect("static id"), event);
+        let platform = PlatformId::new("test").expect("static platform");
+        let index = frame
+            .index(BotSlot(0), &platform)
+            .expect("canonical event indexes");
+        let event = index.events.first().expect("one event index");
+
+        assert_eq!(event.event_type, EventType::Message);
+        assert_eq!(event.command.as_deref(), Some("ping"));
+        assert_eq!(
+            event.conversation.as_ref().map(|key| &key.id),
+            Some(&CompactId::from("room"))
+        );
+        assert_eq!(
+            event.actor.as_ref().map(|key| &key.id),
+            Some(&CompactId::from("alice"))
+        );
+    }
+
+    #[test]
+    fn canonical_event_frame_derives_interaction_and_native_keys() {
+        let platform = PlatformId::new("test").expect("static platform");
+        let interaction = Event::Interaction(oxidebot_core::interaction::InteractionEvent {
+            id: "interaction-1".into(),
+            kind: oxidebot_core::interaction::InteractionKind::Button,
+            action_id: Some("approve".into()),
+            values: Vec::new(),
+            user: User {
+                id: "alice".into(),
+                ..User::default()
+            },
+            conversation: None,
+            message: None,
+            context_id: None,
+            response: None,
+            fields: Default::default(),
+            command: None,
+            locale: None,
+            permissions: Default::default(),
+            data: serde_json::Value::Null,
+        });
+        let interaction = EventFrame::new(
+            EventId::new("event-interaction").expect("static id"),
+            interaction,
+        )
+        .index(BotSlot(0), &platform)
+        .expect("interaction indexes");
+        assert_eq!(
+            interaction.events[0].interaction.as_deref(),
+            Some("approve")
+        );
     }
 }

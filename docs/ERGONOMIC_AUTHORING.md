@@ -291,6 +291,6 @@ Interaction scenarios use `.click(...)`, `.expect_interaction_ack()`,
 `.expect_edit_contains(...)`, and `.expect_followup_contains(...)`.
 
 Use `ScriptedAdapter` directly for protocol-level event control. Criterion is
-used only by `oxidebot-testkit` benchmarks. If Gnuplot is not installed,
-Criterion automatically uses its Plotters backend; that informational message
-does not affect tests or runtime behavior.
+used only by `oxidebot-testkit` benchmarks. This workspace does not configure
+Criterion's Gnuplot output backend, so a local Gnuplot installation is neither
+required nor used by OxideBot tests or runtime behavior.

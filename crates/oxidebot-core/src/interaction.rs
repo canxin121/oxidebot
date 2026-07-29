@@ -892,18 +892,6 @@ pub enum ModalField {
     PlatformNative(PlatformNativeData),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InteractionCapabilities {
-    pub inline_buttons: bool,
-    pub reply_keyboard: bool,
-    pub select_menus: bool,
-    pub modals: bool,
-    pub commands: bool,
-    pub chat_menu: bool,
-    pub web_apps: bool,
-    pub update_components: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsupportedInteractionError {
     pub feature: String,

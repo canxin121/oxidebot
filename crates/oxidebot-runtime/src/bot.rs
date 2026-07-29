@@ -17,7 +17,8 @@ use oxidebot_core::{
         DeliveryPlan as PublicDeliveryPlan, DeliveryReport as PublicDeliveryReport,
         Message as PublicMessage,
     },
-    BotId, BotIdentity, BotObject, BotSlot, CallApiTrait, FallbackPolicy, InvalidId, PlatformId,
+    BotId, BotIdentity, BotObject, BotSlot, CallApiTrait, CallError, FallbackPolicy, InvalidId,
+    PlatformId,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -80,28 +81,56 @@ pub enum IdempotencyGuarantee {
     PlatformNative,
 }
 
-/// Coarse service capabilities available on one bot connection.
+/// Runtime retry guarantees supplied by one bot connection.
+///
+/// Portable feature support belongs exclusively to
+/// [`oxidebot_core::BotCapabilities`]. This type intentionally contains only
+/// scheduler semantics that cannot be inferred from a feature's availability.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeCapabilities {
-    pub messages: bool,
-    pub interactions: bool,
-    pub native_api: bool,
-    pub api: bool,
     pub send_idempotency: IdempotencyGuarantee,
     pub delete_idempotent: bool,
 }
 
-fn platform_error(error: anyhow::Error) -> PlatformError {
-    match error.downcast::<PlatformError>() {
-        Ok(error) => error,
-        Err(error) => PlatformError::new(PlatformErrorKind::Permanent, error.to_string()),
+fn platform_error(error: CallError) -> PlatformError {
+    match error {
+        CallError::Temporary { message } => {
+            PlatformError::new(PlatformErrorKind::Temporary, message)
+        }
+        CallError::RateLimited {
+            message,
+            retry_after,
+        } => {
+            let mut error = PlatformError::new(PlatformErrorKind::RateLimited, message);
+            if let Some(retry_after) = retry_after {
+                error = error.retry_after(retry_after);
+            }
+            error
+        }
+        CallError::Timeout { message } => PlatformError::new(PlatformErrorKind::Timeout, message),
+        CallError::NotFound { message } => PlatformError::new(PlatformErrorKind::NotFound, message),
+        CallError::Unsupported { feature } => {
+            PlatformError::new(PlatformErrorKind::Unsupported, feature)
+        }
+        CallError::InvalidRequest { message } => {
+            PlatformError::new(PlatformErrorKind::InvalidRequest, message)
+        }
+        CallError::Permanent { message } => {
+            PlatformError::new(PlatformErrorKind::Permanent, message)
+        }
+        CallError::Planning(error) => {
+            PlatformError::new(PlatformErrorKind::InvalidRequest, error.to_string())
+        }
+        CallError::PartialDelivery(error) => {
+            PlatformError::new(PlatformErrorKind::Permanent, error.to_string())
+        }
     }
 }
 
-fn command_api_error(error: anyhow::Error) -> CommandError {
-    match error.downcast::<oxidebot_core::PartialDeliveryError>() {
-        Ok(error) => CommandError::PartialDelivery(error),
-        Err(error) => CommandError::Platform(platform_error(error)),
+fn command_api_error(error: CallError) -> CommandError {
+    match error {
+        CallError::PartialDelivery(error) => CommandError::PartialDelivery(error),
+        error => CommandError::Platform(platform_error(error)),
     }
 }
 
@@ -110,19 +139,18 @@ fn command_api_error(error: anyhow::Error) -> CommandError {
 pub struct BotServices {
     pub(crate) api: Option<Arc<dyn CallApiTrait>>,
     capabilities: RuntimeCapabilities,
+    bot_capabilities: Arc<BotCapabilities>,
 }
 
 impl BotServices {
     /// Creates adapter services from the single OxideBot API object.
     #[must_use]
     pub fn new(api: Arc<dyn CallApiTrait>) -> Self {
+        let bot_capabilities = Arc::new(api.bot_capabilities());
         Self {
             api: Some(api),
-            capabilities: RuntimeCapabilities {
-                messages: true,
-                api: true,
-                ..RuntimeCapabilities::default()
-            },
+            capabilities: RuntimeCapabilities::default(),
+            bot_capabilities,
         }
     }
 
@@ -144,6 +172,14 @@ impl BotServices {
     pub fn capabilities(&self) -> RuntimeCapabilities {
         self.capabilities
     }
+
+    /// Returns the immutable portable capability model captured when the
+    /// adapter registered its services. Runtime hot paths never re-query an
+    /// adapter for this bot-wide metadata.
+    #[must_use]
+    pub fn bot_capabilities(&self) -> &BotCapabilities {
+        &self.bot_capabilities
+    }
 }
 
 impl fmt::Debug for BotServices {
@@ -151,6 +187,7 @@ impl fmt::Debug for BotServices {
         formatter
             .debug_struct("BotServices")
             .field("capabilities", &self.capabilities)
+            .field("bot_capabilities", &self.bot_capabilities)
             .finish_non_exhaustive()
     }
 }
@@ -160,6 +197,7 @@ struct BotHandleInner {
     identity: BotIdentity,
     descriptor: BotDescriptor,
     capabilities: RuntimeCapabilities,
+    bot_capabilities: Arc<BotCapabilities>,
     api: Option<Arc<dyn CallApiTrait>>,
     client: CommandClient,
 }
@@ -174,6 +212,7 @@ impl BotHandle {
         slot: BotSlot,
         descriptor: BotDescriptor,
         capabilities: RuntimeCapabilities,
+        bot_capabilities: Arc<BotCapabilities>,
         api: Option<Arc<dyn CallApiTrait>>,
         client: CommandClient,
     ) -> Self {
@@ -183,6 +222,7 @@ impl BotHandle {
             identity,
             descriptor,
             capabilities,
+            bot_capabilities,
             api,
             client,
         }))
@@ -217,11 +257,9 @@ impl BotHandle {
             .ok_or(CommandError::ApiUnsupported)
     }
 
-    /// Reads the adapter's public capability model behind a panic boundary.
+    /// Returns the immutable public capability model captured at registration.
     pub(crate) fn bot_capabilities(&self) -> std::result::Result<BotCapabilities, CommandError> {
-        let api = self.api()?;
-        catch_unwind(AssertUnwindSafe(|| api.bot_capabilities()))
-            .map_err(|_| CommandError::ServicePanicked)
+        Ok((*self.0.bot_capabilities).clone())
     }
 
     /// Plans one public message without invoking transport. Planning is kept
@@ -229,12 +267,13 @@ impl BotHandle {
     /// exact physical plan before the bounded transport operation is admitted.
     pub(crate) fn plan_outgoing_message(
         &self,
+        target: &PublicMessageTarget,
         message: &PublicMessage,
         fallback: FallbackPolicy,
     ) -> std::result::Result<PublicDeliveryPlan, CommandError> {
         let api = self.api()?;
         catch_unwind(AssertUnwindSafe(|| {
-            api.plan_outgoing_message(message, fallback)
+            api.plan_outgoing_message(target, message, fallback)
         }))
         .map_err(|_| CommandError::ServicePanicked)?
         .map_err(|error| CommandError::Platform(platform_error(error)))
@@ -264,7 +303,7 @@ impl BotHandle {
         message: PublicMessage,
         fallback: FallbackPolicy,
     ) -> std::result::Result<PublicDeliveryReport, CommandError> {
-        let plan = self.plan_outgoing_message(&message, fallback)?;
+        let plan = self.plan_outgoing_message(&target, &message, fallback)?;
         self.send_delivery_plan(target, plan).await
     }
 
@@ -1041,8 +1080,16 @@ impl CommandWorker {
             metrics: Arc::clone(&metrics),
         };
         let capabilities = services.capabilities();
+        let bot_capabilities = Arc::clone(&services.bot_capabilities);
         let api = services.api.clone();
-        let bot = BotHandle::new(slot, descriptor, capabilities, api, client);
+        let bot = BotHandle::new(
+            slot,
+            descriptor,
+            capabilities,
+            bot_capabilities,
+            api,
+            client,
+        );
         (
             bot,
             Self {

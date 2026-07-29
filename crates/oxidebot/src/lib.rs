@@ -12,16 +12,17 @@ pub use oxidebot_runtime as runtime;
 // additions in core/runtime from silently becoming facade-level SemVer
 // commitments.
 pub use oxidebot_core::{
-    event, BotId, BotIdentity, CallApiTrait, Event, EventId, Message, PlatformId,
+    event, BotId, BotIdentity, CallApiTrait, CallError, CallResult, Event, EventId, Message,
+    PlatformId,
 };
 pub use oxidebot_runtime::{
     command, Adapter, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandTree,
     CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue, DialogueForm,
     DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
     GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
-    MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation,
-    Receipt, Reply, Responder, Result, ResultExt, RuntimeMetrics, RuntimeProfile, Segments, Sender,
-    SessionPolicy, ShutdownSignal, State, Target, Text,
+    MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, PluginBundle,
+    PluginMetadata, Propagation, Receipt, Reply, Responder, Result, ResultExt, RuntimeMetrics,
+    RuntimeProfile, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
 };
 
 /// Derives a strongly typed command schema and parser.
@@ -122,15 +123,15 @@ pub mod delivery {
 /// Focused imports for platform-adapter and transport authors.
 pub mod adapter {
     pub use oxidebot_runtime::{
-        Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, FrameIndex,
-        InboundFrame, MessageFrame, MessageFrameBuilder, Submission,
+        Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, EventFrame,
+        FrameIndex, InboundFrame, MessageFrame, MessageFrameBuilder, Submission,
     };
 
     /// Common adapter-authoring imports.
     pub mod prelude {
         pub use super::{
             Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
-            MessageFrame, MessageFrameBuilder,
+            EventFrame, MessageFrame, MessageFrameBuilder,
         };
         pub use oxidebot_core::{BotId, ConversationRef, EventId, Message, PlatformId};
     }
@@ -140,7 +141,7 @@ pub mod adapter {
 pub mod handler {
     pub use oxidebot_runtime::{
         After, Before, Feature, FeatureExt, GeneratedFeature, Guard, GuardDecision, GuardResult,
-        IntoFeature, IntoOutcome, Module, Outcome, Propagation,
+        IntoFeature, IntoOutcome, Module, Outcome, PluginBundle, PluginMetadata, Propagation,
     };
 }
 
@@ -162,9 +163,9 @@ pub mod advanced {
     pub use oxidebot_runtime::{
         Adapter, AdapterContext, AdapterError, AdapterMode, AdminTools, BotDescriptor, BotServices,
         CatalogCommandRenderer, CommandMiddleware, CommandOutputMiddleware, CommandOverlay,
-        CommandPublicationStatus, CommandRewriter, DeliveryMiddleware, FrameIndex, InboundFrame,
-        MessageFrame, MessageFrameBuilder, MessageNormalizer, MetricsHandle, RuntimeConfig,
-        RuntimeProfile, Service, ServiceContext,
+        CommandPublicationStatus, CommandRewriter, DeliveryMiddleware, EventFrame, FrameIndex,
+        InboundFrame, MessageFrame, MessageFrameBuilder, MessageNormalizer, MetricsHandle,
+        RuntimeConfig, RuntimeProfile, Service, ServiceContext,
     };
 }
 
@@ -182,7 +183,8 @@ pub mod prelude {
             message::{File, Message, MessageOptions, MessageSegment, SegmentKind},
             user::User,
         },
-        BotId, BotIdentity, CallApiTrait, ConversationRef, EventId, PlatformId,
+        BotId, BotIdentity, CallApiTrait, CallError, CallResult, ConversationRef, EventId,
+        PlatformId,
     };
     pub use oxidebot_macros::{
         branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
@@ -192,9 +194,9 @@ pub mod prelude {
         CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue, DialogueForm,
         DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
         GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
-        MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation,
-        Receipt, Reply, Responder, ResultExt, Segments, Sender, SessionPolicy, ShutdownSignal,
-        State, Target, Text,
+        MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, PluginBundle,
+        Propagation, Receipt, Reply, Responder, ResultExt, Segments, Sender, SessionPolicy,
+        ShutdownSignal, State, Target, Text,
     };
 }
 

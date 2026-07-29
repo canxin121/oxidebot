@@ -680,7 +680,7 @@ where
             }
         }
         let mut plan = bot
-            .plan_outgoing_message(&message, policy)
+            .plan_outgoing_message(&target, &message, policy)
             .map_err(HandlerError::from)?;
         for middleware in &self.delivery_middleware {
             plan = AssertUnwindSafe(middleware.before_delivery(context, &target, plan))
@@ -2283,8 +2283,8 @@ mod resource_limit_tests {
         RuntimeConfig, RuntimeMetrics,
     };
     use oxidebot_core::{
-        application::CommandDefinition, BotCapabilities, BotId, CallApiTrait, PlatformId,
-        SupportLevel,
+        application::CommandDefinition, BotCapabilities, BotId, CallApiTrait, CallError,
+        CallResult, PlatformId, SupportLevel,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2305,7 +2305,7 @@ mod resource_limit_tests {
         async fn set_command_definitions(
             &self,
             _commands: Vec<CommandDefinition>,
-        ) -> anyhow::Result<()> {
+        ) -> CallResult<()> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             let mut failures = self.failures.load(Ordering::Acquire);
             let should_fail = loop {
@@ -2323,11 +2323,7 @@ mod resource_limit_tests {
                 }
             };
             if should_fail {
-                return Err(crate::PlatformError::new(
-                    crate::PlatformErrorKind::Temporary,
-                    "scripted publication failure",
-                )
-                .into());
+                return Err(CallError::temporary("scripted publication failure"));
             }
             Ok(())
         }

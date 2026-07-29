@@ -5,12 +5,12 @@
 //! the same bounded runtime, command IR, delivery planner, and receipts as a
 //! network adapter.
 
-use anyhow::Result as AnyResult;
+use anyhow::Result;
 use async_trait::async_trait;
 use oxidebot_core::{
     source::message::{DeliveryItemResult, DeliveryPlan, DeliveryReport},
-    BotCapabilities, BotId, CallApiTrait, ConversationRef, EventId, MessageRef, MessageTarget,
-    PlatformId, SupportLevel,
+    BotCapabilities, BotId, CallApiTrait, CallResult, ConversationRef, EventId, MessageRef,
+    MessageTarget, PlatformId, SupportLevel,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -91,7 +91,7 @@ impl CallApiTrait for ConsoleApi {
         &self,
         target: MessageTarget,
         plan: DeliveryPlan,
-    ) -> AnyResult<DeliveryReport> {
+    ) -> CallResult<DeliveryReport> {
         let mut messages = Vec::with_capacity(plan.messages.len());
         let mut items = Vec::with_capacity(plan.messages.len());
         for (index, message) in plan.messages.into_iter().enumerate() {

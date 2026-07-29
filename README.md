@@ -972,8 +972,56 @@ let frame = MessageFrameBuilder::new(
 context.submit(frame).await?;
 ```
 
+For every other portable event, use `EventFrame` or the even shorter
+`submit_event`. The runtime derives the event type, conversation/actor
+partition, command key, interaction action key, and native key from the public
+`Event`, so normal adapters never import `event::kernel`:
+
+```rust
+use oxidebot::adapter::prelude::*;
+use oxidebot::event::Event;
+
+// `event` is the adapter's fully normalized portable event.
+context.submit_event(event_id, event).await?;
+
+// Preserve a platform occurrence time or use a larger accounting bound only
+// for unusually large retained event payloads.
+context
+    .submit_event_frame(
+        EventFrame::new(event_id, Event::Native(native_event))
+            .occurred_at(platform_time)
+            .retained_bytes(256 * 1024),
+    )
+    .await?;
+```
+
+When one webhook delivery contains multiple normalized events, submit them as
+one bounded admission unit with `context.submit_events(frames)`. The runtime
+still discards individually uninterested events after validation.
+
 High-throughput adapters may still implement `InboundFrame` directly to reuse
 wire-format offsets and preserve the earliest possible interest rejection.
+
+## Plugin bundles
+
+For a reusable feature that needs both handlers and a supervised background
+task, package it as a `PluginBundle`. A bundle is deliberately not a nested
+router or a second runtime: `OxideBot::plugin` flattens its module and services
+into the application in registration order.
+
+```rust
+use oxidebot::{command, Module, OxideBot, PluginBundle};
+
+let reminders = PluginBundle::new("reminders")
+    .version("1.0")
+    .description("Reminder commands and their scheduler")
+    .add(command("remind").handle(|| async { "saved" }));
+
+let app = OxideBot::new().plugin(reminders);
+```
+
+Use a plain `Module` for a stateless handler collection. Use a bundle when the
+feature owns configuration, metadata, or one or more `Service` tasks.
 
 ## Runtime performance model
 

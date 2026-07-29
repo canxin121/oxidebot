@@ -174,10 +174,11 @@ mod tests {
             .call_platform_api(PlatformApiRequest::new("sendRichMessage"))
             .await
             .unwrap_err();
-        let error = error
-            .downcast_ref::<UnsupportedPlatformApiError>()
-            .expect("unexpected error type");
-        assert_eq!(error.method, "sendRichMessage");
+        assert!(matches!(
+            error,
+            crate::api::CallError::Unsupported { ref feature }
+                if feature.contains("sendRichMessage")
+        ));
         assert!(!UnsupportedAdapter.supports_platform_api_method("sendRichMessage"));
     }
 }

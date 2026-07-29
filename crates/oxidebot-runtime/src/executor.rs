@@ -411,7 +411,7 @@ mod tests {
             message::{DeliveryItemResult, DeliveryPlan, DeliveryReport, Message, MessageSegment},
             user::User,
         },
-        BotId, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
+        BotId, CallApiTrait, CallResult, CompactId, ConversationKey, EventId, PlatformId, UserKey,
     };
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -424,7 +424,7 @@ mod tests {
             &self,
             target: MessageTarget,
             plan: DeliveryPlan,
-        ) -> anyhow::Result<DeliveryReport> {
+        ) -> CallResult<DeliveryReport> {
             let sent = MessageRef::new("1").in_conversation(target.conversation);
             Ok(DeliveryReport {
                 messages: vec![sent.clone()],

@@ -30,7 +30,7 @@ pub use api::platform::{
     PlatformApiFile, PlatformApiFileSource, PlatformApiRequest, PlatformApiResponse,
     UnsupportedPlatformApiError,
 };
-pub use api::CallApiTrait;
+pub use api::{CallApiTrait, CallError, CallResult};
 pub use application::{
     AppSurface, AppSurfaceKind, BotProfile, CommandChoice, CommandContext, CommandDefinition,
     CommandInvocation, CommandKind, CommandOption, CommandOptionType, Localized, MiniAppEvent,
@@ -68,12 +68,12 @@ pub use event::Event;
 pub use interaction::{
     ActionRow, BotCommand, BotCommandQuery, BotCommandSet, Button, ButtonAction, ButtonIcon,
     ButtonStyle, ChatMenu, ChoiceOption, ChosenChatCriteria, CommandScope, InlineKeyboard,
-    InlineQueryTarget, InputComponent, InteractionCapabilities, InteractionComponent,
-    InteractionEvent, InteractionKind, InteractionNotificationStyle, InteractionResponse,
-    InteractionResponseHandle, InteractionVisibility, LoginAction, MessageComponents, Modal,
-    ModalField, PlatformNativeData, PollKind, ReplyButton, ReplyButtonAction, ReplyButtonRow,
-    ReplyKeyboard, RequestChat, RequestManagedBot, RequestUsers, SelectKind, SelectMenu,
-    SelectOption, UnsupportedInteractionError, ViewNavigation,
+    InlineQueryTarget, InputComponent, InteractionComponent, InteractionEvent, InteractionKind,
+    InteractionNotificationStyle, InteractionResponse, InteractionResponseHandle,
+    InteractionVisibility, LoginAction, MessageComponents, Modal, ModalField, PlatformNativeData,
+    PollKind, ReplyButton, ReplyButtonAction, ReplyButtonRow, ReplyKeyboard, RequestChat,
+    RequestManagedBot, RequestUsers, SelectKind, SelectMenu, SelectOption,
+    UnsupportedInteractionError, ViewNavigation,
 };
 pub use source::message::{
     DegradationKind, DeliveryDegradation, DeliveryItemResult, DeliveryPlan, DeliveryPlanningError,

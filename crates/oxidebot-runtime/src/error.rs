@@ -73,6 +73,7 @@ pub enum PlatformErrorKind {
     RateLimited,
     Timeout,
     Permanent,
+    InvalidRequest,
     Unsupported,
     NotFound,
 }

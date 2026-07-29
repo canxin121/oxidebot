@@ -260,6 +260,18 @@ where
         self
     }
 
+    /// Installs one reusable plugin bundle.
+    ///
+    /// The bundle contributes its flat handlers and supervised services to
+    /// this same application; it never creates a nested runtime or router.
+    #[must_use]
+    pub fn plugin(mut self, plugin: crate::PluginBundle<S>) -> Self {
+        let (_metadata, module, mut services) = plugin.into_parts();
+        self.module = self.module.include(module);
+        self.services.append(&mut services);
+        self
+    }
+
     #[must_use]
     pub fn filter<F>(mut self, filter: F) -> Self
     where

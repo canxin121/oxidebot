@@ -15,8 +15,8 @@ use oxidebot_core::{
         },
         user::User,
     },
-    BotCapabilities, BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId,
-    InteractionVisibility, PlatformId, SupportLevel, UserKey,
+    BotCapabilities, BotId, BotSlot, CallApiTrait, CallError, CallResult, CompactId,
+    ConversationKey, EventId, InteractionVisibility, PlatformId, SupportLevel, UserKey,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, Command,
@@ -450,14 +450,23 @@ impl CallApiTrait for ScriptedApi {
         &self,
         target: MessageTarget,
         plan: DeliveryPlan,
-    ) -> anyhow::Result<DeliveryReport> {
+    ) -> CallResult<DeliveryReport> {
         let mut messages = Vec::new();
         let mut items = Vec::with_capacity(plan.messages.len());
         for (index, message) in plan.messages.into_iter().enumerate() {
             match self
                 .record(target.clone(), message)
-                .map_err(anyhow::Error::new)
-            {
+                .map_err(|error| match error.kind {
+                    PlatformErrorKind::Temporary => CallError::temporary(error.message),
+                    PlatformErrorKind::RateLimited => {
+                        CallError::rate_limited(error.message, error.retry_after)
+                    }
+                    PlatformErrorKind::Timeout => CallError::timeout(error.message),
+                    PlatformErrorKind::Permanent => CallError::permanent(error.message),
+                    PlatformErrorKind::InvalidRequest => CallError::invalid_request(error.message),
+                    PlatformErrorKind::Unsupported => CallError::unsupported(error.message),
+                    PlatformErrorKind::NotFound => CallError::not_found(error.message),
+                }) {
                 Ok(attempt) => {
                     let sent = MessageRef::new(attempt.to_string())
                         .in_conversation(target.conversation.clone());
@@ -497,7 +506,7 @@ impl CallApiTrait for ScriptedApi {
         &self,
         interaction_id: String,
         response: InteractionResponse,
-    ) -> anyhow::Result<()> {
+    ) -> CallResult<()> {
         self.record_interaction(InteractionCall::Answer {
             id: interaction_id,
             response,
@@ -509,7 +518,7 @@ impl CallApiTrait for ScriptedApi {
         &self,
         handle: InteractionResponseHandle,
         visibility: InteractionVisibility,
-    ) -> anyhow::Result<()> {
+    ) -> CallResult<()> {
         self.answer_interaction(handle.id, InteractionResponse::Defer { visibility })
             .await
     }
@@ -518,7 +527,7 @@ impl CallApiTrait for ScriptedApi {
         &self,
         handle: InteractionResponseHandle,
         message: Message,
-    ) -> anyhow::Result<Vec<MessageRef>> {
+    ) -> CallResult<Vec<MessageRef>> {
         let index = self.interactions().len();
         self.record_interaction(InteractionCall::Followup {
             id: handle.id,
@@ -532,7 +541,7 @@ impl CallApiTrait for ScriptedApi {
         &self,
         handle: InteractionResponseHandle,
         message: Message,
-    ) -> anyhow::Result<()> {
+    ) -> CallResult<()> {
         self.record_interaction(InteractionCall::Edit {
             id: handle.id,
             message,
