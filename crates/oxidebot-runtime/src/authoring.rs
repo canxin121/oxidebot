@@ -23,10 +23,15 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/// Maximum UTF-8 byte length of a shortcut's literal or regex pattern.
 pub const MAX_SHORTCUT_PATTERN_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 byte length of a shortcut replacement template.
 pub const MAX_SHORTCUT_REPLACEMENT_BYTES: usize = 16 * 1024;
+/// Maximum UTF-8 byte length of a shortcut's human-readable display text.
 pub const MAX_SHORTCUT_HUMANIZED_BYTES: usize = 4 * 1024;
+/// Maximum input bytes inspected when looking up runtime shortcuts.
 pub const MAX_SHORTCUT_SCAN_PER_MESSAGE: usize = 4_096;
+/// Maximum runtime shortcuts retained by one command registry.
 pub const MAX_REGISTRY_SHORTCUTS: usize = 65_536;
 
 /// One command shortcut compiled at application build time.
@@ -39,13 +44,17 @@ pub struct Shortcut {
     compact: bool,
 }
 
+/// Matching representation used by a [`Shortcut`].
 #[derive(Clone, Debug)]
 pub enum ShortcutPattern {
+    /// Prefix match against literal command text.
     Literal(Arc<str>),
+    /// Prefix-anchored regular-expression match.
     Regex(Arc<Regex>),
 }
 
 impl Shortcut {
+    /// Creates a literal prefix shortcut with a replacement command text.
     #[must_use]
     pub fn literal(pattern: impl Into<Arc<str>>, replacement: impl Into<Arc<str>>) -> Self {
         Self {
@@ -57,6 +66,7 @@ impl Shortcut {
         }
     }
 
+    /// Compiles a regular-expression shortcut with a replacement template.
     pub fn regex(pattern: &str, replacement: impl Into<Arc<str>>) -> Result<Self, regex::Error> {
         if pattern.is_empty() || pattern.len() > MAX_SHORTCUT_PATTERN_BYTES {
             return Err(regex::Error::Syntax(format!(
@@ -72,12 +82,14 @@ impl Shortcut {
         })
     }
 
+    /// Sets presentation text used instead of the raw pattern in user interfaces.
     #[must_use]
     pub fn humanized(mut self, value: impl Into<Arc<str>>) -> Self {
         self.humanized = Some(value.into());
         self
     }
 
+    /// Controls whether unmatched input text after a match is preserved.
     #[must_use]
     pub const fn keep_tail(mut self, enabled: bool) -> Self {
         self.keep_tail = enabled;
@@ -92,11 +104,13 @@ impl Shortcut {
         self
     }
 
+    /// Returns whether this shortcut uses a regular-expression pattern.
     #[must_use]
     pub fn is_regex(&self) -> bool {
         matches!(self.pattern, ShortcutPattern::Regex(_))
     }
 
+    /// Returns the literal or regular-expression source text.
     #[must_use]
     pub fn pattern_text(&self) -> &str {
         match &self.pattern {
@@ -105,6 +119,7 @@ impl Shortcut {
         }
     }
 
+    /// Returns human-readable shortcut text, falling back to its pattern.
     #[must_use]
     pub fn display(&self) -> &str {
         self.humanized
@@ -115,6 +130,7 @@ impl Shortcut {
             })
     }
 
+    /// Rewrites matching command input, or returns `None` when it does not match.
     #[must_use]
     pub fn rewrite(&self, input: &str) -> Option<String> {
         match &self.pattern {
@@ -198,6 +214,7 @@ pub struct CommandOverlay {
 }
 
 impl CommandOverlay {
+    /// Creates a data-only overlay targeting a command name or alias.
     #[must_use]
     pub fn new(target: impl Into<Arc<str>>) -> Self {
         Self {
@@ -211,12 +228,14 @@ impl CommandOverlay {
         }
     }
 
+    /// Replaces the command's default description.
     #[must_use]
     pub fn description(mut self, value: impl Into<Arc<str>>) -> Self {
         self.description = Some(value.into());
         self
     }
 
+    /// Adds a localized description override for `locale`.
     #[must_use]
     pub fn description_translation(
         mut self,
@@ -227,12 +246,14 @@ impl CommandOverlay {
         self
     }
 
+    /// Adds an alias to the targeted command.
     #[must_use]
     pub fn alias(mut self, value: impl Into<Arc<str>>) -> Self {
         self.aliases.push(value.into());
         self
     }
 
+    /// Replaces command prefixes with `values`.
     #[must_use]
     pub fn prefixes<I, T>(mut self, values: I) -> Self
     where
@@ -243,12 +264,14 @@ impl CommandOverlay {
         self
     }
 
+    /// Adds a static shortcut to the targeted command.
     #[must_use]
     pub fn shortcut(mut self, value: Shortcut) -> Self {
         self.shortcuts.push(value);
         self
     }
 
+    /// Hides the targeted command from generated catalogs and help.
     #[must_use]
     pub const fn hidden(mut self) -> Self {
         self.hidden = true;
@@ -326,17 +349,22 @@ fn expand_replacement(
     output
 }
 
+/// Input passed to a [`CommandRewriter`].
 #[derive(Clone, Debug)]
 pub struct RewriteInput {
+    /// Canonical message whose command text may be rewritten.
     pub message: Message,
+    /// Resolved locale for this command invocation, when available.
     pub locale: Option<Arc<str>>,
 }
 
+/// Asynchronously rewrites a message before command parsing.
 #[async_trait]
 pub trait CommandRewriter<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Rewrites `input` for the current handler context.
     async fn rewrite(
         &self,
         context: &Context<S>,
@@ -360,21 +388,30 @@ where
     }
 }
 
+/// Input passed to a [`DynamicCompleter`].
 #[derive(Clone, Debug)]
 pub struct CompletionInput {
+    /// Command whose argument is being completed.
     pub command: Command,
+    /// Stable ID of the field requesting completion.
     pub field: CommandFieldId,
+    /// Partial text currently supplied for the field.
     pub partial: Arc<str>,
+    /// Source span to replace when inserting a completion.
     pub replace: crate::SourceSpan,
+    /// Resolved locale for this completion request, when available.
     pub locale: Option<Arc<str>>,
+    /// Maximum number of completion items requested.
     pub limit: usize,
 }
 
+/// Produces completion items for a specific command field.
 #[async_trait]
 pub trait DynamicCompleter<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Computes bounded suggestions for `input` in the current handler context.
     async fn complete(
         &self,
         context: &Context<S>,
@@ -398,11 +435,13 @@ where
     }
 }
 
+/// Resolves the locale used for localized command presentation and parsing.
 #[async_trait]
 pub trait LocaleResolver<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Resolves a locale for `context`, or leaves it unspecified.
     async fn resolve(&self, context: &Context<S>) -> Option<Arc<str>>;
 }
 
@@ -418,6 +457,7 @@ where
     }
 }
 
+/// Default locale resolver that reads command and interaction locale metadata.
 #[derive(Default)]
 pub struct EventLocaleResolver;
 
@@ -438,11 +478,13 @@ where
     }
 }
 
+/// Normalizes a portable message before it is rendered or delivered.
 #[async_trait]
 pub trait MessageNormalizer<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Normalizes `message` in the current handler context.
     async fn normalize(&self, context: &Context<S>, message: Message) -> HandlerResult<Message>;
 }
 
@@ -458,11 +500,13 @@ where
     }
 }
 
+/// Transforms a parsed command match before its handler is invoked.
 #[async_trait]
 pub trait CommandMiddleware<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Receives a successfully parsed command and may transform or reject it.
     async fn after_parse(
         &self,
         context: &Context<S>,
@@ -486,11 +530,13 @@ where
     }
 }
 
+/// Transforms command output before it becomes delivery effects.
 #[async_trait]
 pub trait CommandOutputMiddleware<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Transforms `output` for the current command handler.
     async fn transform(
         &self,
         context: &Context<S>,
@@ -514,11 +560,13 @@ where
     }
 }
 
+/// Observes or transforms a capability-planned outbound delivery.
 #[async_trait]
 pub trait DeliveryMiddleware<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Runs after planning and before the bounded adapter delivery begins.
     async fn before_delivery(
         &self,
         context: Option<&Context<S>>,
@@ -526,6 +574,7 @@ where
         plan: DeliveryPlan,
     ) -> HandlerResult<DeliveryPlan>;
 
+    /// Runs after delivery and may transform the resulting report.
     async fn after_delivery(
         &self,
         _context: Option<&Context<S>>,
