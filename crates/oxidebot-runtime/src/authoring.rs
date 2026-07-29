@@ -2361,10 +2361,12 @@ mod resource_limit_tests {
 
     #[tokio::test]
     async fn local_media_resolver_reads_only_limit_plus_one_bytes() {
+        static NEXT_MEDIA_PATH: AtomicUsize = AtomicUsize::new(0);
+        let sequence = NEXT_MEDIA_PATH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "oxidebot-media-limit-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            sequence
         ));
         std::fs::write(&path, b"123456789").expect("write temporary media");
         let result = LocalMediaResolver::new(8).read_path(path.clone()).await;
