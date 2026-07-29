@@ -59,15 +59,21 @@ jobs:
       - run: cargo +stable check -p oxidebot --no-default-features --locked
       - run: cargo +stable check -p oxidebot --no-default-features --features multi-thread --locked
 
-  facade-docs:
-    name: Stable facade documentation
+  published-api-docs:
+    name: Published API documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo +stable doc -p oxidebot --no-deps --all-features --locked
+      - name: Require documentation for every published API
         env:
           RUSTDOCFLAGS: -Dwarnings -Dmissing-docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
+            cargo +stable doc -p "$package" --no-deps --all-features --locked
+          done
 
   supply-chain:
     name: Supply chain and packages

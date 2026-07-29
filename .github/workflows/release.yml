@@ -66,9 +66,15 @@ jobs:
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo +stable test --workspace --all-targets --all-features --locked
-      - run: cargo +stable doc --workspace --no-deps --all-features --locked
+      - name: Require documentation for every published API
         env:
           RUSTDOCFLAGS: -Dwarnings -Dmissing-docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
+            cargo +stable doc -p "$package" --no-deps --all-features --locked
+          done
       - name: Package every publishable source crate
         run: |
           set -euo pipefail
@@ -137,7 +143,7 @@ jobs:
 
   github-release:
     name: Create GitHub release
-    needs: [validate, smoke]
+    needs: [validate, smoke, semver]
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     steps:
@@ -161,3 +167,53 @@ jobs:
           gh release create "${{ needs.validate.outputs.tag }}" \
             --title "OxideBot ${{ needs.validate.outputs.version }}" \
             --notes-file RELEASE_NOTES.md
+
+  semver:
+    name: Verify stable public API compatibility
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      # The first stable tag establishes the public API baseline. Every later
+      # stable 1.x release must remain compatible with that baseline. Keeping
+      # this job successful-but-empty before then lets alpha, beta, RC, and
+      # the baseline tag use the same release workflow.
+      - uses: actions/checkout@v7
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-core
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-macros
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-runtime
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-testkit
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-adapter-console
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: startsWith(needs.validate.outputs.tag, 'v1.') && needs.validate.outputs.tag != 'v1.0.0' && !contains(needs.validate.outputs.tag, '-')
+        with:
+          baseline-rev: v1.0.0
+          package: oxidebot-adapter-telegram
