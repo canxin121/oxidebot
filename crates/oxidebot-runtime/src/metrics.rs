@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 
+/// A cheaply cloned, shared handle to the runtime's cumulative metrics.
 pub type MetricsHandle = Arc<RuntimeMetrics>;
 
 /// Cache-line isolated counter. Independent hot counters no longer invalidate
@@ -61,6 +62,12 @@ impl Gauge {
     }
 }
 
+/// Lock-free counters and gauges maintained while a runtime is operating.
+///
+/// Obtain a point-in-time, internally consistent-per-counter view with
+/// [`RuntimeMetrics::snapshot`]. Counters are cumulative for the lifetime of
+/// this value; gauges describe the current value and, where available, their
+/// lifetime high-water mark.
 #[derive(Default)]
 pub struct RuntimeMetrics {
     ingress_frames: Counter,
@@ -102,44 +109,86 @@ pub struct RuntimeMetrics {
     handler_duration_samples: Counter,
 }
 
+/// A point-in-time view of [`RuntimeMetrics`].
+///
+/// Each field is loaded independently with relaxed atomics. The snapshot is
+/// therefore suitable for telemetry and operational decisions, but is not a
+/// transactionally consistent trace of a single instant across all fields.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeMetricsSnapshot {
+    /// Frames admitted from adapters into runtime ingress.
     pub ingress_frames: u64,
+    /// Frames skipped by adapter interest or admission checks before decoding.
     pub ignored_frames: u64,
+    /// Canonical events successfully decoded from admitted frames.
     pub decoded_events: u64,
+    /// Events rejected because they failed runtime validation.
     pub validation_errors: u64,
+    /// Events suppressed because their deduplication identity was already seen.
     pub duplicate_events: u64,
+    /// Events whose identity could not be retained by the deduplication cache.
     pub dedupe_uncacheable: u64,
+    /// Events accepted and submitted to the executor.
     pub dispatched_events: u64,
+    /// Events dropped by the configured overload policy.
     pub dropped_events: u64,
+    /// Events rejected by ingress or execution budget admission.
     pub rejected_events: u64,
+    /// Events that found no candidate active dialogue session on the fast path.
     pub session_fast_misses: u64,
+    /// Events consumed by an active dialogue session.
     pub session_consumed: u64,
+    /// Total route candidates considered by dispatch.
     pub route_candidates: u64,
+    /// Filter panics isolated by the runtime.
     pub filter_panics: u64,
+    /// Handler invocations that began execution.
     pub handler_calls: u64,
+    /// Handler panics isolated by the runtime.
     pub handler_panics: u64,
+    /// Handler invocations that exceeded their configured deadline.
     pub handler_timeouts: u64,
+    /// Handler-produced effects rejected by validation or policy.
     pub handler_effect_rejections: u64,
+    /// Outbound platform commands admitted to command processing.
     pub commands: u64,
+    /// Outbound commands cancelled before completion.
     pub cancelled_commands: u64,
+    /// Platform command attempts that completed with an error.
     pub command_errors: u64,
+    /// Additional command attempts scheduled after a retryable failure.
     pub command_retries: u64,
+    /// Command failures classified as platform rate limits.
     pub rate_limits: u64,
+    /// Delivery attempts that completed with an error.
     pub delivery_errors: u64,
+    /// Delivery middleware panics isolated by the runtime.
     pub delivery_panics: u64,
+    /// Delivery plans degraded because an adapter could not support every requested feature.
     pub delivery_degradations: u64,
+    /// Sum of nanoseconds commands spent waiting in the outbound queue.
     pub command_queue_wait_nanos: u64,
+    /// Number of samples contributing to [`Self::command_queue_wait_nanos`].
     pub command_queue_wait_samples: u64,
+    /// Sum of nanoseconds spent executing outbound commands.
     pub command_duration_nanos: u64,
+    /// Number of samples contributing to [`Self::command_duration_nanos`].
     pub command_duration_samples: u64,
+    /// Current number of commands waiting in the outbound queue.
     pub outbound_queue_depth: u64,
+    /// Largest observed [`Self::outbound_queue_depth`] during this runtime's lifetime.
     pub outbound_queue_high_water: u64,
+    /// Current number of outbound commands executing against adapters.
     pub outbound_in_flight: u64,
+    /// Current number of active dialogue sessions.
     pub active_sessions: u64,
+    /// Largest observed [`Self::active_sessions`] during this runtime's lifetime.
     pub active_sessions_high_water: u64,
+    /// Current number of handler invocations executing.
     pub active_handlers: u64,
+    /// Sum of nanoseconds spent in handler invocations.
     pub handler_duration_nanos: u64,
+    /// Number of samples contributing to [`Self::handler_duration_nanos`].
     pub handler_duration_samples: u64,
 }
 
@@ -287,6 +336,10 @@ impl RuntimeMetrics {
         self.active_sessions.decrement();
     }
 
+    /// Captures the current counters and gauges without blocking runtime work.
+    ///
+    /// Fields are individually loaded with relaxed atomics; see
+    /// [`RuntimeMetricsSnapshot`] for the resulting consistency guarantee.
     #[must_use]
     pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
