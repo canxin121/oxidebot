@@ -28,6 +28,9 @@ documented facade exports in `oxidebot`.
 
 ### Changed
 
+- `oxidebot-adapter-telegram` now renders portable `RichText` as safely
+  escaped Telegram `MarkdownV2`, preserving semantic emphasis for text-only
+  adapters instead of flattening it to unformatted text.
 - The workspace, every official adapter, examples, and test fixtures now use
   the stable `1.0.0` release version.
 - The minimum supported Rust version is Rust 1.97.1.

@@ -6,9 +6,11 @@ text messages into OxideBot events, and delivers planned portable text messages
 with Telegram's `sendMessage` method.
 
 Its declared `BotCapabilities` intentionally match that scope: direct and
-group conversations plus plain-text delivery are native, and rich text is
-emulated. Message edits, deletes, reactions, callback interactions, media, and
-webhooks are not implemented yet and are therefore never advertised as
+group conversations plus plain-text delivery are native. Portable `RichText`
+is emulated by safely encoding supported semantic spans as Telegram
+`MarkdownV2` and setting `parse_mode`; unstyled portable text remains ordinary
+Telegram text. Message edits, deletes, reactions, callback interactions, media,
+and webhooks are not implemented yet and are therefore never advertised as
 available.
 
 ```no_run
