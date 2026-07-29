@@ -1003,3 +1003,8 @@ Additional documentation:
 - [Migration from the Web-shaped draft API](docs/MIGRATION.md)
 - [Runtime architecture](ARCHITECTURE.md)
 - [Domain-native Alconna-inspired facilities](docs/ALCONNA-DESIGN.md)
+
+
+## Documentation
+
+- [Ergonomic authoring guide](docs/ERGONOMIC_AUTHORING.md)

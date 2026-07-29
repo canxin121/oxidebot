@@ -125,7 +125,7 @@ pub mod handler {
 }
 
 /// Optional batteries-included modules for help-adjacent application tools.
-/// They are ordinary flat [`Module`](crate::Module) values and do not create a
+/// They are ordinary flat [`Module`] values and do not create a
 /// second plugin runtime.
 pub mod standard {
     pub use oxidebot_runtime::{
