@@ -1139,6 +1139,7 @@ impl CommandRegistry {
         Ok(())
     }
 
+    /// Finds a registered command by canonical name, case-insensitively.
     #[must_use]
     pub fn find(&self, name: &str) -> Option<CommandId> {
         self.inner
@@ -1149,6 +1150,7 @@ impl CommandRegistry {
             .find_map(|(id, command)| command.name.eq_ignore_ascii_case(name).then_some(*id))
     }
 
+    /// Returns whether a registered command is enabled; unknown IDs are treated as enabled.
     #[must_use]
     pub fn is_enabled(&self, id: CommandId) -> bool {
         self.inner
@@ -1159,10 +1161,12 @@ impl CommandRegistry {
             .is_none_or(|command| command.enabled)
     }
 
+    /// Enables a command and returns whether its state changed.
     pub fn enable(&self, id: CommandId) -> bool {
         self.set_enabled(id, true)
     }
 
+    /// Disables a command and returns whether its state changed.
     pub fn disable(&self, id: CommandId) -> bool {
         self.set_enabled(id, false)
     }
@@ -1180,6 +1184,7 @@ impl CommandRegistry {
         true
     }
 
+    /// Adds a bounded runtime shortcut to a registered command.
     pub fn add_shortcut(&self, id: CommandId, shortcut: Shortcut) -> Result<(), HandlerError> {
         shortcut.validate()?;
         let mut state = self.inner.write().expect("command registry lock poisoned");
@@ -1232,6 +1237,7 @@ impl CommandRegistry {
         Ok(())
     }
 
+    /// Removes runtime shortcuts matching `pattern`, returning whether any were removed.
     pub fn remove_shortcut(&self, id: CommandId, pattern: &str) -> Result<bool, HandlerError> {
         let mut state = self.inner.write().expect("command registry lock poisoned");
         let (changed, removed, removed_bytes, has_any_shortcuts) = {
@@ -1268,6 +1274,7 @@ impl CommandRegistry {
         Ok(changed)
     }
 
+    /// Returns up to `limit` enabled command IDs whose shortcuts match `input`.
     #[must_use]
     pub fn matching_shortcut_commands(&self, input: &str, limit: usize) -> Vec<CommandId> {
         let candidates = {
@@ -1311,6 +1318,7 @@ impl CommandRegistry {
         matches
     }
 
+    /// Removes all mutable shortcuts for a command and returns the number removed.
     pub fn clear_shortcuts(&self, id: CommandId) -> usize {
         let mut state = self.inner.write().expect("command registry lock poisoned");
         let Some(command) = state.commands.get_mut(&id) else {
@@ -1335,6 +1343,7 @@ impl CommandRegistry {
         removed
     }
 
+    /// Returns static and mutable shortcuts for a registered command.
     #[must_use]
     pub fn shortcuts(&self, id: CommandId) -> Vec<Shortcut> {
         self.inner
@@ -1384,6 +1393,7 @@ impl CommandRegistry {
             .broad_command_matching
     }
 
+    /// Returns the monotonically changing local command-registry revision.
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.inner
@@ -1413,6 +1423,7 @@ impl CommandRegistry {
             .expect("command publication lock poisoned") = None;
     }
 
+    /// Synchronizes changed command definitions with every attached adapter.
     pub async fn refresh_publication(&self) -> HandlerResult<()> {
         let _gate = self.publication_gate.lock().await;
         let desired_revision = self.revision();
@@ -1472,6 +1483,7 @@ impl CommandRegistry {
         }
     }
 
+    /// Enables a command and synchronizes changes with attached adapters.
     pub async fn enable_and_publish(&self, id: CommandId) -> HandlerResult<bool> {
         let changed = self.enable(id);
         if changed || self.publication_status().pending_revision.is_some() {
@@ -1480,6 +1492,7 @@ impl CommandRegistry {
         Ok(changed)
     }
 
+    /// Disables a command and synchronizes changes with attached adapters.
     pub async fn disable_and_publish(&self, id: CommandId) -> HandlerResult<bool> {
         let changed = self.disable(id);
         if changed || self.publication_status().pending_revision.is_some() {
@@ -1514,6 +1527,7 @@ impl CommandRegistry {
         )
     }
 
+    /// Returns registered command states in deterministic registration order.
     pub fn snapshot(&self) -> Vec<(CommandId, RuntimeCommandState)> {
         let state = self.inner.read().expect("command registry lock poisoned");
         state
