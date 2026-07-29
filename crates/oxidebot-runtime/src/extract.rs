@@ -17,6 +17,7 @@ pub struct ExtractError {
 }
 
 impl ExtractError {
+    /// Creates a user-facing extraction failure.
     #[must_use]
     pub fn new(message: impl Into<Arc<str>>) -> Self {
         Self {
@@ -24,6 +25,7 @@ impl ExtractError {
         }
     }
 
+    /// Returns the user-facing extraction message.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -57,9 +59,11 @@ pub trait Extract<S>: Sized
 where
     S: Send + Sync + 'static,
 {
+    /// Extracts this typed value from a handler context.
     fn extract(context: &Context<S>) -> Result<Self, ExtractError>;
 }
 
+/// Extracted raw text of a message event.
 #[derive(Clone, Debug)]
 pub struct Text(pub String);
 
@@ -71,6 +75,7 @@ impl Deref for Text {
     }
 }
 
+/// Extracted normalized segments of a message event.
 #[derive(Clone, Debug)]
 pub struct Segments(pub Vec<MessageSegment>);
 
@@ -82,6 +87,7 @@ impl Deref for Segments {
     }
 }
 
+/// Extracted sender of a message or interaction event.
 #[derive(Clone, Debug)]
 pub struct Sender(pub User);
 
@@ -93,6 +99,7 @@ impl Deref for Sender {
     }
 }
 
+/// Extracted required conversation reference.
 #[derive(Clone, Debug)]
 pub struct Conversation(pub ConversationRef);
 
@@ -104,6 +111,7 @@ impl Deref for Conversation {
     }
 }
 
+/// Extracted optional conversation reference.
 #[derive(Clone, Debug)]
 pub struct MaybeConversation(pub Option<ConversationRef>);
 
@@ -115,6 +123,7 @@ impl Deref for MaybeConversation {
     }
 }
 
+/// Extracted platform message identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageId(pub String);
 
@@ -126,6 +135,7 @@ impl Deref for MessageId {
     }
 }
 
+/// Extracted target used for a reply or outbound message.
 #[derive(Clone, Debug)]
 pub struct Target(pub MessageTarget);
 
@@ -146,6 +156,7 @@ pub trait FromState<Root>: Send + Sync + Sized + 'static
 where
     Root: Send + Sync + 'static,
 {
+    /// Selects this focused service from shared application root state.
     fn from_state(root: &Arc<Root>) -> Arc<Self>;
 }
 
