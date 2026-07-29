@@ -39,6 +39,7 @@ pub struct CommandFieldId(pub u32);
 /// command tree, so help, parsing, completion, and platform commands share one
 /// source of truth.
 pub trait CommandFieldTag: Clone + Copy + Send + Sync + 'static {
+    /// Generated field name as declared in the command schema.
     const NAME: &'static str;
 }
 
@@ -51,6 +52,7 @@ pub struct LocalizedText {
 }
 
 impl LocalizedText {
+    /// Creates text with a default locale value.
     #[must_use]
     pub fn new(default: impl Into<Arc<str>>) -> Self {
         Self {
@@ -59,12 +61,14 @@ impl LocalizedText {
         }
     }
 
+    /// Adds or replaces a translation for `locale`.
     #[must_use]
     pub fn translation(mut self, locale: impl Into<Arc<str>>, value: impl Into<Arc<str>>) -> Self {
         self.translations.insert(locale.into(), value.into());
         self
     }
 
+    /// Resolves exact locale, language fallback, then the default text.
     #[must_use]
     pub fn resolve(&self, locale: Option<&str>) -> &str {
         let Some(locale) = locale else {
@@ -80,11 +84,13 @@ impl LocalizedText {
             .map_or(self.default.as_ref(), Arc::as_ref)
     }
 
+    /// Returns whether every localized value is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.default.is_empty() && self.translations.values().all(|value| value.is_empty())
     }
 
+    /// Converts this runtime value to the portable core localization model.
     #[must_use]
     pub fn to_core(&self) -> Localized<String> {
         Localized {
@@ -111,17 +117,28 @@ where
 /// platform-native command publication.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum CommandValueKind {
+    /// Arbitrary UTF-8 text.
     #[default]
     String,
+    /// Signed integer value.
     Integer,
+    /// Floating-point number.
     Number,
+    /// Boolean value.
     Boolean,
+    /// Platform user reference.
     User,
+    /// Platform conversation reference.
     Conversation,
+    /// Platform role reference.
     Role,
+    /// A platform-mentionable entity.
     Mentionable,
+    /// File attachment reference.
     Attachment,
+    /// Canonical rich message segment.
     MessageSegment,
+    /// Adapter-defined native value kind.
     PlatformNative(Arc<str>),
 }
 
@@ -145,22 +162,30 @@ impl CommandValueKind {
 /// How repeated appearances of an option affect its parsed value.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ArgumentAction {
+    /// Store the last supplied value.
     #[default]
     Store,
+    /// Append each supplied value.
     Append,
+    /// Count repeated option occurrences.
     Count,
+    /// Set the flag value to true when present.
     SetTrue,
+    /// Set the flag value to false when present.
     SetFalse,
 }
 
 /// One choice attached to an argument schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArgumentChoice {
+    /// Localized label shown to users.
     pub name: LocalizedText,
+    /// Canonical string value supplied to parsing.
     pub value: Arc<str>,
 }
 
 impl ArgumentChoice {
+    /// Creates a choice with localized display name and canonical value.
     #[must_use]
     pub fn new(name: impl Into<LocalizedText>, value: impl Into<Arc<str>>) -> Self {
         Self {
@@ -1195,23 +1220,27 @@ pub struct CompletionConfig {
 }
 
 impl CompletionConfig {
+    /// Creates the default interactive recovery policy.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the maximum wait time for one interactive response.
     #[must_use]
     pub const fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Sets the maximum number of interactive recovery rounds.
     #[must_use]
     pub const fn max_rounds(mut self, max_rounds: usize) -> Self {
         self.max_rounds = max_rounds;
         self
     }
 
+    /// Replaces case-insensitive words that cancel interactive recovery.
     #[must_use]
     pub fn cancel_words<I, T>(mut self, words: I) -> Self
     where
@@ -1222,6 +1251,7 @@ impl CompletionConfig {
         self
     }
 
+    /// Returns whether `text` matches a configured cancellation word.
     #[must_use]
     pub fn is_cancelled(&self, text: &str) -> bool {
         self.cancel_words
@@ -1243,16 +1273,23 @@ impl Default for CompletionConfig {
 /// Byte range in the original command input replaced by a completion item.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SourceSpan {
+    /// Inclusive byte offset at which replacement begins.
     pub start: usize,
+    /// Exclusive byte offset at which replacement ends.
     pub end: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionKind {
+    /// Top-level command name.
     Command,
+    /// Command grammar branch.
     Subcommand,
+    /// Named option switch.
     Option,
+    /// Positional argument.
     Argument,
+    /// Declared argument choice.
     Choice,
 }
 
@@ -1260,11 +1297,17 @@ pub enum CompletionKind {
 /// same canonical message IR as ordinary replies.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompletionItem {
+    /// Text inserted into the input span.
     pub value: String,
+    /// Canonical rich display representation.
     pub display: Message,
+    /// Optional rich explanatory text.
     pub description: Option<Message>,
+    /// Input span replaced by this completion.
     pub replace: SourceSpan,
+    /// Semantic category for renderer presentation.
     pub kind: CompletionKind,
+    /// Field that requested the completion, when applicable.
     pub field_id: Option<CommandFieldId>,
 }
 
