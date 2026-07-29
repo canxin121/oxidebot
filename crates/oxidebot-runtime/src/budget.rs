@@ -4,11 +4,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 /// Maximum retained items and bytes for one bounded queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueBudget {
+    /// Maximum number of retained queue items.
     pub max_items: usize,
+    /// Maximum bytes retained across queue items.
     pub max_bytes: usize,
 }
 
 impl QueueBudget {
+    /// Creates an item-and-byte queue budget.
     #[must_use]
     pub const fn new(max_items: usize, max_bytes: usize) -> Self {
         Self {
@@ -21,8 +24,10 @@ impl QueueBudget {
 /// Behavior when a bounded queue cannot admit more work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OverloadPolicy {
+    /// Wait until queue capacity becomes available.
     #[default]
     Block,
+    /// Reject the newly submitted work when capacity is unavailable.
     DropNewest,
 }
 

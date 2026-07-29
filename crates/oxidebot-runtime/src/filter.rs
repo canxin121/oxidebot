@@ -5,6 +5,7 @@ pub trait Filter<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Returns whether this handler filter accepts `event` under `state`.
     fn accepts(&self, event: &Event, state: &S) -> bool;
 }
 

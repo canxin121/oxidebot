@@ -25,16 +25,19 @@ impl PluginMetadata {
         }
     }
 
+    /// Returns the human-readable plugin name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns optional plugin version metadata.
     #[must_use]
     pub fn version(&self) -> Option<&str> {
         self.version.as_deref()
     }
 
+    /// Returns optional plugin description metadata.
     #[must_use]
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()

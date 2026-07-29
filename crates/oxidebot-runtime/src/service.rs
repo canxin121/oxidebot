@@ -24,14 +24,17 @@ where
             shutdown,
         }
     }
+    /// Returns shared immutable application state.
     #[must_use]
     pub fn state(&self) -> &S {
         &self.state
     }
+    /// Returns directory access to registered bots.
     #[must_use]
     pub fn bots(&self) -> &BotDirectory {
         &self.bots
     }
+    /// Returns the runtime shutdown signal.
     #[must_use]
     pub fn shutdown(&self) -> &ShutdownSignal {
         &self.shutdown
@@ -44,5 +47,6 @@ pub trait Service<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Runs the supervised service until it finishes, fails, or shutdown is requested.
     async fn run(&self, context: ServiceContext<S>) -> Result<(), crate::ServiceError>;
 }
