@@ -49,6 +49,7 @@ where
     module: crate::Module<S>,
     filters: Vec<Arc<dyn Filter<S>>>,
     services: Vec<Arc<dyn Service<S>>>,
+    plugin_requirements: Vec<crate::PluginRequirement>,
     metrics: MetricsHandle,
     authoring: AuthoringRuntime<S>,
 }
@@ -79,6 +80,7 @@ where
             module: crate::Module::new(),
             filters: Vec::new(),
             services: Vec::new(),
+            plugin_requirements: Vec::new(),
             metrics: Arc::new(RuntimeMetrics::default()),
             authoring: AuthoringRuntime::default(),
         }
@@ -266,9 +268,11 @@ where
     /// this same application; it never creates a nested runtime or router.
     #[must_use]
     pub fn plugin(mut self, plugin: crate::PluginBundle<S>) -> Self {
-        let (_metadata, module, mut services) = plugin.into_parts();
-        self.module = self.module.include(module);
-        self.services.append(&mut services);
+        let parts = plugin.into_parts();
+        let _metadata = parts.metadata;
+        self.module = self.module.include(parts.module);
+        self.services.extend(parts.services);
+        self.plugin_requirements.extend(parts.requirements);
         self
     }
 
@@ -298,6 +302,7 @@ where
             module,
             filters,
             services,
+            plugin_requirements,
             metrics,
             mut authoring,
         } = self;
@@ -331,6 +336,7 @@ where
             .collect::<std::result::Result<Vec<_>, _>>()?;
         validate_routes(&handlers)?;
         let adapters = prepare_adapters(adapters)?;
+        validate_plugin_requirements(&plugin_requirements, &adapters)?;
         if config.dedupe_capacity < adapters.len() {
             return Err(BuildError::InvalidConfig(
                 "dedupe capacity must provide at least one slot per registered bot",
@@ -360,6 +366,23 @@ where
     pub async fn run_to_completion(self) -> Result<()> {
         self.build()?.run_to_completion().await
     }
+}
+
+fn validate_plugin_requirements(
+    requirements: &[crate::PluginRequirement],
+    adapters: &[PreparedAdapter],
+) -> std::result::Result<(), BuildError> {
+    for requirement in requirements {
+        for adapter in adapters {
+            if !(requirement.predicate)(adapter.services.bot_capabilities()) {
+                return Err(BuildError::InvalidRoute(format!(
+                    "plugin requirement {:?} is not satisfied by {}:{}",
+                    requirement.description, adapter.identity.platform, adapter.identity.bot
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validated application ready to run.

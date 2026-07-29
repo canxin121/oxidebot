@@ -1,4 +1,5 @@
 use crate::{Module, Service};
+use oxidebot_core::BotCapabilities;
 use std::sync::Arc;
 
 /// Stable descriptive metadata for a reusable application feature.
@@ -62,6 +63,33 @@ where
     metadata: PluginMetadata,
     module: Module<S>,
     services: Vec<Arc<dyn Service<S>>>,
+    requirements: Vec<PluginRequirement>,
+}
+
+pub(crate) struct PluginParts<S>
+where
+    S: Send + Sync + 'static,
+{
+    pub(crate) metadata: PluginMetadata,
+    pub(crate) module: Module<S>,
+    pub(crate) services: Vec<Arc<dyn Service<S>>>,
+    pub(crate) requirements: Vec<PluginRequirement>,
+}
+
+/// A portable capability prerequisite declared by a plugin.
+#[derive(Clone)]
+pub struct PluginRequirement {
+    pub(crate) description: Arc<str>,
+    pub(crate) predicate: Arc<dyn Fn(&BotCapabilities) -> bool + Send + Sync>,
+}
+
+impl std::fmt::Debug for PluginRequirement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginRequirement")
+            .field("description", &self.description)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<S> PluginBundle<S>
@@ -75,6 +103,7 @@ where
             metadata: PluginMetadata::new(name),
             module: Module::new(),
             services: Vec::new(),
+            requirements: Vec::new(),
         }
     }
 
@@ -123,14 +152,36 @@ where
         self
     }
 
+    /// Requires every registered adapter to satisfy a portable capability
+    /// predicate before the application can build.
+    ///
+    /// The predicate receives the one canonical `BotCapabilities` model, so a
+    /// plugin never probes adapter-specific globals at runtime.
+    #[must_use]
+    pub fn require_capability<F>(mut self, description: impl Into<Arc<str>>, predicate: F) -> Self
+    where
+        F: Fn(&BotCapabilities) -> bool + Send + Sync + 'static,
+    {
+        self.requirements.push(PluginRequirement {
+            description: description.into(),
+            predicate: Arc::new(predicate),
+        });
+        self
+    }
+
     /// Returns the plugin's immutable metadata.
     #[must_use]
     pub fn metadata(&self) -> &PluginMetadata {
         &self.metadata
     }
 
-    pub(crate) fn into_parts(self) -> (PluginMetadata, Module<S>, Vec<Arc<dyn Service<S>>>) {
-        (self.metadata, self.module, self.services)
+    pub(crate) fn into_parts(self) -> PluginParts<S> {
+        PluginParts {
+            metadata: self.metadata,
+            module: self.module,
+            services: self.services,
+            requirements: self.requirements,
+        }
     }
 }
 

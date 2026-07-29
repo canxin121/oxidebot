@@ -53,7 +53,7 @@ pub use messenger::*;
 pub use metrics::*;
 pub use module::{Feature, FeatureExt, GeneratedFeature, IntoFeature, Module};
 pub use outcome::{IntoOutcome, Outcome, Propagation};
-pub use plugin::{PluginBundle, PluginMetadata};
+pub use plugin::{PluginBundle, PluginMetadata, PluginRequirement};
 pub use reply::*;
 pub use responder::*;
 pub use service::*;

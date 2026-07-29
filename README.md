@@ -1015,6 +1015,9 @@ use oxidebot::{command, Module, OxideBot, PluginBundle};
 let reminders = PluginBundle::new("reminders")
     .version("1.0")
     .description("Reminder commands and their scheduler")
+    .require_capability("outbound plain text", |capabilities| {
+        capabilities.content.plain_text.is_supported()
+    })
     .add(command("remind").handle(|| async { "saved" }));
 
 let app = OxideBot::new().plugin(reminders);
@@ -1022,6 +1025,8 @@ let app = OxideBot::new().plugin(reminders);
 
 Use a plain `Module` for a stateless handler collection. Use a bundle when the
 feature owns configuration, metadata, or one or more `Service` tasks.
+`require_capability` makes a portable prerequisite explicit and rejects an
+application at build time when any registered adapter cannot meet it.
 
 ## Runtime performance model
 
