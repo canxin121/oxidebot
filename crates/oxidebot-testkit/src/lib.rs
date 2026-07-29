@@ -37,6 +37,7 @@ use std::{
 pub struct DecodeCounter(Arc<AtomicUsize>);
 
 impl DecodeCounter {
+    /// Returns how many times the associated frame has been fully decoded.
     #[must_use]
     pub fn get(&self) -> usize {
         self.0.load(Ordering::Relaxed)
@@ -54,6 +55,7 @@ pub struct TestFrame {
 }
 
 impl TestFrame {
+    /// Builds one deterministic incoming text-message frame.
     #[must_use]
     pub fn message(
         id: EventId,
@@ -72,6 +74,7 @@ impl TestFrame {
         }
     }
 
+    /// Returns the shared full-decode counter for this frame.
     #[must_use]
     pub fn decode_counter(&self) -> DecodeCounter {
         self.decodes.clone()
@@ -165,18 +168,26 @@ impl InboundFrame for TestFrame {
 
 /// One scripted transport action.
 pub enum ScriptStep {
+    /// Submits one deterministic message frame.
     Frame(TestFrame),
+    /// Submits one deterministic interaction frame.
     Interaction(InteractionFrame),
+    /// Waits for the given virtual transport duration.
     Pause(Duration),
     /// Waits until the scripted API has observed at least `count` successful
     /// sends. This is a deterministic synchronization point for multi-turn
     /// dialogue tests and does not rely on arbitrary sleeps.
     WaitForSent {
+        /// Number of successful sends that must be observed.
         count: usize,
+        /// Maximum wall-clock wait for the recorded send count.
         timeout: Duration,
     },
+    /// Waits until the scripted API has observed interaction side effects.
     WaitForInteractions {
+        /// Number of interaction effects that must be observed.
         count: usize,
+        /// Maximum wall-clock wait for interaction effects.
         timeout: Duration,
     },
 }
@@ -192,6 +203,7 @@ pub struct InteractionFrame {
 }
 
 impl InteractionFrame {
+    /// Builds an answerable button-click event with the default five-second deadline.
     #[must_use]
     pub fn click(
         id: EventId,
@@ -210,6 +222,7 @@ impl InteractionFrame {
         }
     }
 
+    /// Replaces the platform acknowledgement deadline for this interaction.
     #[must_use]
     pub const fn deadline_after(mut self, deadline_after: Duration) -> Self {
         self.deadline_after = deadline_after;
@@ -285,23 +298,34 @@ impl InboundFrame for InteractionFrame {
 /// Successfully sent message recorded by the scripted API.
 #[derive(Clone, Debug)]
 pub struct SentMessage {
+    /// Target selected by the application delivery pipeline.
     pub target: MessageTarget,
+    /// Fully normalized message submitted to the scripted API.
     pub message: Message,
 }
 
 /// Scheduler-observable interaction API call recorded by [`ScriptedApi`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum InteractionCall {
+    /// Records an initial interaction acknowledgement or response.
     Answer {
+        /// Platform response-handle identity.
         id: String,
+        /// Response sent for the interaction.
         response: InteractionResponse,
     },
+    /// Records a follow-up interaction message.
     Followup {
+        /// Platform response-handle identity.
         id: String,
+        /// Follow-up message.
         message: Message,
     },
+    /// Records an edit to the original interaction response.
     Edit {
+        /// Platform response-handle identity.
         id: String,
+        /// Replacement message.
         message: Message,
     },
 }
@@ -321,6 +345,7 @@ struct ServiceState {
 pub struct ScriptedApi(Arc<ServiceState>);
 
 impl ScriptedApi {
+    /// Returns all successfully recorded deliveries in send order.
     #[must_use]
     pub fn sent(&self) -> Vec<SentMessage> {
         self.0
@@ -330,6 +355,7 @@ impl ScriptedApi {
             .clone()
     }
 
+    /// Returns all recorded interaction side effects in call order.
     #[must_use]
     pub fn interactions(&self) -> Vec<InteractionCall> {
         self.0
@@ -339,15 +365,18 @@ impl ScriptedApi {
             .clone()
     }
 
+    /// Makes the next `count` delivery attempts return a temporary failure.
     pub fn fail_temporarily(&self, count: usize) {
         self.0.temporary_failures.store(count, Ordering::Release);
     }
 
+    /// Returns total outbound delivery attempts, including injected failures.
     #[must_use]
     pub fn attempts(&self) -> usize {
         self.0.attempts.load(Ordering::Acquire)
     }
 
+    /// Returns the number of successfully recorded sends.
     #[must_use]
     pub fn sent_count(&self) -> usize {
         self.0
@@ -559,6 +588,7 @@ pub struct ScriptedAdapter {
 }
 
 impl ScriptedAdapter {
+    /// Creates a finite scripted adapter and the corresponding observable API fixture.
     #[must_use]
     pub fn new(
         platform: PlatformId,
@@ -644,24 +674,33 @@ impl Adapter for ScriptedAdapter {
 /// One high-level expectation in a [`BotTest`] script.
 #[derive(Clone, Debug)]
 pub enum ReplyExpectation {
+    /// Requires exact raw-text equality.
     Exact(String),
+    /// Requires raw text to contain the supplied substring.
     Contains(String),
+    /// Requires complete message-model equality.
     Message(Box<Message>),
 }
 
 /// One expected interaction-side effect in call order.
 #[derive(Clone, Debug)]
 pub enum InteractionExpectation {
+    /// Requires an initial acknowledgement, message, or defer response.
     Acknowledged,
+    /// Requires an original-response edit containing the supplied text.
     EditContains(String),
+    /// Requires a follow-up response containing the supplied text.
     FollowupContains(String),
 }
 
 /// Result of a completed high-level Bot test.
 #[derive(Clone, Debug)]
 pub struct BotTestReport {
+    /// Successful messages captured during the scenario.
     pub sent: Vec<SentMessage>,
+    /// Interaction side effects captured during the scenario.
     pub interactions: Vec<InteractionCall>,
+    /// Total attempted deliveries, including injected temporary failures.
     pub attempts: usize,
 }
 
@@ -693,11 +732,13 @@ impl BotTest<()> {
         Self::with_state((), oxidebot_runtime::Module::new())
     }
 
+    /// Creates a test harness around one complete stateless module.
     #[must_use]
     pub fn new(module: oxidebot_runtime::Module<()>) -> Self {
         Self::with_state((), module)
     }
 
+    /// Creates a stateless test harness from one feature.
     #[must_use]
     pub fn feature<F>(feature: F) -> Self
     where
@@ -711,6 +752,7 @@ impl<S> BotTest<S>
 where
     S: Send + Sync + 'static,
 {
+    /// Creates a scenario with explicit root state and a complete module.
     #[must_use]
     pub fn with_state(state: S, module: oxidebot_runtime::Module<S>) -> Self {
         Self {
@@ -741,12 +783,14 @@ where
         self
     }
 
+    /// Includes another flat module in the test application.
     #[must_use]
     pub fn include(mut self, module: oxidebot_runtime::Module<S>) -> Self {
         self.module = self.module.include(module);
         self
     }
 
+    /// Adds a delay after each generated message or interaction step.
     #[must_use]
     pub fn settle_for(mut self, duration: Duration) -> Self {
         self.pause = duration;
@@ -761,12 +805,14 @@ where
         self
     }
 
+    /// Replaces the default conversation identity used by generated events.
     #[must_use]
     pub fn in_conversation(mut self, conversation: impl Into<Arc<str>>) -> Self {
         self.conversation = conversation.into();
         self
     }
 
+    /// Replaces the default sender identity used by generated events.
     #[must_use]
     #[allow(
         clippy::wrong_self_convention,
@@ -777,6 +823,7 @@ where
         self
     }
 
+    /// Adds one incoming text message to the scenario.
     #[must_use]
     pub fn message(mut self, text: impl Into<Arc<str>>) -> Self {
         let sequence = self.next_event;
@@ -850,16 +897,19 @@ where
         self
     }
 
+    /// Expects one exact-text reply after the preceding scenario steps.
     #[must_use]
     pub fn expect_reply(self, text: impl Into<String>) -> Self {
         self.push_expectation(ReplyExpectation::Exact(text.into()))
     }
 
+    /// Expects one reply containing the supplied text.
     #[must_use]
     pub fn expect_reply_contains(self, text: impl Into<String>) -> Self {
         self.push_expectation(ReplyExpectation::Contains(text.into()))
     }
 
+    /// Expects one reply equal to the complete portable message model.
     #[must_use]
     pub fn expect_message(self, message: Message) -> Self {
         self.push_expectation(ReplyExpectation::Message(Box::new(message)))
@@ -881,11 +931,13 @@ where
         self.push_interaction_expectation(InteractionExpectation::Acknowledged)
     }
 
+    /// Expects an original interaction-response edit containing the supplied text.
     #[must_use]
     pub fn expect_edit_contains(self, text: impl Into<String>) -> Self {
         self.push_interaction_expectation(InteractionExpectation::EditContains(text.into()))
     }
 
+    /// Expects an interaction follow-up containing the supplied text.
     #[must_use]
     pub fn expect_followup_contains(self, text: impl Into<String>) -> Self {
         self.push_interaction_expectation(InteractionExpectation::FollowupContains(text.into()))
@@ -901,6 +953,7 @@ where
         self
     }
 
+    /// Runs the complete finite scenario and verifies all declared expectations.
     pub async fn run(self) -> Result<BotTestReport, String> {
         let platform = PlatformId::new("test").expect("static test platform id is valid");
         let bot = BotId::new("bot").expect("static test bot id is valid");
@@ -991,6 +1044,7 @@ impl<T> CommandTest<T>
 where
     T: FromCommandMatch,
 {
+    /// Builds a parser harness for one immutable command definition.
     #[must_use]
     pub fn new(command: Command) -> Self {
         Self {
@@ -999,11 +1053,13 @@ where
         }
     }
 
+    /// Parses input with the same command IR used by the runtime.
     pub fn parse(&self, input: impl Into<String>) -> Result<T, CommandParseError> {
         let matched = self.command.parse_message(&Message::text(input.into()))?;
         T::from_match(&matched)
     }
 
+    /// Returns the command definition exercised by this harness.
     #[must_use]
     pub fn command(&self) -> &Command {
         &self.command
