@@ -1742,22 +1742,26 @@ pub struct CommandSchema {
 }
 
 impl CommandSchema {
+    /// Creates an empty schema.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds one positional argument or named option.
     #[must_use]
     pub fn argument(mut self, argument: ArgumentSpec) -> Self {
         self.arguments.push(argument);
         self
     }
 
+    /// Returns arguments in declaration order.
     #[must_use]
     pub fn arguments(&self) -> &[ArgumentSpec] {
         &self.arguments
     }
 
+    /// Finds an argument by its schema name.
     #[must_use]
     pub fn find(&self, name: &str) -> Option<&ArgumentSpec> {
         self.arguments
@@ -1765,11 +1769,13 @@ impl CommandSchema {
             .find(|argument| argument.name.as_ref() == name)
     }
 
+    /// Finds an argument by its stable schema-local ID.
     #[must_use]
     pub fn find_by_id(&self, id: CommandFieldId) -> Option<&ArgumentSpec> {
         self.arguments.iter().find(|argument| argument.id == id)
     }
 
+    /// Returns a schema that appends `other` after this schema.
     #[must_use]
     pub fn merged(&self, other: &Self) -> Self {
         let mut arguments =
@@ -1785,6 +1791,7 @@ impl CommandSchema {
         }
     }
 
+    /// Converts arguments into portable native command options.
     #[must_use]
     pub fn native_options(&self) -> Vec<CommandOption> {
         self.arguments
@@ -1983,6 +1990,7 @@ pub struct ArgumentSpec {
 }
 
 impl ArgumentSpec {
+    /// Creates a required positional string argument named `name`.
     #[must_use]
     pub fn new(name: impl Into<Arc<str>>) -> Self {
         let name = name.into();
@@ -2017,12 +2025,14 @@ impl ArgumentSpec {
         self.id = CommandFieldId(stable_hash(format!("{path}.{}", self.name).as_bytes()) as u32);
     }
 
+    /// Sets localized help text for this argument.
     #[must_use]
     pub fn help(mut self, help: impl Into<LocalizedText>) -> Self {
         self.help = help.into();
         self
     }
 
+    /// Adds a locale-specific help translation.
     #[must_use]
     pub fn help_translation(
         mut self,
@@ -2033,12 +2043,14 @@ impl ArgumentSpec {
         self
     }
 
+    /// Sets the interactive prompt used when this required argument is missing.
     #[must_use]
     pub fn prompt(mut self, prompt: impl Into<LocalizedText>) -> Self {
         self.prompt = Some(prompt.into());
         self
     }
 
+    /// Adds a locale-specific interactive prompt translation.
     #[must_use]
     pub fn prompt_translation(
         mut self,
@@ -2054,42 +2066,49 @@ impl ArgumentSpec {
         self
     }
 
+    /// Sets the placeholder name used in usage and help output.
     #[must_use]
     pub fn value_name(mut self, value_name: impl Into<Arc<str>>) -> Self {
         self.value_name = Some(value_name.into());
         self
     }
 
+    /// Sets the long option name without leading dashes.
     #[must_use]
     pub fn long(mut self, long: impl Into<Arc<str>>) -> Self {
         self.long = Some(long.into());
         self
     }
 
+    /// Sets the short option character without a leading dash.
     #[must_use]
     pub const fn short(mut self, short: char) -> Self {
         self.short = Some(short);
         self
     }
 
+    /// Sets whether this argument must be supplied.
     #[must_use]
     pub const fn required(mut self, required: bool) -> Self {
         self.required = required;
         self
     }
 
+    /// Allows this argument to collect multiple values.
     #[must_use]
     pub const fn multiple(mut self, multiple: bool) -> Self {
         self.multiple = multiple;
         self
     }
 
+    /// Makes this positional argument consume the remaining input.
     #[must_use]
     pub const fn rest(mut self, rest: bool) -> Self {
         self.rest = rest;
         self
     }
 
+    /// Makes this option a flag and configures its default action.
     #[must_use]
     pub const fn flag(mut self, flag: bool) -> Self {
         self.flag = flag;
@@ -2102,6 +2121,7 @@ impl ArgumentSpec {
         self
     }
 
+    /// Supplies a default parsed text value and makes the argument optional.
     #[must_use]
     pub fn default_value(mut self, default: impl Into<Arc<str>>) -> Self {
         self.default = Some(default.into());
@@ -2109,12 +2129,14 @@ impl ArgumentSpec {
         self
     }
 
+    /// Sets the portable value kind used by parsing and native publication.
     #[must_use]
     pub fn kind(mut self, kind: CommandValueKind) -> Self {
         self.kind = kind;
         self
     }
 
+    /// Sets behavior when an option appears repeatedly.
     #[must_use]
     pub fn action(mut self, action: ArgumentAction) -> Self {
         self.action = action;
@@ -2131,54 +2153,63 @@ impl ArgumentSpec {
         self
     }
 
+    /// Adds one enumerated value choice.
     #[must_use]
     pub fn choice(mut self, choice: ArgumentChoice) -> Self {
         self.choices.push(choice);
         self
     }
 
+    /// Enables or disables completion for this argument.
     #[must_use]
     pub const fn autocomplete(mut self, enabled: bool) -> Self {
         self.autocomplete = enabled;
         self
     }
 
+    /// Sets an inclusive minimum numeric value.
     #[must_use]
     pub const fn min_value(mut self, value: f64) -> Self {
         self.min_value = Some(value);
         self
     }
 
+    /// Sets an inclusive maximum numeric value.
     #[must_use]
     pub const fn max_value(mut self, value: f64) -> Self {
         self.max_value = Some(value);
         self
     }
 
+    /// Sets an inclusive minimum text length.
     #[must_use]
     pub const fn min_length(mut self, value: u32) -> Self {
         self.min_length = Some(value);
         self
     }
 
+    /// Sets an inclusive maximum text length.
     #[must_use]
     pub const fn max_length(mut self, value: u32) -> Self {
         self.max_length = Some(value);
         self
     }
 
+    /// Restricts conversation arguments to one conversation kind.
     #[must_use]
     pub fn allowed_conversation_kind(mut self, kind: ConversationKind) -> Self {
         self.allowed_conversation_kinds.push(kind);
         self
     }
 
+    /// Requires another named argument when this argument is supplied.
     #[must_use]
     pub fn requires(mut self, name: impl Into<Arc<str>>) -> Self {
         self.requires.push(name.into());
         self
     }
 
+    /// Declares another named argument incompatible with this one.
     #[must_use]
     pub fn conflicts_with(mut self, name: impl Into<Arc<str>>) -> Self {
         self.conflicts.push(name.into());
