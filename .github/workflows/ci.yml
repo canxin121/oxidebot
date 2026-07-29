@@ -26,10 +26,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --all-features --locked
-      - run: cargo doc --workspace --no-deps --all-features --locked
+      - run: cargo +stable fmt --all --check
+      - run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo +stable test --workspace --all-targets --all-features --locked
+      - run: cargo +stable doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -Dwarnings
 
@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
-      - run: cargo check --workspace --all-targets --all-features --locked
+      - run: cargo +1.85.0 check --workspace --all-targets --all-features --locked
 
   features:
     name: Feature matrix
@@ -47,10 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check -p oxidebot-runtime --no-default-features --locked
-      - run: cargo check -p oxidebot-runtime --no-default-features --features multi-thread --locked
-      - run: cargo check -p oxidebot --no-default-features --locked
-      - run: cargo check -p oxidebot --no-default-features --features multi-thread --locked
+      - run: cargo +stable check -p oxidebot-runtime --no-default-features --locked
+      - run: cargo +stable check -p oxidebot-runtime --no-default-features --features multi-thread --locked
+      - run: cargo +stable check -p oxidebot --no-default-features --locked
+      - run: cargo +stable check -p oxidebot --no-default-features --features multi-thread --locked
 
   facade-docs:
     name: Stable facade documentation
@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc -p oxidebot --no-deps --all-features --locked
+      - run: cargo +stable doc -p oxidebot --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -Dwarnings -Dmissing-docs
 
@@ -68,13 +68,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: EmbarkStudios/cargo-deny-action@v2
-      - run: cargo install cargo-machete --locked
-      - run: cargo machete
+      - run: cargo +stable install cargo-deny --version 0.20.2 --locked
+      - run: cargo +stable deny check
+      - run: cargo +stable install cargo-machete --version 0.9.2 --locked
+      - run: cargo +stable machete
       - name: Inspect every publishable source package
         run: |
           for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
-            cargo package -p "$package" --list --allow-dirty --locked
+            cargo +stable package -p "$package" --list --allow-dirty --locked
           done
 
   coverage:
@@ -89,7 +90,7 @@ jobs:
         with:
           tool: cargo-llvm-cov
           fallback: none
-      - run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - run: cargo +stable llvm-cov --workspace --all-features --lcov --output-path lcov.info
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov

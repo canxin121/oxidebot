@@ -13,9 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo +stable test --workspace --all-targets --all-features --locked
       - name: Inspect release packages
         run: |
           for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
-            cargo package -p "$package" --list --locked
+            cargo +stable package -p "$package" --list --locked
           done
