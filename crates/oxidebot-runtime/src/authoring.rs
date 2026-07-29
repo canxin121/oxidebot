@@ -1547,6 +1547,7 @@ where
     }
 }
 
+/// Compile-time metadata for one generated command-tree branch.
 pub trait CommandBranchTag: Send + Sync + Sized + 'static {
     /// Generated command tree that owns this branch.
     type Command: crate::CommandTree;
@@ -1714,6 +1715,7 @@ impl From<MessageTarget> for Address {
 }
 
 impl Address {
+    /// Selects a direct-message conversation for `user_id`.
     #[must_use]
     pub fn direct(user_id: impl Into<String>) -> Self {
         Self {
@@ -1722,6 +1724,7 @@ impl Address {
         }
     }
 
+    /// Selects a group conversation for `group_id`.
     #[must_use]
     pub fn group(group_id: impl Into<String>) -> Self {
         Self {
@@ -1730,6 +1733,7 @@ impl Address {
         }
     }
 
+    /// Selects a channel conversation for `channel_id`.
     #[must_use]
     pub fn channel(channel_id: impl Into<String>) -> Self {
         Self {
@@ -1741,6 +1745,7 @@ impl Address {
         }
     }
 
+    /// Selects a thread conversation beneath `parent`.
     #[must_use]
     pub fn thread(thread_id: impl Into<String>, parent: ConversationRef) -> Self {
         Self {
@@ -1751,12 +1756,14 @@ impl Address {
         }
     }
 
+    /// Adds explicit recipient IDs to this target.
     #[must_use]
     pub fn recipients(mut self, recipients: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.target = self.target.recipients(recipients);
         self
     }
 
+    /// Replaces the bot-selection policy for this address.
     #[must_use]
     pub fn through(mut self, bot: BotSelection) -> Self {
         self.bot = bot;
@@ -1765,6 +1772,7 @@ impl Address {
 }
 
 impl BotDirectory {
+    /// Selects one connected bot, rejecting ambiguous platform-only selections.
     pub fn select(&self, selection: &BotSelection) -> Result<BotHandle, HandlerError> {
         match selection {
             BotSelection::Current => Err(HandlerError::internal(
@@ -1790,6 +1798,7 @@ impl BotDirectory {
         }
     }
 
+    /// Sends a canonical message to an explicit address with the requested fallback policy.
     pub async fn send_address(
         &self,
         address: Address,
@@ -1803,6 +1812,7 @@ impl BotDirectory {
     }
 }
 
+/// Bounded alias directory for reusable outbound addresses.
 #[derive(Clone, Debug)]
 pub struct TargetDirectory {
     inner: Arc<RwLock<TargetDirectoryState>>,
@@ -1817,6 +1827,7 @@ struct TargetDirectoryState {
 }
 
 impl TargetDirectory {
+    /// Creates an alias directory bounded by alias count.
     #[must_use]
     pub fn bounded(capacity: usize) -> Self {
         let capacity = capacity.max(1);
@@ -1837,6 +1848,7 @@ impl TargetDirectory {
         }
     }
 
+    /// Inserts or replaces an address alias, enforcing count and byte bounds.
     pub fn insert(&self, alias: impl Into<Arc<str>>, address: Address) -> Result<(), HandlerError> {
         let mut state = self.inner.write().expect("target directory lock poisoned");
         let alias = alias.into();
@@ -1867,6 +1879,7 @@ impl TargetDirectory {
         Ok(())
     }
 
+    /// Resolves an address alias, if it exists.
     #[must_use]
     pub fn resolve(&self, alias: &str) -> Option<Address> {
         self.inner
@@ -1877,6 +1890,7 @@ impl TargetDirectory {
             .cloned()
     }
 
+    /// Removes and returns an address alias, if it exists.
     pub fn remove(&self, alias: &str) -> Option<Address> {
         let mut state = self.inner.write().expect("target directory lock poisoned");
         let removed = state.aliases.remove(alias);
@@ -1888,6 +1902,7 @@ impl TargetDirectory {
         removed
     }
 
+    /// Returns address aliases in deterministic lexical order.
     #[must_use]
     pub fn aliases(&self) -> Vec<Arc<str>> {
         self.inner
@@ -1899,6 +1914,7 @@ impl TargetDirectory {
             .collect()
     }
 
+    /// Returns the number of stored aliases.
     #[must_use]
     pub fn len(&self) -> usize {
         self.inner
@@ -1908,6 +1924,7 @@ impl TargetDirectory {
             .len()
     }
 
+    /// Returns whether no aliases are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -1932,25 +1949,34 @@ fn target_entry_bytes(alias: &str, address: &Address) -> usize {
         .saturating_add(128)
 }
 
+/// In-memory bytes and metadata resolved from a portable file reference.
 #[derive(Clone, Debug)]
 pub struct ResolvedMedia {
+    /// Complete media byte payload.
     pub bytes: Arc<[u8]>,
+    /// Detected or declared MIME type, when known.
     pub mime: Option<Arc<str>>,
+    /// Suggested filename, when known.
     pub name: Option<Arc<str>>,
 }
 
+/// Resolves portable media references into bounded in-memory bytes.
 #[async_trait]
 pub trait MediaResolver: Send + Sync + 'static {
+    /// Resolves the file referenced by a portable media segment.
     async fn resolve(&self, media: &Media) -> HandlerResult<ResolvedMedia>;
+    /// Resolves a standalone portable file descriptor.
     async fn resolve_file(&self, file: &File) -> HandlerResult<ResolvedMedia>;
 }
 
+/// Resolver for local paths and base64 payloads, bounded by maximum byte size.
 #[derive(Clone, Debug)]
 pub struct LocalMediaResolver {
     max_bytes: usize,
 }
 
 impl LocalMediaResolver {
+    /// Creates a local resolver that rejects payloads larger than `max_bytes`.
     #[must_use]
     pub const fn new(max_bytes: usize) -> Self {
         Self { max_bytes }
@@ -2077,9 +2103,12 @@ fn decode_base64(input: &str) -> HandlerResult<Vec<u8>> {
     Ok(output)
 }
 
+/// One resolved file-bearing message segment and its structural path.
 #[derive(Clone, Debug)]
 pub struct ResolvedMessageMedia {
+    /// Structural path identifying the file-bearing segment in the message.
     pub path: Arc<str>,
+    /// Resolved byte payload and metadata for that segment.
     pub media: ResolvedMedia,
 }
 
@@ -2155,6 +2184,7 @@ where
     Ok(output)
 }
 
+/// Stores resolved media where adapters can later retrieve it.
 #[async_trait]
 pub trait MediaHost: Send + Sync + 'static {
     /// Stores resolved bytes and returns a portable file descriptor, usually
@@ -2162,12 +2192,14 @@ pub trait MediaHost: Send + Sync + 'static {
     async fn host(&self, media: ResolvedMedia) -> HandlerResult<File>;
 }
 
+/// Fetches remote media under an application-defined network policy.
 #[async_trait]
 pub trait MediaFetcher: Send + Sync + 'static {
     /// Fetches one external URI under the caller's byte and protocol policy.
     async fn fetch(&self, uri: &str, max_bytes: usize) -> HandlerResult<ResolvedMedia>;
 }
 
+/// Media resolver that uses local data first and delegates URIs to a fetcher.
 #[derive(Clone)]
 pub struct PortableMediaResolver<F> {
     local: LocalMediaResolver,
@@ -2175,6 +2207,7 @@ pub struct PortableMediaResolver<F> {
 }
 
 impl<F> PortableMediaResolver<F> {
+    /// Creates a resolver with a bounded local resolver and remote `fetcher`.
     #[must_use]
     pub fn new(max_bytes: usize, fetcher: F) -> Self {
         Self {
@@ -2204,6 +2237,7 @@ where
     }
 }
 
+/// Resolves `file` and stores the resulting bytes through `host`.
 pub async fn resolve_and_host_file<R, H>(resolver: &R, host: &H, file: &File) -> HandlerResult<File>
 where
     R: MediaResolver + ?Sized,
@@ -2219,6 +2253,7 @@ pub trait ResolveCommandValue<S>: Sized + Send + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Resolves the active command `field` from the current parsed match.
     async fn resolve(
         context: &Context<S>,
         field: CommandFieldId,
@@ -2226,6 +2261,7 @@ where
     ) -> HandlerResult<Self>;
 }
 
+/// Extractor-backed helper for asynchronous command-value resolution.
 #[derive(Clone)]
 pub struct Resolve<T, S>
 where
@@ -2240,6 +2276,7 @@ where
     T: ResolveCommandValue<S>,
     S: Send + Sync + 'static,
 {
+    /// Resolves a command field by its stable runtime ID.
     pub async fn field(&self, field: CommandFieldId) -> HandlerResult<T> {
         let command = self
             .context
@@ -2291,16 +2328,20 @@ where
 
 /// A reusable validation and conversion pattern for command values.
 pub trait ValuePattern<T>: Send + Sync + 'static {
+    /// Parses one portable command value into `T`.
     fn parse(&self, value: &crate::CommandValue) -> Result<T, CommandParseError>;
+    /// Returns human-readable validation guidance for this pattern.
     fn describe(&self) -> Arc<str>;
 }
 
+/// A [`ValuePattern`] backed by a parsing closure.
 pub struct FnValuePattern<T, F> {
     description: Arc<str>,
     parser: F,
     _value: PhantomData<fn() -> T>,
 }
 
+/// Creates a closure-backed value pattern with user-facing `description`.
 #[must_use]
 pub fn value_pattern<T, F>(description: impl Into<Arc<str>>, parser: F) -> FnValuePattern<T, F>
 where
@@ -2327,6 +2368,7 @@ where
     }
 }
 
+/// Text value pattern that accepts values matching a compiled regular expression.
 #[derive(Clone, Debug)]
 pub struct RegexTextPattern {
     regex: Regex,
@@ -2334,6 +2376,7 @@ pub struct RegexTextPattern {
 }
 
 impl RegexTextPattern {
+    /// Compiles `pattern` and stores `description` for validation failures.
     pub fn new(pattern: &str, description: impl Into<Arc<str>>) -> Result<Self, regex::Error> {
         Ok(Self {
             regex: Regex::new(pattern)?,
