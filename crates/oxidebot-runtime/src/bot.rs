@@ -39,12 +39,16 @@ use tokio::{
 /// Immutable identity for one adapter connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BotDescriptor {
+    /// Platform identifier supplied by the adapter.
     pub platform: PlatformId,
+    /// Platform-specific bot identifier.
     pub id: BotId,
+    /// Optional human-readable name used in diagnostics.
     pub display_name: Option<Arc<str>>,
 }
 
 impl BotDescriptor {
+    /// Creates a descriptor from its platform and platform-specific bot ID.
     #[must_use]
     pub fn new(platform: PlatformId, id: BotId) -> Self {
         Self {
@@ -54,12 +58,14 @@ impl BotDescriptor {
         }
     }
 
+    /// Sets the human-readable display name used in diagnostics.
     #[must_use]
     pub fn display_name(mut self, display_name: impl Into<Arc<str>>) -> Self {
         self.display_name = Some(display_name.into());
         self
     }
 
+    /// Returns the combined stable bot identity.
     #[must_use]
     pub fn identity(&self) -> BotIdentity {
         BotIdentity::new(self.platform.clone(), self.id.clone())
@@ -75,9 +81,12 @@ impl BotDescriptor {
 /// Strength of idempotency provided by an adapter/platform.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum IdempotencyGuarantee {
+    /// Neither the adapter nor platform can ensure idempotent sends.
     #[default]
     Unsupported,
+    /// The adapter enforces idempotency above a platform without native support.
     AdapterEmulated,
+    /// The underlying platform enforces idempotency keys natively.
     PlatformNative,
 }
 
@@ -88,7 +97,9 @@ pub enum IdempotencyGuarantee {
 /// scheduler semantics that cannot be inferred from a feature's availability.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeCapabilities {
+    /// Idempotency guarantee applied to message sends.
     pub send_idempotency: IdempotencyGuarantee,
+    /// Whether retrying a completed delete treats not-found as success.
     pub delete_idempotent: bool,
 }
 
@@ -144,6 +155,7 @@ pub struct BotServices {
 
 impl BotServices {
     /// Creates adapter services from the single OxideBot API object.
+    /// Returns scheduling and retry semantics supplied by this adapter.
     #[must_use]
     pub fn new(api: Arc<dyn CallApiTrait>) -> Self {
         let bot_capabilities = Arc::new(api.bot_capabilities());
@@ -155,6 +167,7 @@ impl BotServices {
     }
 
     /// Declares that message idempotency keys are actually enforced.
+    /// Returns the runtime slot assigned to this bot connection.
     #[must_use]
     pub fn send_idempotency(mut self, guarantee: IdempotencyGuarantee) -> Self {
         self.capabilities.send_idempotency = guarantee;
@@ -162,12 +175,14 @@ impl BotServices {
     }
 
     /// Declares delete retry semantics (`NotFound` after a prior success is OK).
+    /// Returns this connection's stable bot identity.
     #[must_use]
     pub fn idempotent_delete(mut self, enabled: bool) -> Self {
         self.capabilities.delete_idempotent = enabled;
         self
     }
 
+    /// Returns immutable adapter descriptor metadata.
     #[must_use]
     pub fn capabilities(&self) -> RuntimeCapabilities {
         self.capabilities
@@ -176,6 +191,7 @@ impl BotServices {
     /// Returns the immutable portable capability model captured when the
     /// adapter registered its services. Runtime hot paths never re-query an
     /// adapter for this bot-wide metadata.
+    /// Returns scheduling and retry semantics for this bot connection.
     #[must_use]
     pub fn bot_capabilities(&self) -> &BotCapabilities {
         &self.bot_capabilities
@@ -228,21 +244,25 @@ impl BotHandle {
         }))
     }
 
+    /// Returns the runtime slot assigned to this bot connection.
     #[must_use]
     pub fn slot(&self) -> BotSlot {
         self.0.slot
     }
 
+    /// Returns this connection's stable bot identity.
     #[must_use]
     pub fn identity(&self) -> &BotIdentity {
         &self.0.identity
     }
 
+    /// Returns immutable adapter descriptor metadata.
     #[must_use]
     pub fn descriptor(&self) -> &BotDescriptor {
         &self.0.descriptor
     }
 
+    /// Returns scheduling and retry semantics for this bot connection.
     #[must_use]
     pub fn capabilities(&self) -> RuntimeCapabilities {
         self.0.capabilities
@@ -462,20 +482,24 @@ impl BotDirectory {
         Self(bots.into())
     }
 
+    /// Returns the bot handle assigned to `slot`, if present.
     #[must_use]
     pub fn get(&self, slot: BotSlot) -> Option<&BotHandle> {
         self.0.get(slot.0 as usize)
     }
 
+    /// Iterates over connected bots in dense slot order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &BotHandle> {
         self.0.iter()
     }
 
+    /// Returns the number of connected bots.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns whether no bots are connected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

@@ -45,6 +45,7 @@ impl Dialogue {
         }
     }
 
+    /// Sets the maximum time to wait for each dialogue response.
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.options.timeout = timeout;
@@ -67,6 +68,7 @@ impl Dialogue {
         Ok(self)
     }
 
+    /// Sets whether a captured response is consumed or continues normal routing.
     #[must_use]
     pub const fn policy(mut self, policy: SessionPolicy) -> Self {
         self.options.policy = policy;
@@ -83,6 +85,7 @@ impl Dialogue {
         DialogueQuestion::new(self.clone(), prompt.into())
     }
 
+    /// Waits for the next session-scoped message without sending a prompt.
     pub async fn wait(&self) -> Result<crate::SessionEvent, HandlerError> {
         let key = SessionKey::new(
             self.conversation.clone(),
@@ -97,6 +100,7 @@ impl Dialogue {
             .await?)
     }
 
+    /// Sends `prompt` and waits for the next session-scoped message event.
     pub async fn ask_message(
         &self,
         prompt: impl Into<Message>,
@@ -124,6 +128,7 @@ impl Dialogue {
         Ok(waiter.wait().await?)
     }
 
+    /// Sends `prompt` and returns the text from the next session-scoped message.
     pub async fn ask_text(&self, prompt: impl Into<Message>) -> Result<String, HandlerError> {
         let event = self.ask_message(prompt).await?;
         match event.event() {
@@ -134,6 +139,7 @@ impl Dialogue {
         }
     }
 
+    /// Sends `prompt`, waits for a response, and parses it as `T` once.
     pub async fn ask<T>(&self, prompt: impl Into<Message>) -> Result<T, HandlerError>
     where
         T: FromStr + Send + 'static,
@@ -151,11 +157,13 @@ impl Dialogue {
         T::collect(self.clone()).await
     }
 
+    /// Asks a localized yes/no question using the default vocabulary.
     pub async fn confirm(&self, prompt: impl Into<Message>) -> Result<bool, HandlerError> {
         self.confirm_with(prompt, ConfirmationWords::default(), 3)
             .await
     }
 
+    /// Asks a yes/no question with custom vocabulary and a bounded number of attempts.
     pub async fn confirm_with(
         &self,
         prompt: impl Into<Message>,
@@ -177,6 +185,7 @@ impl Dialogue {
         Err(HandlerError::user(words.retry_message.as_ref()))
     }
 
+    /// Prompts the user to choose one labeled value with three attempts.
     pub async fn choose<T, I, L>(
         &self,
         prompt: impl Into<Message>,
@@ -190,6 +199,7 @@ impl Dialogue {
         self.choose_with(prompt, choices, 3).await
     }
 
+    /// Prompts the user to choose one labeled value with a caller-selected attempt limit.
     pub async fn choose_with<T, I, L>(
         &self,
         prompt: impl Into<Message>,
@@ -210,6 +220,7 @@ impl Dialogue {
         .await
     }
 
+    /// Prompts the user to choose one labeled value with a custom retry prompt.
     pub async fn choose_with_error<T, I, L>(
         &self,
         prompt: impl Into<Message>,
@@ -277,6 +288,7 @@ pub type DialogueFormFuture<T> = BoxFuture<'static, Result<T, HandlerError>>;
 
 /// A reusable, strongly typed multi-question dialogue form.
 pub trait DialogueForm: Sized + Send + 'static {
+    /// Collects this form's values interactively through `dialogue`.
     fn collect(dialogue: Dialogue) -> DialogueFormFuture<Self>;
 }
 
@@ -301,6 +313,7 @@ pub struct ConfirmationWords {
 }
 
 impl ConfirmationWords {
+    /// Creates confirmation vocabulary from accepted affirmative and negative words.
     #[must_use]
     pub fn new<Y, N, YV, NV>(yes: Y, no: N) -> Self
     where
@@ -316,6 +329,7 @@ impl ConfirmationWords {
         }
     }
 
+    /// Replaces the message shown after an unrecognized confirmation response.
     #[must_use]
     pub fn retry_message(mut self, value: impl Into<Arc<str>>) -> Self {
         self.retry_message = value.into();
@@ -403,30 +417,35 @@ where
         }
     }
 
+    /// Sets the total number of parse and validation attempts, clamped to one.
     #[must_use]
     pub fn attempts(mut self, attempts: usize) -> Self {
         self.attempts = attempts.max(1);
         self
     }
 
+    /// Sets the number of retries after the initial attempt.
     #[must_use]
     pub fn retry(mut self, retries: usize) -> Self {
         self.attempts = retries.saturating_add(1).max(1);
         self
     }
 
+    /// Replaces the prompt shown after invalid input.
     #[must_use]
     pub fn error(mut self, prompt: impl Into<Message>) -> Self {
         self.error_prompt = prompt.into();
         self
     }
 
+    /// Controls whether response text is trimmed before parsing.
     #[must_use]
     pub const fn trim(mut self, enabled: bool) -> Self {
         self.trim = enabled;
         self
     }
 
+    /// Adds a predicate that parsed values must satisfy.
     #[must_use]
     pub fn validate<F>(mut self, validator: F) -> Self
     where
@@ -440,6 +459,7 @@ where
         self
     }
 
+    /// Adds a validator that can report a domain-specific validation failure.
     #[must_use]
     pub fn try_validate<F, E>(mut self, validator: F) -> Self
     where
@@ -452,6 +472,7 @@ where
         self
     }
 
+    /// Runs the question until parsing and validation succeed or attempts are exhausted.
     pub async fn run(self) -> Result<T, HandlerError> {
         let mut prompt = self.prompt;
         let final_error = self.error_prompt.get_raw_text();
