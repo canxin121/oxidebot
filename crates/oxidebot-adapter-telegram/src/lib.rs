@@ -467,6 +467,11 @@ struct TelegramChat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxidebot_core::conversation::ConversationRef;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn text_update_normalizes_to_a_canonical_message_event() {
@@ -525,5 +530,83 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn send_delivery_plan_uses_real_http_transport_and_builds_a_report() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local Telegram fixture listener binds");
+        let address = listener
+            .local_addr()
+            .expect("fixture listener has a local address");
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("fixture accepts request");
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("fixture reads request");
+                assert_ne!(read, 0, "client closed request before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    break position + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&request[..header_end])
+                .expect("headers are UTF-8")
+                .to_owned();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .expect("request includes content length");
+            while request.len().saturating_sub(header_end) < content_length {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("fixture reads body");
+                assert_ne!(read, 0, "client closed request before body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = &request[header_end..header_end + content_length];
+            let body: serde_json::Value = serde_json::from_slice(body).expect("body is JSON");
+            assert!(headers.starts_with("POST /bot123:test-token/sendMessage HTTP/1.1\r\n"));
+            assert_eq!(body["chat_id"], "-100123");
+            assert_eq!(body["text"], "hello from fixture");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 38\r\nconnection: close\r\n\r\n{\"ok\":true,\"result\":{\"message_id\":77}}",
+                )
+                .await
+                .expect("fixture writes response");
+        });
+
+        let config = TelegramConfig::new("123:test-token", "bot")
+            .expect("valid configuration")
+            .api_base(format!("http://{address}"))
+            .expect("fixture URL is valid");
+        let api = TelegramApi::new(&config).expect("HTTP client builds");
+        let target = MessageTarget::new(ConversationRef::group("-100123"));
+        let plan = DeliveryPlan {
+            messages: vec![Message::text("hello from fixture")],
+            degradations: Vec::new(),
+        };
+        let report = api
+            .send_delivery_plan(target, plan)
+            .await
+            .expect("fixture accepts Telegram delivery");
+        fixture.await.expect("fixture task completes");
+        assert_eq!(report.messages.len(), 1);
+        assert_eq!(report.messages[0].id, "77");
+        oxidebot_testkit::adapter_contract::assert_complete(
+            &DeliveryPlan {
+                messages: vec![Message::text("hello from fixture")],
+                degradations: Vec::new(),
+            },
+            &report,
+        )
+        .expect("Telegram report satisfies the adapter delivery contract");
     }
 }

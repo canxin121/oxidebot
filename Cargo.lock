@@ -814,6 +814,7 @@ dependencies = [
  "chrono",
  "oxidebot-core",
  "oxidebot-runtime",
+ "oxidebot-testkit",
  "reqwest",
  "serde",
  "serde_json",
