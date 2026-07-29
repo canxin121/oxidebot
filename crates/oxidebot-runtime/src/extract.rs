@@ -1,11 +1,11 @@
 use crate::{
-    handler::EventContext, router::reply_target, Bot, CommandParseError, CommandResult, Context,
+    handler::EventContext, router::reply_target, Bot, CommandMatch, CommandParseError, Context,
     Dialogue, FromCommandMatch, HandlerError, Messenger, Outcome, Reply, ShutdownSignal,
 };
 use oxidebot_core::{
-    conversation::MessageTarget,
+    conversation::{ConversationRef, MessageTarget},
     event::{EventTag, NoticeEvent, RequestEvent},
-    source::{group::Group, message::MessageSegment, user::User},
+    source::{message::MessageSegment, user::User},
     BotIdentity, Event, EventId,
 };
 use std::{fmt, ops::Deref, sync::Arc};
@@ -94,10 +94,10 @@ impl Deref for Sender {
 }
 
 #[derive(Clone, Debug)]
-pub struct ChatGroup(pub Group);
+pub struct Conversation(pub ConversationRef);
 
-impl Deref for ChatGroup {
-    type Target = Group;
+impl Deref for Conversation {
+    type Target = ConversationRef;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -105,10 +105,10 @@ impl Deref for ChatGroup {
 }
 
 #[derive(Clone, Debug)]
-pub struct MaybeGroup(pub Option<Group>);
+pub struct MaybeConversation(pub Option<ConversationRef>);
 
-impl Deref for MaybeGroup {
-    type Target = Option<Group>;
+impl Deref for MaybeConversation {
+    type Target = Option<ConversationRef>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -233,24 +233,24 @@ where
     }
 }
 
-impl<S> Extract<S> for ChatGroup
+impl<S> Extract<S> for Conversation
 where
     S: Send + Sync + 'static,
 {
     fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
-        group_for_event(context.event())
+        conversation_for_event(context.event())
             .cloned()
             .map(Self)
-            .ok_or_else(|| ExtractError::new("this event is not scoped to a group"))
+            .ok_or_else(|| ExtractError::new("this event has no conversation"))
     }
 }
 
-impl<S> Extract<S> for MaybeGroup
+impl<S> Extract<S> for MaybeConversation
 where
     S: Send + Sync + 'static,
 {
     fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
-        Ok(Self(group_for_event(context.event()).cloned()))
+        Ok(Self(conversation_for_event(context.event()).cloned()))
     }
 }
 
@@ -357,7 +357,7 @@ where
     }
 }
 
-impl<S> Extract<S> for CommandResult
+impl<S> Extract<S> for CommandMatch
 where
     S: Send + Sync + 'static,
 {
@@ -424,7 +424,7 @@ where
     }
 }
 
-fn command_extract_error(result: &CommandResult, error: CommandParseError) -> ExtractError {
+fn command_extract_error(result: &CommandMatch, error: CommandParseError) -> ExtractError {
     ExtractError::new(format!("{error}\n\n用法：{}", result.command().usage()))
 }
 
@@ -464,55 +464,52 @@ where
 
 fn sender_for_event(event: &Event) -> Option<&User> {
     match event {
-        Event::MessageEvent(event) => Some(&event.sender),
-        Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(&event.user),
-            NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.user),
-            NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.user),
-            NoticeEvent::GroupMuteChangeEvent(event) => event.operator.as_ref(),
-            NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.user),
-            NoticeEvent::GroupHighlightChangeEvent(event) => {
+        Event::Message(event) => Some(&event.sender),
+        Event::Notice(event) => match event {
+            NoticeEvent::GroupMemberJoined(event) => Some(&event.user),
+            NoticeEvent::GroupMemberLeft(event) => Some(&event.user),
+            NoticeEvent::GroupAdminChanged(event) => Some(&event.user),
+            NoticeEvent::GroupMuteChanged(event) => event.operator.as_ref(),
+            NoticeEvent::GroupMemberMuteChanged(event) => Some(&event.user),
+            NoticeEvent::GroupHighlightChanged(event) => {
                 event.sender.as_ref().or(event.operator.as_ref())
             }
-            NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.user),
-            NoticeEvent::MessageReactionsEvent(event) => Some(&event.user),
-            NoticeEvent::MessageDeletedEvent(event) => {
-                event.user.as_ref().or(event.operator.as_ref())
-            }
-            NoticeEvent::MessageEditedEvent(event) => Some(&event.user),
+            NoticeEvent::GroupMemberAliasChanged(event) => Some(&event.user),
+            NoticeEvent::MessageReactionsChanged(event) => Some(&event.user),
+            NoticeEvent::MessageDeleted(event) => event.user.as_ref().or(event.operator.as_ref()),
+            NoticeEvent::MessageEdited(event) => Some(&event.user),
         },
-        Event::RequestEvent(event) => match event {
-            RequestEvent::FriendAddEvent(event) => Some(&event.user),
-            RequestEvent::GroupAddEvent(event) => Some(&event.user),
-            RequestEvent::GroupInviteEvent(event) => Some(&event.user),
+        Event::Request(event) => match event {
+            RequestEvent::Friend(event) => Some(&event.user),
+            RequestEvent::GroupJoin(event) => Some(&event.user),
+            RequestEvent::GroupInvite(event) => Some(&event.user),
         },
-        Event::InteractionEvent(event) => Some(&event.user),
-        Event::LifecycleEvent(_) | Event::MetaEvent(_) | Event::AnyEvent(_) => None,
+        Event::Interaction(event) => Some(&event.user),
+        Event::Lifecycle(_) | Event::Meta(_) | Event::Native(_) => None,
     }
 }
 
-fn group_for_event(event: &Event) -> Option<&Group> {
+fn conversation_for_event(event: &Event) -> Option<&ConversationRef> {
     match event {
-        Event::MessageEvent(event) => event.group.as_ref(),
-        Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(&event.group),
-            NoticeEvent::GroupMemberDecreaseEvent(event) => Some(&event.group),
-            NoticeEvent::GroupAdminChangeEvent(event) => Some(&event.group),
-            NoticeEvent::GroupMuteChangeEvent(event) => Some(&event.group),
-            NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(&event.group),
-            NoticeEvent::GroupHighlightChangeEvent(event) => Some(&event.group),
-            NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(&event.group),
-            NoticeEvent::MessageReactionsEvent(event) => event.group.as_ref(),
-            NoticeEvent::MessageDeletedEvent(event) => event.group.as_ref(),
-            NoticeEvent::MessageEditedEvent(event) => event.group.as_ref(),
+        Event::Message(event) => Some(&event.conversation),
+        Event::Notice(event) => match event {
+            NoticeEvent::GroupMemberJoined(event) => Some(&event.conversation),
+            NoticeEvent::GroupMemberLeft(event) => Some(&event.conversation),
+            NoticeEvent::GroupAdminChanged(event) => Some(&event.conversation),
+            NoticeEvent::GroupMuteChanged(event) => Some(&event.conversation),
+            NoticeEvent::GroupMemberMuteChanged(event) => Some(&event.conversation),
+            NoticeEvent::GroupHighlightChanged(event) => Some(&event.conversation),
+            NoticeEvent::GroupMemberAliasChanged(event) => Some(&event.conversation),
+            NoticeEvent::MessageReactionsChanged(event) => event.conversation.as_ref(),
+            NoticeEvent::MessageDeleted(event) => event.conversation.as_ref(),
+            NoticeEvent::MessageEdited(event) => event.conversation.as_ref(),
         },
-        Event::RequestEvent(RequestEvent::GroupAddEvent(event)) => Some(&event.group),
-        Event::InteractionEvent(event) => event.group.as_ref(),
-        Event::RequestEvent(
-            RequestEvent::FriendAddEvent(_) | RequestEvent::GroupInviteEvent(_),
-        )
-        | Event::LifecycleEvent(_)
-        | Event::MetaEvent(_)
-        | Event::AnyEvent(_) => None,
+        Event::Request(RequestEvent::GroupJoin(event)) => Some(&event.conversation),
+        Event::Request(RequestEvent::GroupInvite(event)) => Some(&event.conversation),
+        Event::Interaction(event) => event.conversation.as_ref(),
+        Event::Request(RequestEvent::Friend(_))
+        | Event::Lifecycle(_)
+        | Event::Meta(_)
+        | Event::Native(_) => None,
     }
 }

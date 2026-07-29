@@ -432,9 +432,7 @@ where
             .and_then(CommandMatch::locale)
             .map(Arc::from)
             .or_else(|| match context.event() {
-                oxidebot_core::Event::InteractionEvent(event) => {
-                    event.locale.clone().map(Arc::from)
-                }
+                oxidebot_core::Event::Interaction(event) => event.locale.clone().map(Arc::from),
                 _ => None,
             })
     }
@@ -1568,8 +1566,8 @@ where
     }
 }
 
-/// Creates a statically typed command-result condition similar to Alconna's
-/// path/value assignment without introducing stringly typed handler state.
+/// Creates a statically typed command-result condition without introducing
+/// stringly typed handler state.
 #[must_use]
 pub fn when_field_equals<S, T>(field: CommandFieldId, expected: T) -> impl Guard<S>
 where
@@ -2010,16 +2008,6 @@ where
         for (index, segment) in message.segments.iter().enumerate() {
             let path = format!("{prefix}segments[{index}]");
             match segment {
-                MessageSegment::Image { file: Some(file) }
-                | MessageSegment::Video {
-                    file: Some(file), ..
-                }
-                | MessageSegment::Audio {
-                    file: Some(file), ..
-                }
-                | MessageSegment::File { file: Some(file) } => {
-                    output.push((path, Source::File(file)));
-                }
                 MessageSegment::Share {
                     image: Some(file), ..
                 } => {
@@ -2039,6 +2027,16 @@ where
                             output
                                 .push((format!("{item_path}.thumbnail"), Source::File(thumbnail)));
                         }
+                    }
+                }
+                MessageSegment::Emoji(emoji) => {
+                    if let Some(file) = &emoji.file {
+                        output.push((path, Source::File(file)));
+                    }
+                }
+                MessageSegment::Sticker(sticker) => {
+                    if let Some(file) = &sticker.file {
+                        output.push((path, Source::File(file)));
                     }
                 }
                 MessageSegment::ForwardCustomNode { message, .. } => {
@@ -2299,7 +2297,7 @@ mod resource_limit_tests {
     #[async_trait]
     impl CallApiTrait for PublicationApi {
         fn bot_capabilities(&self) -> BotCapabilities {
-            let mut capabilities = BotCapabilities::legacy_message_api();
+            let mut capabilities = BotCapabilities::default();
             capabilities.application.structured_commands = SupportLevel::Native;
             capabilities
         }

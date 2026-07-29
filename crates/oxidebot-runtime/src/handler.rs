@@ -7,7 +7,7 @@ use crate::{
 use futures_util::future::BoxFuture;
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind};
 use oxidebot_core::{
-    conversation::{ConversationRef, MessageTarget},
+    conversation::MessageTarget,
     event::{tags, EventTag, EventType},
     source::message::{DeliveryReport, FallbackPolicy, Message, MessageSegment},
     BotIdentity, BotObject, EventId, PlatformId,
@@ -143,14 +143,7 @@ impl EventContext<tags::Message> {
     }
 
     pub async fn send(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
-        let target = self
-            .event()
-            .group
-            .as_ref()
-            .map(|group| MessageTarget::new(ConversationRef::group(group.id.clone())))
-            .unwrap_or_else(|| {
-                MessageTarget::new(ConversationRef::direct(self.event().sender.id.clone()))
-            });
+        let target = MessageTarget::new(self.event().conversation.clone());
         if let Some(pipeline) = &self.pipeline {
             pipeline
                 .deliver(&self.bot, target, message.into(), FallbackPolicy::Auto)
@@ -197,7 +190,7 @@ impl EventContext<tags::Message> {
         self.send(prompt).await?;
         let response = waiter.wait().await?;
         let text = match response.event() {
-            oxidebot_core::Event::MessageEvent(event) => event.message.get_raw_text(),
+            oxidebot_core::Event::Message(event) => event.message.get_raw_text(),
             _ => {
                 return Err(HandlerError::Parse(
                     "session response is not a message event".into(),

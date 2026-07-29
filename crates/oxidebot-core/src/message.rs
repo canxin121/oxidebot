@@ -9,12 +9,6 @@ use serde_json::value::RawValue;
 use std::sync::Arc;
 use thiserror::Error;
 
-pub use crate::source::message::{
-    DeliveryDegradation, DeliveryItemResult, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
-    FallbackPolicy, Message as OutgoingMessage, MessageOptions, MessageSegment as MessageContent,
-    PartialDeliveryError, SegmentKind,
-};
-
 pub const MAX_METADATA_ENTRIES: usize = 64;
 pub const MAX_METADATA_KEY_BYTES: usize = 1_024;
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;

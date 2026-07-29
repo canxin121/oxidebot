@@ -200,8 +200,8 @@ fn next_route_id<const N: usize>(
 }
 
 pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
-    fn group(id: &str) -> MessageTarget {
-        MessageTarget::new(ConversationRef::group(id.to_owned()))
+    fn target(conversation: &ConversationRef) -> MessageTarget {
+        MessageTarget::new(conversation.clone())
     }
 
     fn direct(id: &str) -> MessageTarget {
@@ -209,52 +209,46 @@ pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
     }
 
     match event {
-        Event::MessageEvent(event) => Some(
-            event
-                .group
-                .as_ref()
-                .map(|group_ref| group(&group_ref.id))
-                .unwrap_or_else(|| direct(&event.sender.id)),
-        ),
-        Event::NoticeEvent(event) => match event {
-            NoticeEvent::GroupMemberIncreaseEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupMemberDecreaseEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupAdminChangeEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupMuteChangeEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupMemberMuteChangeEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupHighlightChangeEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::GroupMemberAliasChangeEvent(event) => Some(group(&event.group.id)),
-            NoticeEvent::MessageReactionsEvent(event) => Some(
+        Event::Message(event) => Some(target(&event.conversation)),
+        Event::Notice(event) => match event {
+            NoticeEvent::GroupMemberJoined(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupMemberLeft(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupAdminChanged(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupMuteChanged(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupMemberMuteChanged(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupHighlightChanged(event) => Some(target(&event.conversation)),
+            NoticeEvent::GroupMemberAliasChanged(event) => Some(target(&event.conversation)),
+            NoticeEvent::MessageReactionsChanged(event) => Some(
                 event
-                    .group
+                    .conversation
                     .as_ref()
-                    .map(|group_ref| group(&group_ref.id))
+                    .map(target)
                     .unwrap_or_else(|| direct(&event.user.id)),
             ),
-            NoticeEvent::MessageDeletedEvent(event) => event
-                .group
+            NoticeEvent::MessageDeleted(event) => event
+                .conversation
                 .as_ref()
-                .map(|group_ref| group(&group_ref.id))
+                .map(target)
                 .or_else(|| event.user.as_ref().map(|user| direct(&user.id))),
-            NoticeEvent::MessageEditedEvent(event) => Some(
+            NoticeEvent::MessageEdited(event) => Some(
                 event
-                    .group
+                    .conversation
                     .as_ref()
-                    .map(|group_ref| group(&group_ref.id))
+                    .map(target)
                     .unwrap_or_else(|| direct(&event.user.id)),
             ),
         },
-        Event::RequestEvent(RequestEvent::FriendAddEvent(event)) => Some(direct(&event.user.id)),
-        Event::RequestEvent(RequestEvent::GroupAddEvent(event)) => Some(group(&event.group.id)),
-        Event::RequestEvent(RequestEvent::GroupInviteEvent(event)) => Some(direct(&event.user.id)),
-        Event::InteractionEvent(event) => Some(
+        Event::Request(RequestEvent::Friend(event)) => Some(direct(&event.user.id)),
+        Event::Request(RequestEvent::GroupJoin(event)) => Some(target(&event.conversation)),
+        Event::Request(RequestEvent::GroupInvite(event)) => Some(direct(&event.user.id)),
+        Event::Interaction(event) => Some(
             event
-                .group
+                .conversation
                 .as_ref()
-                .map(|group_ref| group(&group_ref.id))
+                .map(target)
                 .unwrap_or_else(|| direct(&event.user.id)),
         ),
-        Event::LifecycleEvent(_) | Event::MetaEvent(_) | Event::AnyEvent(_) => None,
+        Event::Lifecycle(_) | Event::Meta(_) | Event::Native(_) => None,
     }
 }
 
@@ -350,7 +344,7 @@ where
             if self.authoring.registry.broad_command_matching() {
                 dynamic_candidates.extend_from_slice(&self.all_command_routes);
             } else if self.authoring.registry.dynamic_shortcuts_enabled() {
-                if let Event::MessageEvent(message) = event.event() {
+                if let Event::Message(message) = event.event() {
                     let input = message.message.extract_plain_text();
                     for command_id in self
                         .authoring
@@ -396,7 +390,7 @@ where
         }
 
         let responder = match event.event() {
-            Event::InteractionEvent(interaction) => interaction
+            Event::Interaction(interaction) => interaction
                 .response
                 .clone()
                 .map(|handle| crate::Responder::new(bot.clone(), handle)),

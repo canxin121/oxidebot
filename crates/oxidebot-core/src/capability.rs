@@ -51,7 +51,6 @@ pub struct ContentCapabilities {
     #[serde(default)]
     pub shares: SupportLevel,
     #[serde(default)]
-    pub custom_content: SupportLevel,
     pub polls: SupportLevel,
     pub quizzes: SupportLevel,
     pub checklists: SupportLevel,
@@ -218,11 +217,10 @@ pub struct BotCapabilities {
 }
 
 impl BotCapabilities {
-    /// Conservative capabilities provided by the original 0.1.8 message API.
-    /// Adapters should override [`crate::CallApiTrait::bot_capabilities`] when
-    /// they can report a more precise matrix.
+    /// A portable baseline for adapters that preserve the standard OxideBot
+    /// message model but do not expose platform-native rich features.
     #[must_use]
-    pub fn legacy_message_api() -> Self {
+    pub fn portable() -> Self {
         let native = SupportLevel::Native;
         Self {
             content: ContentCapabilities {
@@ -246,7 +244,6 @@ impl BotCapabilities {
                 channel_mentions: SupportLevel::Emulated,
                 everyone_mentions: native,
                 shares: native,
-                custom_content: native,
                 polls: SupportLevel::Emulated,
                 quizzes: SupportLevel::Emulated,
                 checklists: SupportLevel::Emulated,
@@ -254,10 +251,6 @@ impl BotCapabilities {
             },
             delivery: DeliveryCapabilities {
                 replies: native,
-                // The original trait provides default methods for these
-                // operations, but those defaults return “not implemented”.
-                // Adapters must opt in explicitly instead of making receipts
-                // promise capabilities that may fail at runtime.
                 edit_messages: SupportLevel::Unsupported,
                 delete_messages: SupportLevel::Unsupported,
                 ..DeliveryCapabilities::default()

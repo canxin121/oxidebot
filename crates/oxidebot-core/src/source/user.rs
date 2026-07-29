@@ -1,34 +1,13 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub profile: Option<UserProfile>,
-    pub group_info: Option<UserGroupInfo>,
-}
-
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Role {
-    Owner,
-    Admin,
-    #[default]
-    Member,
-    Guest,
-    Unknown,
-}
-
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserGroupInfo {
-    pub alias: Option<String>,
-    pub role: Option<Role>,
-    pub join_time: Option<DateTime<Utc>>,
-    pub last_active_time: Option<DateTime<Utc>>,
-    pub level: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub enum Sex {
+pub enum Gender {
     Male,
     Female,
     Other,
@@ -36,22 +15,22 @@ pub enum Sex {
     Unknown,
 }
 
-impl From<&str> for Sex {
+impl From<&str> for Gender {
     fn from(value: &str) -> Self {
-        if value == "男" || value.to_lowercase() == "male" {
-            Sex::Male
-        } else if value == "女" || value.to_lowercase() == "female" {
-            Sex::Female
+        if value == "男" || value.eq_ignore_ascii_case("male") {
+            Self::Male
+        } else if value == "女" || value.eq_ignore_ascii_case("female") {
+            Self::Female
         } else {
-            Sex::Unknown
+            Self::Unknown
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct UserProfile {
-    pub nickname: Option<String>,
-    pub sex: Option<Sex>,
+    pub display_name: Option<String>,
+    pub gender: Option<Gender>,
     pub age: Option<u64>,
     pub avatar: Option<String>,
     pub email: Option<String>,

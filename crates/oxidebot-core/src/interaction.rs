@@ -19,9 +19,9 @@ use serde_json::Value;
 
 use crate::{
     application::CommandInvocation,
-    content::{FormValue, MessageVisibility, OutgoingMessage},
-    conversation::ConversationPermission,
-    source::{group::Group, message::Message, user::User},
+    content::FormValue,
+    conversation::{ConversationPermission, ConversationRef},
+    source::{message::Message, user::User},
 };
 
 pub use crate::source::message::MessageOptions;
@@ -243,14 +243,10 @@ impl LoginAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(
-    clippy::enum_variant_names,
-    reason = "the names distinguish chat-selection scopes in the public model"
-)]
 pub enum InlineQueryTarget {
-    ChooseChat,
-    CurrentChat,
-    ChosenChat(ChosenChatCriteria),
+    Choose,
+    Current,
+    Selected(ChosenChatCriteria),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,7 +714,7 @@ pub struct InteractionEvent {
     pub action_id: Option<String>,
     pub values: Vec<String>,
     pub user: User,
-    pub group: Option<Group>,
+    pub conversation: Option<ConversationRef>,
     pub message: Option<Message>,
     /// An inline-message, view, modal, or other platform context identifier.
     pub context_id: Option<String>,
@@ -734,43 +730,6 @@ pub struct InteractionEvent {
     /// Complete platform payload for fields that the common model cannot
     /// represent.
     pub data: Value,
-}
-
-impl InteractionEvent {
-    /// Responds through the same bot API object used by event handlers.
-    pub async fn respond(
-        &self,
-        bot: crate::bot::BotObject,
-        response: InteractionResponse,
-    ) -> anyhow::Result<()> {
-        let handle = self.response.as_ref().ok_or_else(|| {
-            UnsupportedInteractionError::new("responding to this non-answerable interaction")
-        })?;
-        match response {
-            InteractionResponse::Defer { visibility } => {
-                bot.defer_interaction(handle.clone(), visibility).await
-            }
-            InteractionResponse::Message {
-                mut message,
-                visibility,
-            } => {
-                message.options.visibility = match visibility {
-                    InteractionVisibility::Public => MessageVisibility::Public,
-                    InteractionVisibility::Ephemeral => MessageVisibility::Ephemeral,
-                };
-                if handle.ack_required {
-                    bot.defer_interaction(handle.clone(), visibility).await?;
-                }
-                bot.send_interaction_followup(handle.clone(), message)
-                    .await
-                    .map(|_| ())
-            }
-            InteractionResponse::UpdateMessage { message } => {
-                bot.edit_interaction_response(handle.clone(), message).await
-            }
-            response => bot.answer_interaction(handle.id.clone(), response).await,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -807,11 +766,11 @@ pub enum InteractionResponse {
         cache_time: Option<Duration>,
     },
     Message {
-        message: OutgoingMessage,
+        message: Message,
         visibility: InteractionVisibility,
     },
     UpdateMessage {
-        message: OutgoingMessage,
+        message: Message,
     },
     OpenModal(Modal),
     ValidationErrors(BTreeMap<String, String>),

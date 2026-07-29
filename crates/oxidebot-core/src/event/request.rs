@@ -1,112 +1,37 @@
-use crate::{
-    api::payload::RequestResponse,
-    bot::BotObject,
-    source::{group::Group, user::User},
-};
-use anyhow::Result;
+use crate::{conversation::ConversationRef, source::user::User};
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(
-    clippy::enum_variant_names,
-    reason = "variant names preserve the public 0.1.8 event model"
-)]
 pub enum RequestEvent {
-    FriendAddEvent(FriendAddEvent),
-    GroupAddEvent(GroupAddEvent),
-    GroupInviteEvent(GroupInviteEvent),
+    Friend(FriendRequest),
+    GroupJoin(GroupJoinRequest),
+    GroupInvite(GroupInviteRequest),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestDecision {
+    Approve,
+    Decline,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FriendAddEvent {
+pub struct FriendRequest {
     pub id: String,
     pub user: User,
     pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GroupAddEvent {
+pub struct GroupJoinRequest {
     pub id: String,
     pub user: User,
-    pub group: Group,
+    pub conversation: ConversationRef,
     pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GroupInviteEvent {
+pub struct GroupInviteRequest {
     pub id: String,
     pub user: User,
-    pub group_id: String,
+    pub conversation: ConversationRef,
     pub message: Option<String>,
-}
-
-impl FriendAddEvent {
-    pub async fn approve(&self, bot: BotObject) -> Result<()> {
-        bot.handle_add_friend_request(self.id.clone(), RequestResponse::Approve)
-            .await
-    }
-
-    pub async fn reject(&self, bot: BotObject) -> Result<()> {
-        bot.handle_add_friend_request(self.id.clone(), RequestResponse::Reject)
-            .await
-    }
-}
-
-impl GroupAddEvent {
-    pub async fn approve(&self, bot: BotObject) -> Result<()> {
-        bot.handle_add_group_request(self.id.clone(), RequestResponse::Approve)
-            .await
-    }
-
-    pub async fn reject(&self, bot: BotObject) -> Result<()> {
-        bot.handle_add_group_request(self.id.clone(), RequestResponse::Reject)
-            .await
-    }
-}
-
-impl GroupInviteEvent {
-    pub async fn approve(&self, bot: BotObject) -> Result<()> {
-        bot.handle_invite_group_request(self.id.clone(), RequestResponse::Approve)
-            .await
-    }
-
-    pub async fn reject(&self, bot: BotObject) -> Result<()> {
-        bot.handle_invite_group_request(self.id.clone(), RequestResponse::Reject)
-            .await
-    }
-}
-
-impl RequestEvent {
-    pub async fn approve(&self, bot: BotObject) -> Result<()> {
-        match self {
-            RequestEvent::FriendAddEvent(FriendAddEvent { id, .. }) => {
-                bot.handle_add_friend_request(id.clone(), RequestResponse::Approve)
-                    .await
-            }
-            RequestEvent::GroupAddEvent(GroupAddEvent { id, .. }) => {
-                bot.handle_add_group_request(id.to_string(), RequestResponse::Approve)
-                    .await
-            }
-            RequestEvent::GroupInviteEvent(GroupInviteEvent { id, .. }) => {
-                bot.handle_invite_group_request(id.to_string(), RequestResponse::Approve)
-                    .await
-            }
-        }
-    }
-
-    pub async fn reject(&self, bot: BotObject) -> Result<()> {
-        match self {
-            RequestEvent::FriendAddEvent(FriendAddEvent { id, .. }) => {
-                bot.handle_add_friend_request(id.clone(), RequestResponse::Reject)
-                    .await
-            }
-            RequestEvent::GroupAddEvent(GroupAddEvent { id, .. }) => {
-                bot.handle_add_group_request(id.to_string(), RequestResponse::Reject)
-                    .await
-            }
-            RequestEvent::GroupInviteEvent(GroupInviteEvent { id, .. }) => {
-                bot.handle_invite_group_request(id.to_string(), RequestResponse::Reject)
-                    .await
-            }
-        }
-    }
 }

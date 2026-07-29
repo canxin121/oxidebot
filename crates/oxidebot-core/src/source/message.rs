@@ -127,24 +127,7 @@ impl Message {
     pub fn push(&mut self, segment: impl IntoMessageSegment) {
         let segment = segment.into_message_segment();
         match segment {
-            MessageSegment::Components(components) => {
-                self.options.components = Some(components);
-            }
-            MessageSegment::Reply { message_id } => {
-                if self.options.reply.is_none() {
-                    self.options.reply =
-                        Some(ReplyOptions::new(MessageRef::new(message_id.clone())));
-                }
-                self.segments.push(MessageSegment::Reply { message_id });
-            }
             MessageSegment::Text { content } => {
-                if let Some(MessageSegment::Text { content: previous }) = self.segments.last_mut() {
-                    previous.push_str(&content);
-                } else {
-                    self.segments.push(MessageSegment::Text { content });
-                }
-            }
-            MessageSegment::PlainText(content) => {
                 if let Some(MessageSegment::Text { content: previous }) = self.segments.last_mut() {
                     previous.push_str(&content);
                 } else {
@@ -187,9 +170,8 @@ impl Message {
 
     #[must_use]
     pub fn reply_to(mut self, message_id: impl Into<String>) -> Self {
-        let message_id = message_id.into();
-        self.options.reply = Some(ReplyOptions::new(MessageRef::new(message_id.clone())));
-        self.then(MessageSegment::reply(message_id))
+        self.options.reply = Some(ReplyOptions::new(MessageRef::new(message_id.into())));
+        self
     }
 
     #[must_use]
@@ -203,13 +185,13 @@ impl Message {
     }
 
     #[must_use]
-    pub fn video(self, file: File, length: Option<i32>) -> Self {
-        self.then(MessageSegment::video(file, length))
+    pub fn video(self, file: File, duration: Option<std::time::Duration>) -> Self {
+        self.then(MessageSegment::video(file, duration))
     }
 
     #[must_use]
-    pub fn audio(self, file: File, length: Option<i32>) -> Self {
-        self.then(MessageSegment::audio(file, length))
+    pub fn audio(self, file: File, duration: Option<std::time::Duration>) -> Self {
+        self.then(MessageSegment::audio(file, duration))
     }
 
     #[must_use]
@@ -219,7 +201,10 @@ impl Message {
 
     #[must_use]
     pub fn media(self, kind: MediaType, media: Media) -> Self {
-        self.then(MessageSegment::Media { kind, media })
+        self.then(MessageSegment::Media {
+            kind,
+            media: Box::new(media),
+        })
     }
 
     #[must_use]
@@ -229,7 +214,7 @@ impl Message {
 
     #[must_use]
     pub fn layout(self, layout: RichLayout) -> Self {
-        self.then(MessageSegment::RichLayout(layout))
+        self.then(MessageSegment::Layout(layout))
     }
 
     #[must_use]
@@ -237,19 +222,22 @@ impl Message {
         self.then(MessageSegment::emoji(id))
     }
 
-    /// Iterates legacy file-backed image segments without a second enum match.
     pub fn image_files(&self) -> impl DoubleEndedIterator<Item = &File> {
         self.segments.iter().filter_map(|segment| match segment {
-            MessageSegment::Image { file: Some(file) } => Some(file),
+            MessageSegment::Media {
+                kind: MediaType::Image | MediaType::Animation,
+                media,
+            } => Some(&media.file),
             _ => None,
         })
     }
 
-    /// Iterates legacy file-backed document segments. Portable `Media` values
-    /// remain available through `segments_of::<Files>()`.
     pub fn attached_files(&self) -> impl DoubleEndedIterator<Item = &File> {
         self.segments.iter().filter_map(|segment| match segment {
-            MessageSegment::File { file: Some(file) } => Some(file),
+            MessageSegment::Media {
+                kind: MediaType::Document | MediaType::PlatformNative(_),
+                media,
+            } => Some(&media.file),
             _ => None,
         })
     }
@@ -262,10 +250,10 @@ impl Message {
     }
 
     pub fn reply_ids(&self) -> impl DoubleEndedIterator<Item = &str> {
-        self.segments.iter().filter_map(|segment| match segment {
-            MessageSegment::Reply { message_id } => Some(message_id.as_str()),
-            _ => None,
-        })
+        self.options
+            .reply
+            .iter()
+            .map(|reply| reply.message.id.as_str())
     }
 
     #[must_use]
@@ -286,9 +274,7 @@ impl Message {
     #[must_use]
     pub fn starts_with_text(&self, text: &str) -> bool {
         self.segments.first().is_some_and(|segment| match segment {
-            MessageSegment::Text { content } | MessageSegment::PlainText(content) => {
-                content.starts_with(text)
-            }
+            MessageSegment::Text { content } => content.starts_with(text),
             MessageSegment::RichText(content) => content.text.starts_with(text),
             _ => false,
         })
@@ -299,7 +285,7 @@ impl Message {
         let mut segments = self.segments.clone();
         for segment in &mut segments {
             match segment {
-                MessageSegment::Text { content } | MessageSegment::PlainText(content) => {
+                MessageSegment::Text { content } => {
                     if content.starts_with(text) {
                         *content = content.trim_start_matches(text).to_owned();
                         break;
@@ -395,7 +381,6 @@ impl Message {
     pub fn is_related_to_user(&self, user_id: &str) -> bool {
         self.segments.iter().any(|segment| match segment {
             MessageSegment::At { user_id: id } => id == user_id,
-            MessageSegment::Reply { message_id } => message_id.starts_with(user_id),
             _ => false,
         })
     }
@@ -415,12 +400,6 @@ impl Message {
         let mut degradations = Vec::new();
 
         for (index, segment) in self.segments.iter().enumerate() {
-            if let MessageSegment::Components(components) = segment {
-                if message.options.components.is_none() {
-                    message.options.components = Some(components.clone());
-                    continue;
-                }
-            }
             adapt_segment(
                 segment,
                 index,
@@ -460,20 +439,6 @@ impl Message {
         })
     }
 
-    /// Compatibility conversion for original 0.1.8 adapters. Every portable
-    /// segment is lowered to a stable legacy segment or message option. Callers
-    /// that need loss accounting must run [`Message::plan_for`] first.
-    pub fn try_into_legacy(
-        self,
-    ) -> Result<(Vec<MessageSegment>, MessageOptions), ContentConversionError> {
-        let mut segments = Vec::with_capacity(self.segments.len());
-        let mut options = self.options;
-        for segment in self.segments {
-            append_legacy_segment(segment, &mut segments, &mut options)?;
-        }
-        Ok((segments, options))
-    }
-
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         self.id
@@ -494,34 +459,19 @@ impl Message {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-// Boxing `Media` would break the stable public construction API. The enum only
-// crosses Clippy's default variant-size threshold on Windows, where `PathBuf`
-// and related platform values make the existing media representation larger.
-#[allow(clippy::large_enum_variant)]
 pub enum MessageSegment {
-    // Stable 0.1.8 variants.
     Text {
         content: String,
     },
-    Image {
-        file: Option<File>,
-    },
-    Video {
-        file: Option<File>,
-        length: Option<i32>,
-    },
-    Audio {
-        file: Option<File>,
-        length: Option<i32>,
-    },
-    File {
-        file: Option<File>,
-    },
-    Reply {
-        message_id: String,
-    },
+    RichText(RichText),
     At {
         user_id: String,
+    },
+    AtRole {
+        role_id: String,
+    },
+    AtChannel {
+        channel_id: String,
     },
     AtAll,
     Reference {
@@ -533,15 +483,6 @@ pub enum MessageSegment {
         url: String,
         image: Option<File>,
     },
-    Location {
-        latitude: f64,
-        longitude: f64,
-        title: String,
-        content: Option<String>,
-    },
-    Emoji {
-        id: String,
-    },
     ForwardNode {
         message_id: String,
     },
@@ -549,37 +490,18 @@ pub enum MessageSegment {
         user: Option<User>,
         message: Box<Message>,
     },
-    CustomString {
-        r#type: String,
-        data: String,
-    },
-    CustomValue {
-        r#type: String,
-        data: Value,
-    },
-
-    // Unified portable extensions.
-    PlainText(String),
-    RichText(RichText),
-    AtRole {
-        role_id: String,
-    },
-    AtChannel {
-        channel_id: String,
-    },
     Media {
         kind: MediaType,
-        media: Media,
+        media: Box<Media>,
     },
     MediaGallery(Vec<MediaGalleryItem>),
-    LocationContent(LocationContent),
+    Location(LocationContent),
     Contact(ContactCard),
-    CustomEmoji(CustomEmoji),
+    Emoji(CustomEmoji),
     Sticker(Sticker),
     Poll(Poll),
     Checklist(Checklist),
-    RichLayout(RichLayout),
-    Components(MessageComponents),
+    Layout(RichLayout),
     PlatformNative(PlatformNativeData),
 }
 
@@ -591,7 +513,6 @@ pub enum SegmentKind {
     Video,
     Audio,
     File,
-    Reply,
     MentionUser,
     MentionRole,
     MentionChannel,
@@ -606,39 +527,32 @@ pub enum SegmentKind {
     Poll,
     Checklist,
     Layout,
-    Components,
     PlatformNative,
-    Custom,
 }
 
 impl MessageSegment {
     #[must_use]
     pub fn kind(&self) -> SegmentKind {
         match self {
-            Self::Text { .. } | Self::PlainText(_) => SegmentKind::Text,
+            Self::Text { .. } => SegmentKind::Text,
             Self::RichText(_) => SegmentKind::RichText,
-            Self::Image { .. }
-            | Self::Media {
+            Self::Media {
                 kind: MediaType::Image | MediaType::Animation,
                 ..
             }
             | Self::MediaGallery(_) => SegmentKind::Image,
-            Self::Video { .. }
-            | Self::Media {
+            Self::Media {
                 kind: MediaType::Video | MediaType::VideoNote,
                 ..
             } => SegmentKind::Video,
-            Self::Audio { .. }
-            | Self::Media {
+            Self::Media {
                 kind: MediaType::Audio | MediaType::VoiceNote,
                 ..
             } => SegmentKind::Audio,
-            Self::File { .. }
-            | Self::Media {
+            Self::Media {
                 kind: MediaType::Document | MediaType::PlatformNative(_),
                 ..
             } => SegmentKind::File,
-            Self::Reply { .. } => SegmentKind::Reply,
             Self::At { .. } => SegmentKind::MentionUser,
             Self::AtRole { .. } => SegmentKind::MentionRole,
             Self::AtChannel { .. } => SegmentKind::MentionChannel,
@@ -646,16 +560,14 @@ impl MessageSegment {
             Self::Reference { .. } => SegmentKind::Reference,
             Self::ForwardNode { .. } | Self::ForwardCustomNode { .. } => SegmentKind::Forward,
             Self::Share { .. } => SegmentKind::Share,
-            Self::Location { .. } | Self::LocationContent(_) => SegmentKind::Location,
-            Self::Emoji { .. } | Self::CustomEmoji(_) => SegmentKind::Emoji,
+            Self::Location(_) => SegmentKind::Location,
+            Self::Emoji(_) => SegmentKind::Emoji,
             Self::Contact(_) => SegmentKind::Contact,
             Self::Sticker(_) => SegmentKind::Sticker,
             Self::Poll(_) => SegmentKind::Poll,
             Self::Checklist(_) => SegmentKind::Checklist,
-            Self::RichLayout(_) => SegmentKind::Layout,
-            Self::Components(_) => SegmentKind::Components,
+            Self::Layout(_) => SegmentKind::Layout,
             Self::PlatformNative(_) => SegmentKind::PlatformNative,
-            Self::CustomString { .. } | Self::CustomValue { .. } => SegmentKind::Custom,
         }
     }
 
@@ -668,34 +580,39 @@ impl MessageSegment {
 
     #[must_use]
     pub fn image(file: File) -> Self {
-        Self::Image { file: Some(file) }
-    }
-
-    #[must_use]
-    pub fn video(file: File, length: Option<i32>) -> Self {
-        Self::Video {
-            file: Some(file),
-            length,
+        Self::Media {
+            kind: MediaType::Image,
+            media: Box::new(Media::new(file)),
         }
     }
 
     #[must_use]
-    pub fn audio(file: File, length: Option<i32>) -> Self {
-        Self::Audio {
-            file: Some(file),
-            length,
+    pub fn video(file: File, duration: Option<std::time::Duration>) -> Self {
+        Self::Media {
+            kind: MediaType::Video,
+            media: Box::new(Media {
+                duration,
+                ..Media::new(file)
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn audio(file: File, duration: Option<std::time::Duration>) -> Self {
+        Self::Media {
+            kind: MediaType::Audio,
+            media: Box::new(Media {
+                duration,
+                ..Media::new(file)
+            }),
         }
     }
 
     #[must_use]
     pub fn file(file: File) -> Self {
-        Self::File { file: Some(file) }
-    }
-
-    #[must_use]
-    pub fn reply(message_id: impl Into<String>) -> Self {
-        Self::Reply {
-            message_id: message_id.into(),
+        Self::Media {
+            kind: MediaType::Document,
+            media: Box::new(Media::new(file)),
         }
     }
 
@@ -740,17 +657,24 @@ impl MessageSegment {
         title: T,
         content: Option<T>,
     ) -> Self {
-        Self::Location {
+        Self::Location(LocationContent {
             latitude,
             longitude,
-            title: title.into(),
-            content: content.map(Into::into),
-        }
+            title: Some(title.into()),
+            address: content.map(Into::into),
+            ..LocationContent::default()
+        })
     }
 
     #[must_use]
     pub fn emoji(id: impl Into<String>) -> Self {
-        Self::Emoji { id: id.into() }
+        Self::Emoji(CustomEmoji {
+            id: id.into(),
+            name: None,
+            fallback: None,
+            file: None,
+            platform_data: None,
+        })
     }
 
     #[must_use]
@@ -769,22 +693,6 @@ impl MessageSegment {
     }
 
     #[must_use]
-    pub fn custom_string<T: Into<String>>(r#type: T, data: T) -> Self {
-        Self::CustomString {
-            r#type: r#type.into(),
-            data: data.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn custom_value(r#type: impl Into<String>, data: Value) -> Self {
-        Self::CustomValue {
-            r#type: r#type.into(),
-            data,
-        }
-    }
-
-    #[must_use]
     pub fn kind_name(&self) -> &'static str {
         match self.kind() {
             SegmentKind::Text => "plain text",
@@ -793,7 +701,6 @@ impl MessageSegment {
             SegmentKind::Video => "video",
             SegmentKind::Audio => "audio",
             SegmentKind::File => "file",
-            SegmentKind::Reply => "reply",
             SegmentKind::MentionUser => "user mention",
             SegmentKind::MentionRole => "role mention",
             SegmentKind::MentionChannel => "channel mention",
@@ -808,15 +715,13 @@ impl MessageSegment {
             SegmentKind::Poll => "poll",
             SegmentKind::Checklist => "checklist",
             SegmentKind::Layout => "rich layout",
-            SegmentKind::Components => "message components",
             SegmentKind::PlatformNative => "platform-native content",
-            SegmentKind::Custom => "custom content",
         }
     }
 
     fn plain_text_len(&self) -> usize {
         match self {
-            Self::Text { content } | Self::PlainText(content) => content.len(),
+            Self::Text { content } => content.len(),
             Self::RichText(content) => content.text.len(),
             _ => self.fallback_text().map_or(0, |text| text.len()),
         }
@@ -824,7 +729,7 @@ impl MessageSegment {
 
     fn write_plain_text(&self, output: &mut String) {
         match self {
-            Self::Text { content } | Self::PlainText(content) => output.push_str(content),
+            Self::Text { content } => output.push_str(content),
             Self::RichText(content) => output.push_str(&content.text),
             _ => {
                 if let Some(text) = self.fallback_text() {
@@ -837,17 +742,8 @@ impl MessageSegment {
     #[must_use]
     pub fn fallback_text(&self) -> Option<String> {
         match self {
-            Self::Text { content } | Self::PlainText(content) => Some(content.clone()),
+            Self::Text { content } => Some(content.clone()),
             Self::RichText(content) => Some(content.text.clone()),
-            Self::Image { file }
-            | Self::Video { file, .. }
-            | Self::Audio { file, .. }
-            | Self::File { file } => Some(
-                file.as_ref()
-                    .map(|file| format!("[{}: {}]", self.kind_name(), file.name))
-                    .unwrap_or_else(|| format!("[{}]", self.kind_name())),
-            ),
-            Self::Reply { .. } => None,
             Self::At { user_id } => Some(format!("@{user_id}")),
             Self::AtRole { role_id } => Some(format!("@role:{role_id}")),
             Self::AtChannel { channel_id } => Some(format!("#channel:{channel_id}")),
@@ -864,22 +760,7 @@ impl MessageSegment {
                 Some(content) => format!("{title}\n{content}\n{url}"),
                 None => format!("{title}\n{url}"),
             }),
-            Self::Location {
-                latitude,
-                longitude,
-                title,
-                content,
-            } => Some(format!(
-                "{title}{} ({latitude}, {longitude})",
-                content
-                    .as_ref()
-                    .map(|value| format!(" — {value}"))
-                    .unwrap_or_default()
-            )),
-            Self::Emoji { id } => Some(format!(":{id}:")),
             Self::ForwardCustomNode { message, .. } => Some(message.extract_plain_text()),
-            Self::CustomString { data, .. } => Some(data.clone()),
-            Self::CustomValue { data, .. } => Some(data.to_string()),
             Self::Media { kind, media } => media
                 .caption
                 .as_ref()
@@ -887,7 +768,7 @@ impl MessageSegment {
                 .or_else(|| media.alt_text.clone())
                 .or_else(|| Some(format!("[{kind:?}: {}]", media.file.name))),
             Self::MediaGallery(items) => Some(format!("[media gallery: {} items]", items.len())),
-            Self::LocationContent(location) => Some(format!(
+            Self::Location(location) => Some(format!(
                 "{} ({}, {})",
                 location
                     .title
@@ -906,7 +787,7 @@ impl MessageSegment {
                     .map(|name| format!(" {name}"))
                     .unwrap_or_default()
             )),
-            Self::CustomEmoji(emoji) => emoji
+            Self::Emoji(emoji) => emoji
                 .fallback
                 .clone()
                 .or_else(|| emoji.name.clone())
@@ -917,11 +798,10 @@ impl MessageSegment {
                 .or_else(|| Some("[sticker]".to_owned())),
             Self::Poll(poll) => Some(render_poll(poll)),
             Self::Checklist(checklist) => Some(render_checklist(checklist)),
-            Self::RichLayout(layout) => layout
+            Self::Layout(layout) => layout
                 .fallback_text
                 .clone()
                 .or_else(|| Some("[rich layout]".to_owned())),
-            Self::Components(components) => Some(render_components(components)),
             Self::PlatformNative(_) => None,
         }
     }
@@ -929,19 +809,14 @@ impl MessageSegment {
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         match self {
-            Self::Text { content } | Self::PlainText(content) => content.len(),
+            Self::Text { content } => content.len(),
             Self::RichText(content) => content.text.len().saturating_add(
                 content
                     .spans
                     .len()
                     .saturating_mul(std::mem::size_of::<crate::content::TextSpan>()),
             ),
-            Self::Image { file }
-            | Self::Video { file, .. }
-            | Self::Audio { file, .. }
-            | Self::File { file } => file.as_ref().map_or(0, File::estimated_bytes),
-            Self::Reply { message_id }
-            | Self::Reference { message_id }
+            Self::Reference { message_id }
             | Self::ForwardNode { message_id }
             | Self::At {
                 user_id: message_id,
@@ -951,8 +826,7 @@ impl MessageSegment {
             }
             | Self::AtChannel {
                 channel_id: message_id,
-            }
-            | Self::Emoji { id: message_id } => message_id.len(),
+            } => message_id.len(),
             Self::AtAll => 0,
             Self::Share {
                 title,
@@ -964,18 +838,10 @@ impl MessageSegment {
                 .saturating_add(content.as_ref().map_or(0, String::len))
                 .saturating_add(url.len())
                 .saturating_add(image.as_ref().map_or(0, File::estimated_bytes)),
-            Self::Location { title, content, .. } => title
-                .len()
-                .saturating_add(content.as_ref().map_or(0, String::len))
-                .saturating_add(32),
             Self::ForwardCustomNode { user, message } => user
                 .as_ref()
                 .map_or(0, |user| user.id.len())
                 .saturating_add(message.estimated_bytes()),
-            Self::CustomString { r#type, data } => r#type.len().saturating_add(data.len()),
-            Self::CustomValue { r#type, data } => {
-                r#type.len().saturating_add(data.to_string().len())
-            }
             Self::Media { media, .. } => media.file.estimated_bytes().saturating_add(
                 media
                     .caption
@@ -1295,130 +1161,6 @@ impl fmt::Display for DeliveryPlanningError {
 
 impl Error for DeliveryPlanningError {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentConversionError {
-    pub kind: String,
-}
-
-impl fmt::Display for ContentConversionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "message content {:?} cannot be converted",
-            self.kind
-        )
-    }
-}
-
-impl Error for ContentConversionError {}
-
-fn append_legacy_segment(
-    segment: MessageSegment,
-    output: &mut Vec<MessageSegment>,
-    options: &mut MessageOptions,
-) -> Result<(), ContentConversionError> {
-    match segment {
-        MessageSegment::PlainText(content) => output.push(MessageSegment::text(content)),
-        MessageSegment::RichText(content) => output.push(MessageSegment::text(content.text)),
-        MessageSegment::AtRole { role_id } => {
-            output.push(MessageSegment::text(format!("@role:{role_id}")));
-        }
-        MessageSegment::AtChannel { channel_id } => {
-            output.push(MessageSegment::text(format!("#channel:{channel_id}")));
-        }
-        MessageSegment::Media { kind, media } => {
-            let length = media
-                .duration
-                .and_then(|duration| i32::try_from(duration.as_secs()).ok());
-            match kind {
-                MediaType::Image | MediaType::Animation => {
-                    output.push(MessageSegment::image(media.file));
-                }
-                MediaType::Video | MediaType::VideoNote => {
-                    output.push(MessageSegment::video(media.file, length));
-                }
-                MediaType::Audio | MediaType::VoiceNote => {
-                    output.push(MessageSegment::audio(media.file, length));
-                }
-                MediaType::Document => output.push(MessageSegment::file(media.file)),
-                MediaType::PlatformNative(kind) => {
-                    output.push(MessageSegment::CustomValue {
-                        r#type: kind,
-                        data: serde_json::to_value(media).map_err(|_| ContentConversionError {
-                            kind: "platform-native media".to_owned(),
-                        })?,
-                    });
-                }
-            }
-        }
-        MessageSegment::MediaGallery(items) => {
-            for item in items {
-                append_legacy_segment(
-                    MessageSegment::Media {
-                        kind: item.kind,
-                        media: item.media,
-                    },
-                    output,
-                    options,
-                )?;
-            }
-        }
-        MessageSegment::LocationContent(location) => {
-            let LocationContent {
-                latitude,
-                longitude,
-                title,
-                address,
-                ..
-            } = location;
-            output.push(MessageSegment::location(
-                latitude,
-                longitude,
-                title.unwrap_or_default(),
-                address,
-            ));
-        }
-        MessageSegment::Contact(contact) => {
-            output.push(MessageSegment::text(
-                MessageSegment::Contact(contact)
-                    .fallback_text()
-                    .unwrap_or_else(|| "[contact]".to_owned()),
-            ));
-        }
-        MessageSegment::CustomEmoji(emoji) => output.push(MessageSegment::emoji(emoji.id)),
-        MessageSegment::Sticker(sticker) => {
-            if let Some(file) = sticker.file {
-                output.push(MessageSegment::image(file));
-            } else if let Some(emoji) = sticker.emoji {
-                output.push(MessageSegment::text(emoji));
-            } else {
-                output.push(MessageSegment::text("[sticker]"));
-            }
-        }
-        MessageSegment::Poll(poll) => output.push(MessageSegment::text(render_poll(&poll))),
-        MessageSegment::Checklist(checklist) => {
-            output.push(MessageSegment::text(render_checklist(&checklist)));
-        }
-        MessageSegment::RichLayout(layout) => output.push(MessageSegment::text(
-            layout
-                .fallback_text
-                .unwrap_or_else(|| "[rich layout]".to_owned()),
-        )),
-        MessageSegment::Components(components) => {
-            options.components = Some(components);
-        }
-        MessageSegment::PlatformNative(data) => {
-            let PlatformNativeData { platform, data } = data;
-            output.push(MessageSegment::CustomValue {
-                r#type: format!("platform:{platform}"),
-                data,
-            });
-        }
-        segment => output.push(segment),
-    }
-    Ok(())
-}
-
 fn adapt_segment(
     segment: &MessageSegment,
     index: usize,
@@ -1446,9 +1188,7 @@ fn adapt_segment(
                 path,
                 feature,
                 kind: DegradationKind::Emulated,
-                detail:
-                    "feature will be represented through the adapter's portable compatibility path"
-                        .to_owned(),
+                detail: "feature will use the adapter's portable representation".to_owned(),
             });
             return Ok(());
         }
@@ -1509,7 +1249,7 @@ fn option_is_supported(
                 path: path.to_owned(),
                 feature: feature.to_owned(),
                 kind: DegradationKind::Emulated,
-                detail: "delivery option will be represented through the adapter's portable compatibility path".to_owned(),
+                detail: "delivery option will use the adapter's portable representation".to_owned(),
             });
             true
         }
@@ -1868,14 +1608,10 @@ fn segment_limit_violation(
 
 fn segment_files(segment: &MessageSegment) -> Vec<&File> {
     match segment {
-        MessageSegment::Image { file }
-        | MessageSegment::Video { file, .. }
-        | MessageSegment::Audio { file, .. }
-        | MessageSegment::File { file } => file.iter().collect(),
         MessageSegment::Share { image, .. } => image.iter().collect(),
         MessageSegment::Media { media, .. } => vec![&media.file],
         MessageSegment::MediaGallery(items) => items.iter().map(|item| &item.media.file).collect(),
-        MessageSegment::CustomEmoji(emoji) => emoji.file.iter().collect(),
+        MessageSegment::Emoji(emoji) => emoji.file.iter().collect(),
         MessageSegment::Sticker(sticker) => sticker.file.iter().collect(),
         _ => Vec::new(),
     }
@@ -1892,12 +1628,8 @@ fn mime_matches(allowed: &str, actual: &str) -> bool {
 fn segment_support(segment: &MessageSegment, capabilities: &BotCapabilities) -> SupportLevel {
     let content = &capabilities.content;
     match segment {
-        MessageSegment::Text { .. } | MessageSegment::PlainText(_) => content.plain_text,
+        MessageSegment::Text { .. } => content.plain_text,
         MessageSegment::RichText(_) => content.rich_text,
-        MessageSegment::Image { .. } => content.images,
-        MessageSegment::Video { .. } => content.video,
-        MessageSegment::Audio { .. } => content.audio,
-        MessageSegment::File { .. } => content.files,
         MessageSegment::Media { kind, media } => {
             let support = match kind {
                 MediaType::Image => content.images,
@@ -1916,8 +1648,7 @@ fn segment_support(segment: &MessageSegment, capabilities: &BotCapabilities) -> 
             }
         }
         MessageSegment::MediaGallery(_) => content.media_galleries,
-        MessageSegment::Location { .. } => content.location,
-        MessageSegment::LocationContent(location) => {
+        MessageSegment::Location(location) => {
             if content.location == SupportLevel::Native
                 && (location.horizontal_accuracy.is_some()
                     || location.live_period.is_some()
@@ -1931,7 +1662,7 @@ fn segment_support(segment: &MessageSegment, capabilities: &BotCapabilities) -> 
             }
         }
         MessageSegment::Contact(_) => content.contacts,
-        MessageSegment::CustomEmoji(_) | MessageSegment::Emoji { .. } => content.custom_emoji,
+        MessageSegment::Emoji(_) => content.custom_emoji,
         MessageSegment::Sticker(_) => content.stickers,
         MessageSegment::Poll(poll) => {
             if matches!(poll.kind, crate::content::PollType::Quiz) {
@@ -1941,13 +1672,8 @@ fn segment_support(segment: &MessageSegment, capabilities: &BotCapabilities) -> 
             }
         }
         MessageSegment::Checklist(_) => content.checklists,
-        MessageSegment::RichLayout(_) => content.rich_layout,
-        MessageSegment::Components(components) => component_support(components, capabilities),
+        MessageSegment::Layout(_) => content.rich_layout,
         MessageSegment::PlatformNative(_) => content.platform_native,
-        MessageSegment::CustomString { .. } | MessageSegment::CustomValue { .. } => {
-            content.custom_content
-        }
-        MessageSegment::Reply { .. } => capabilities.delivery.replies,
         MessageSegment::Reference { .. }
         | MessageSegment::ForwardNode { .. }
         | MessageSegment::ForwardCustomNode { .. } => capabilities.collaboration.forwarding,
@@ -1981,19 +1707,6 @@ fn component_count(components: &MessageComponents) -> usize {
         MessageComponents::RemoveReplyKeyboard { .. }
         | MessageComponents::ForceReply { .. }
         | MessageComponents::PlatformNative(_) => 1,
-    }
-}
-
-fn component_support(
-    components: &MessageComponents,
-    capabilities: &BotCapabilities,
-) -> SupportLevel {
-    match components {
-        MessageComponents::InlineKeyboard(_) => capabilities.components.inline_keyboard,
-        MessageComponents::ReplyKeyboard(_)
-        | MessageComponents::RemoveReplyKeyboard { .. }
-        | MessageComponents::ForceReply { .. } => capabilities.components.reply_keyboard,
-        MessageComponents::PlatformNative(_) => capabilities.components.platform_native,
     }
 }
 
@@ -2069,12 +1782,7 @@ fn split_for_media_limit(message: Message, limit: Option<usize>) -> Vec<Message>
 
 fn media_units(segment: &MessageSegment) -> usize {
     match segment {
-        MessageSegment::Image { .. }
-        | MessageSegment::Video { .. }
-        | MessageSegment::Audio { .. }
-        | MessageSegment::File { .. }
-        | MessageSegment::Media { .. }
-        | MessageSegment::Sticker(_) => 1,
+        MessageSegment::Media { .. } | MessageSegment::Sticker(_) => 1,
         MessageSegment::Share { image, .. } => {
             if image.is_some() {
                 1
@@ -2150,9 +1858,7 @@ fn split_for_text_limit(message: Message, limit: Option<usize>) -> Vec<Message> 
 
 fn text_character_len(segment: &MessageSegment) -> usize {
     match segment {
-        MessageSegment::Text { content } | MessageSegment::PlainText(content) => {
-            content.chars().count()
-        }
+        MessageSegment::Text { content } => content.chars().count(),
         MessageSegment::RichText(content) => content.text.chars().count(),
         _ => 0,
     }
@@ -2163,9 +1869,6 @@ fn slice_text_segment(segment: &MessageSegment, start: usize, end: usize) -> Mes
         MessageSegment::Text { content } => MessageSegment::Text {
             content: slice_chars(content, start, end).to_owned(),
         },
-        MessageSegment::PlainText(content) => {
-            MessageSegment::PlainText(slice_chars(content, start, end).to_owned())
-        }
         MessageSegment::RichText(content) => {
             let (byte_start, byte_end) = char_range_to_bytes(&content.text, start, end);
             let spans = content
@@ -2289,7 +1992,7 @@ impl File {
         Ok(file)
     }
 
-    pub async fn try_from_url(url: &str) -> anyhow::Result<Self> {
+    pub fn try_from_url(url: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(url.contains("://"), "invalid URL");
         Ok(Self::from_url(url))
     }
@@ -2360,19 +2063,4 @@ impl File {
             + self.mime.as_ref().map_or(0, String::len)
             + 64
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Folder {
-    pub id: String,
-    pub name: String,
-    pub file_amount: u64,
-    pub children: Vec<FsNode>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum FsNode {
-    File(File),
-    Folder(Folder),
-    Unknown,
 }

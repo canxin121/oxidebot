@@ -11,11 +11,10 @@ use crate::{
     collaboration::ReactionSummary,
     conversation::{ConversationRef, MessageRef, MessageTarget},
     interaction::{ActionRow, PlatformNativeData},
-    source::{message::File, user::User},
-};
-
-pub use crate::source::message::{
-    ContentConversionError, Message as OutgoingMessage, MessageSegment as MessageContent,
+    source::{
+        message::{File, Message, MessageSegment},
+        user::User,
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -409,7 +408,7 @@ pub struct MessageEnvelope {
     pub conversation: Option<ConversationRef>,
     pub created_at: Option<DateTime<Utc>>,
     pub edited_at: Option<DateTime<Utc>>,
-    pub content: Vec<MessageContent>,
+    pub content: Vec<MessageSegment>,
     pub reply_to: Option<MessageRef>,
     pub reply_context: Option<ReplyContext>,
     pub forwarded_from: Option<MessageRef>,
@@ -486,7 +485,7 @@ impl Default for ForwardOptions {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchMessage {
     pub target: MessageTarget,
-    pub message: OutgoingMessage,
+    pub message: Message,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

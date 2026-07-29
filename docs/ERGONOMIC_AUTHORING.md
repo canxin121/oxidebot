@@ -60,7 +60,7 @@ For subcommands, derive `BotCommand` on an enum and attach handlers with
 ## State, event data, and immediate sends
 
 Handlers ask only for the values they use. Common extractors include
-`State<T>`, `Sender`, `Group`, `Context<S>`, `MessageContext`, `Messenger`,
+`State<T>`, `Sender`, `Conversation`, `Context<S>`, `MessageContext`, `Messenger`,
 `Dialogue`, and `I18n`:
 
 ```rust

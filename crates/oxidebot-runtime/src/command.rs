@@ -2369,16 +2369,8 @@ impl FromCommandValue for String {
 impl FromCommandValue for File {
     fn from_command_value(value: CommandValue) -> Result<Self, CommandParseError> {
         match value {
-            CommandValue::File(file)
-            | CommandValue::Form(FormValue::File(file))
-            | CommandValue::Segment(MessageSegment::File { file: Some(file) })
-            | CommandValue::Segment(MessageSegment::Image { file: Some(file) })
-            | CommandValue::Segment(MessageSegment::Video {
-                file: Some(file), ..
-            })
-            | CommandValue::Segment(MessageSegment::Audio {
-                file: Some(file), ..
-            }) => Ok(file),
+            CommandValue::File(file) | CommandValue::Form(FormValue::File(file)) => Ok(file),
+            CommandValue::Segment(MessageSegment::Media { media, .. }) => Ok(media.file),
             other => Err(CommandParseError::UnexpectedValue {
                 expected: "file",
                 actual: value_kind(&other),
@@ -2710,9 +2702,6 @@ pub struct CommandMatch {
     source: CommandSource,
     locale: Option<Arc<str>>,
 }
-
-/// Backwards-compatible name for the unified command match.
-pub type CommandResult = CommandMatch;
 
 impl CommandMatch {
     #[must_use]
@@ -3490,7 +3479,7 @@ pub fn tokenize_segments(
     let mut output = Vec::new();
     for segment in segments {
         match segment {
-            MessageSegment::Text { content } | MessageSegment::PlainText(content) => {
+            MessageSegment::Text { content } => {
                 output.extend(tokenize_text(content)?.into_iter().map(CommandValue::Text));
             }
             MessageSegment::RichText(content) => {
@@ -3501,15 +3490,8 @@ pub fn tokenize_segments(
                 );
             }
             MessageSegment::At { user_id } => output.push(CommandValue::Mention(user_id.clone())),
-            MessageSegment::File { file: Some(file) }
-            | MessageSegment::Image { file: Some(file) }
-            | MessageSegment::Video {
-                file: Some(file), ..
-            }
-            | MessageSegment::Audio {
-                file: Some(file), ..
-            } => {
-                output.push(CommandValue::File(file.clone()));
+            MessageSegment::Media { media, .. } => {
+                output.push(CommandValue::File(media.file.clone()));
             }
             other => output.push(CommandValue::Segment(other.clone())),
         }
@@ -3762,7 +3744,7 @@ impl CommandRenderer for CatalogCommandRenderer {
             CommandOutput::Suggestions { .. } => ("suggestions", BTreeMap::new()),
             CommandOutput::Message(_) => unreachable!(),
         };
-        values.insert(Arc::from("body"), TemplateValue::Message(fallback.clone()));
+        values.insert(Arc::from("body"), TemplateValue::from(fallback.clone()));
         self.catalog
             .render(locale, &self.key(suffix), &values)
             .unwrap_or(fallback)
@@ -3908,9 +3890,9 @@ impl CommandCatalog {
         DefaultCommandRenderer.render(&self.output(query), locale)
     }
 
-    /// Compatibility helper for applications that still need plain text.
+    /// Renders the catalog as plain text.
     #[must_use]
-    pub fn render(&self, query: Option<&str>) -> String {
+    pub fn render_text(&self, query: Option<&str>) -> String {
         self.render_message(query, None).get_raw_text()
     }
 

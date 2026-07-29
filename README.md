@@ -1,17 +1,14 @@
 # OxideBot
 
 OxideBot is a high-performance, platform-neutral bot framework built around one
-complete semantic model: the restored **0.1.8 `Event` hierarchy**, one extended
-cross-platform `Message` / `MessageSegment` intermediate representation, and
-the full `CallApiTrait` API. The stable 0.1.8 message variants remain available,
-but rich text, media, components, polls, layouts, and native segments now use
-the same message value instead of parallel models.
+complete semantic model: one `Event` hierarchy, one cross-platform `Message`
+intermediate representation, and one canonical `CallApiTrait` adapter boundary.
+Text, rich text, media, polls, layouts, components, and platform-native content
+all travel through that same model.
 
-The authoring layer keeps the parts of Axum that are genuinely useful outside
-HTTP—ordinary async functions, typed extraction, composable application
-modules, and explicit effects—without importing Web-only concepts such as
-requests, responses, URL trees, nested routes, Tower layers, request
-extensions, or middleware continuation objects.
+The authoring layer uses ordinary async functions, typed extraction,
+composable application modules, and explicit effects. Bot-domain concepts stay
+visible from adapter ingress through handler output.
 
 The application model is deliberately small:
 
@@ -19,9 +16,8 @@ The application model is deliberately small:
 Adapter -> Event -> Module match -> typed Extract -> async fn -> Outcome / API calls
 ```
 
-There is no reduced “simple event”, no `RichEvent`, no second API, and no
-compatibility event bus. Every handler reads the same shared 0.1.8 event that
-adapters decode.
+There is no reduced “simple event”, no `RichEvent`, and no second API or event
+bus. Every handler reads the same shared event that adapters decode.
 
 ## Run a bot immediately
 
@@ -130,13 +126,13 @@ A handler declares exactly the event data it needs:
 ```rust
 async fn greet(
     Sender(user): Sender,
-    MaybeGroup(group): MaybeGroup,
+    MaybeConversation(conversation): MaybeConversation,
     Text(text): Text,
 ) -> Message {
-    let location = group
+    let location = conversation
         .as_ref()
-        .map(|group| format!("group {}", group.id))
-        .unwrap_or_else(|| "private chat".to_owned());
+        .map(|conversation| format!("conversation {}", conversation.id))
+        .unwrap_or_else(|| "platform event".to_owned());
 
     Message::text("Hello ")
         .at(user.id)
@@ -146,10 +142,10 @@ async fn greet(
 
 Built-in extractors include:
 
-- `Text`, `Segments`, `Sender`, `ChatGroup`, `MaybeGroup`, `MessageId`, and
+- `Text`, `Segments`, `Sender`, `Conversation`, `MaybeConversation`, `MessageId`, and
   `Target`;
 - root `State<S>` and the common `Context<S>`;
-- typed command `Args<T>` and raw `CommandResult`;
+- typed command `Args<T>` and raw `CommandMatch`;
 - `Bot`, `Reply`, and `Dialogue`;
 - `EventContext<tags::...>`, `BotIdentity`, `EventId`, and `ShutdownSignal`.
 
@@ -203,7 +199,7 @@ impl Extract<AppState> for CurrentProject {
 ```
 
 Optional data is represented by explicit domain extractors such as
-`MaybeGroup`. A generic `Option<T>` extractor is intentionally absent because
+`MaybeConversation`. A generic `Option<T>` extractor is intentionally absent because
 it would turn permission, parsing, API, and configuration failures into
 indistinguishable `None` values.
 
@@ -310,7 +306,7 @@ fn moderation_module() -> Module<AppState> {
 let features = Module::new()
     .include(account_module())
     .include(moderation_module())
-    .on(tags::GroupMemberIncrease, welcome_member)
+    .on(tags::GroupMemberJoined, welcome_member)
     .interaction("settings.save", save_settings)
     .native("vendor.special_event", native_event)
     .after(trace_outcome)
@@ -319,7 +315,7 @@ let features = Module::new()
 
 `include` preserves registration order and flattens behavior into the same
 compiled route tables. It does not add a command prefix, create nesting, start a
-plugin runtime, or introduce another event bus. Multi-word command paths are
+runtime, or introduce another event bus. Multi-word command paths are
 written explicitly because they are command syntax, not nested routes.
 
 Module-wide guards and hooks are declaration-order independent:
@@ -357,22 +353,21 @@ let admin = moderation_module()
     .after(finished);
 ```
 
-There is no `Request`, `Response`, `Next`, `from_fn`, `layer`, or
-`route_layer`. Bot concerns are expressed directly:
+Bot concerns are expressed directly:
 
 - `guard` for permission, rate-limit, chat-type, and feature admission;
 - `before` for pre-handler observation or preparation;
 - `after` for observing or transforming produced effects.
 
 Parent module guards and hooks apply to included modules regardless of whether
-they are declared before or after `include`, eliminating Tower-style ordering
-traps. See [docs/MODULES.md](docs/MODULES.md).
+they are declared before or after `include`, eliminating ordering traps. See
+[docs/MODULES.md](docs/MODULES.md).
 
 ## One message IR, delivery planning, and receipts
 
 All inbound events, handler results, active sends, command tokenization, and
-adapter export use the same `Message`. Stable 0.1.8 constructors remain the
-shortest path, while portable rich segments live in the same enum:
+adapter export use the same `Message`. Concise constructors and rich segments
+produce the same canonical enum:
 
 ```rust
 let message = Message::text("Hello ")
@@ -509,11 +504,10 @@ Choice prompts carry buttons in the unified message IR and retain numbered text
 fallbacks for platforms without components. Dialogues use the existing bounded
 session registry and exact bot, conversation, actor, and namespace keys.
 
-## Alconna-inspired authoring capabilities
+## Command authoring capabilities
 
-The remaining useful ideas from plugin-alconna are integrated into the same
-`Message`, `Command`, `CommandMatch`, and `Module` pipeline rather than exposed
-as another matcher or plugin runtime.
+Shortcuts, rewriting, completion, and structured output are integrated into the
+same `Message`, `Command`, `CommandMatch`, and `Module` pipeline.
 
 ### Shortcuts and command rewriting
 
@@ -530,8 +524,7 @@ let roll = RollArgs::command("roll")
     );
 ```
 
-Application-wide natural-language or migration rules use a bounded
-`CommandRewriter`:
+Application-wide natural-language rewrites use a bounded `CommandRewriter`:
 
 ```rust
 let app = OxideBot::with_state(state)
@@ -784,24 +777,19 @@ bounded registry.
 
 ## Complete event and API access
 
-Typed handlers can use a concrete view of the original event allocation:
+Typed handlers can use a concrete view of the shared event allocation:
 
 ```rust
 async fn joined(
-    event: EventContext<tags::GroupMemberIncrease>,
-    bot: Bot,
-) -> HandlerResult<()> {
-    bot.send_message(
-        vec![MessageSegment::text(format!("Welcome {}", event.user.id))],
-        oxidebot::api::payload::SendMessageTarget::Group(event.group.id.clone()),
-    )
-    .await
-    .map(|_| ())
-    .api_context("welcome new group member")
+    event: EventContext<tags::GroupMemberJoined>,
+) -> Message {
+    Message::text("Welcome ")
+        .at(event.user.id.clone())
+        .then(format!(" to {}", event.conversation.id))
 }
 ```
 
-`EventContext<Tag>` dereferences to the concrete tagged 0.1.8 payload and
+`EventContext<Tag>` dereferences to the concrete tagged payload and
 exposes the event ID, bot identity, complete bot API, and shutdown signal. State
 stays explicit: ask for `State<AppState>` or `Context<AppState>` as another
 handler argument. `Bot` dereferences to the complete `CallApiTrait`, including
@@ -826,7 +814,7 @@ let project = repository
     .await
     .internal("load project")?;
 
-bot.delete_message(message_id)
+bot.delete_message_ref(oxidebot::core::MessageRef::new(message_id))
     .await
     .api_context("delete progress message")?;
 ```
@@ -841,7 +829,7 @@ policy.
 The unified IR also drives the higher-level facilities that make large bot
 projects practical:
 
-- `Shortcut` and `CommandRewriter<S>` for bounded literal, regex, legacy, or
+- `Shortcut` and `CommandRewriter<S>` for bounded literal, regex, or
   natural-language command rewrites;
 - `#[oxidebot::branch(...)]` for separately implemented command-tree
   branches without exposing marker plumbing or reparsing;
@@ -859,8 +847,7 @@ projects practical:
   command administration, and diagnostics.
 
 These are all ordinary Rust values or traits attached before `build`; none of
-them introduces a second plugin runtime or a global mutable extension table.
-See [the domain-native Alconna design notes](docs/ALCONNA-DESIGN.md).
+them introduces a second runtime or a global mutable extension table.
 
 ## Concise deterministic tests
 
@@ -921,8 +908,8 @@ use oxidebot::adapter::prelude::*;
 use oxidebot::standard::*;
 ```
 
-Framework and migration work that intentionally needs every public type may use
-`oxidebot::all::*`.
+Adapter and framework work should import the required focused module or the
+`oxidebot::core` / `oxidebot::runtime` crate re-exports explicitly.
 
 ## Grouped runtime configuration
 
@@ -970,12 +957,16 @@ context
     .await?;
 ```
 
-For richer sender/group metadata, build a `MessageFrame`:
+For richer sender metadata and an explicit conversation kind, build a `MessageFrame`:
 
 ```rust
-let frame = MessageFrameBuilder::new(event_id, channel_id, user.id.clone(), message)
+let frame = MessageFrameBuilder::new(
+    event_id,
+    ConversationRef::group(channel_id),
+    user.id.clone(),
+    message,
+)
     .sender(user)
-    .group(group)
     .build();
 
 context.submit(frame).await?;
@@ -988,7 +979,7 @@ wire-format offsets and preserve the earliest possible interest rejection.
 
 The smaller authoring API still compiles into the existing bounded runtime:
 
-- a stable 53-slot dense event table;
+- a 52-slot dense event table;
 - exact command, interaction, and native-key indexes;
 - pre-decode interest filtering;
 - one shared `Arc<Event>` payload per admitted event;
@@ -1008,7 +999,7 @@ The smaller authoring API still compiles into the existing bounded runtime:
 
 ## Workspace
 
-- `oxidebot-core`: complete 0.1.8 events, messages, content models, and API;
+- `oxidebot-core`: canonical events, messages, content models, and adapter API;
 - `oxidebot-macros`: command, branch, state, and typed dialogue-form macros;
 - `oxidebot-runtime`: modules, extractors, commands, compiled dispatch, bounded
   queues, sessions, and supervision;
@@ -1022,11 +1013,5 @@ Additional documentation:
 
 - [Module and handler model](docs/MODULES.md)
 - [Command system](docs/COMMANDS.md)
-- [Migration from the Web-shaped draft API](docs/MIGRATION.md)
 - [Runtime architecture](ARCHITECTURE.md)
-- [Domain-native Alconna-inspired facilities](docs/ALCONNA-DESIGN.md)
-
-
-## Documentation
-
 - [Ergonomic authoring guide](docs/ERGONOMIC_AUTHORING.md)

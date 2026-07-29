@@ -8,9 +8,9 @@
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use oxidebot_core::{
-    api::{payload::SendMessageTarget, response::SendMessageResponse},
-    source::message::{Message, MessageSegment},
-    BotId, CallApiTrait, EventId, PlatformId,
+    source::message::{DeliveryItemResult, DeliveryPlan, DeliveryReport},
+    BotCapabilities, BotId, CallApiTrait, ConversationRef, EventId, MessageRef, MessageTarget,
+    PlatformId, SupportLevel,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -79,22 +79,43 @@ pub struct ConsoleApi {
 
 #[async_trait]
 impl CallApiTrait for ConsoleApi {
-    async fn send_message(
+    fn bot_capabilities(&self) -> BotCapabilities {
+        let mut capabilities = BotCapabilities::default();
+        capabilities.content.plain_text = SupportLevel::Native;
+        capabilities.delivery.replies = SupportLevel::Native;
+        capabilities.conversations.direct = SupportLevel::Native;
+        capabilities
+    }
+
+    async fn send_delivery_plan(
         &self,
-        message: Vec<MessageSegment>,
-        target: SendMessageTarget,
-    ) -> AnyResult<Vec<SendMessageResponse>> {
-        let message = Message::from(message);
-        let rendered = message.get_raw_text();
-        if rendered.is_empty() {
-            println!("[bot -> {target:?}] {message:?}");
-        } else {
-            println!("[bot -> {target:?}] {rendered}");
+        target: MessageTarget,
+        plan: DeliveryPlan,
+    ) -> AnyResult<DeliveryReport> {
+        let mut messages = Vec::with_capacity(plan.messages.len());
+        let mut items = Vec::with_capacity(plan.messages.len());
+        for (index, message) in plan.messages.into_iter().enumerate() {
+            let rendered = message.get_raw_text();
+            if rendered.is_empty() {
+                println!("[bot -> {target:?}] {message:?}");
+            } else {
+                println!("[bot -> {target:?}] {rendered}");
+            }
+            let id = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
+            let sent = MessageRef::new(format!("console-{id}"))
+                .in_conversation(target.conversation.clone());
+            messages.push(sent.clone());
+            items.push(DeliveryItemResult {
+                index,
+                messages: vec![sent],
+                error: None,
+            });
         }
-        let id = self.next_message.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(vec![SendMessageResponse {
-            sent_message_id: format!("console-{id}"),
-        }])
+        Ok(DeliveryReport {
+            messages,
+            degradations: plan.degradations,
+            items,
+        })
     }
 }
 
@@ -168,7 +189,7 @@ impl Adapter for ConsoleAdapter {
                         .map_err(|error| AdapterError::new(error.to_string()))?;
                     context.submit_text(
                         event_id,
-                        self.config.conversation_id.clone(),
+                        ConversationRef::direct(self.config.conversation_id.clone()),
                         self.config.user_id.clone(),
                         format!("console-message-{sequence}"),
                         line,

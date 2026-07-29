@@ -5,40 +5,34 @@
 //! indexes and bounded dispatch records live in the hidden [`kernel`] module;
 //! they are implementation details rather than a second event taxonomy.
 
-use std::any::Any;
-
-pub mod any;
 #[doc(hidden)]
 pub mod kernel;
 pub mod lifecycle;
 pub mod message;
 pub mod meta;
+pub mod native;
 pub mod notice;
 pub mod request;
 
 pub use crate::interaction::InteractionEvent;
-pub use any::{AnyEvent, AnyEventDataObject, AnyEventDataTrait};
-pub use lifecycle::{EventEnvelope, LifecycleEvent};
+pub use lifecycle::LifecycleEvent;
 pub use message::MessageEvent;
 pub use meta::MetaEvent;
+pub use native::{NativeEvent, NativeEventData, NativeEventPayload};
 pub use notice::*;
 pub use request::*;
 
 /// The complete OxideBot event hierarchy.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
-#[allow(
-    clippy::enum_variant_names,
-    reason = "variant names preserve the public 0.1.8 event model"
-)]
 pub enum Event {
-    MessageEvent(MessageEvent),
-    NoticeEvent(NoticeEvent),
-    RequestEvent(RequestEvent),
-    InteractionEvent(InteractionEvent),
-    LifecycleEvent(LifecycleEvent),
-    MetaEvent(MetaEvent),
-    AnyEvent(AnyEvent),
+    Message(MessageEvent),
+    Notice(NoticeEvent),
+    Request(RequestEvent),
+    Interaction(InteractionEvent),
+    Lifecycle(LifecycleEvent),
+    Meta(MetaEvent),
+    Native(NativeEvent),
 }
 
 impl Event {
@@ -47,30 +41,26 @@ impl Event {
     #[must_use]
     pub const fn event_type(&self) -> EventType {
         match self {
-            Self::MessageEvent(_) => EventType::Message,
-            Self::NoticeEvent(event) => match event {
-                NoticeEvent::GroupMemberIncreaseEvent(_) => EventType::NoticeGroupMemberIncrease,
-                NoticeEvent::GroupMemberDecreaseEvent(_) => EventType::NoticeGroupMemberDecrease,
-                NoticeEvent::GroupAdminChangeEvent(_) => EventType::NoticeGroupAdminChange,
-                NoticeEvent::GroupMuteChangeEvent(_) => EventType::NoticeGroupMuteChange,
-                NoticeEvent::GroupMemberMuteChangeEvent(_) => {
-                    EventType::NoticeGroupMemberMuteChange
-                }
-                NoticeEvent::GroupHighlightChangeEvent(_) => EventType::NoticeGroupHighlightChange,
-                NoticeEvent::GroupMemberAliasChangeEvent(_) => {
-                    EventType::NoticeGroupMemberAliasChange
-                }
-                NoticeEvent::MessageReactionsEvent(_) => EventType::NoticeMessageReactions,
-                NoticeEvent::MessageDeletedEvent(_) => EventType::NoticeMessageDeleted,
-                NoticeEvent::MessageEditedEvent(_) => EventType::NoticeMessageEdited,
+            Self::Message(_) => EventType::Message,
+            Self::Notice(event) => match event {
+                NoticeEvent::GroupMemberJoined(_) => EventType::GroupMemberJoined,
+                NoticeEvent::GroupMemberLeft(_) => EventType::GroupMemberLeft,
+                NoticeEvent::GroupAdminChanged(_) => EventType::GroupAdminChanged,
+                NoticeEvent::GroupMuteChanged(_) => EventType::GroupMuteChanged,
+                NoticeEvent::GroupMemberMuteChanged(_) => EventType::GroupMemberMuteChanged,
+                NoticeEvent::GroupHighlightChanged(_) => EventType::GroupHighlightChanged,
+                NoticeEvent::GroupMemberAliasChanged(_) => EventType::GroupMemberAliasChanged,
+                NoticeEvent::MessageReactionsChanged(_) => EventType::MessageReactionsChanged,
+                NoticeEvent::MessageDeleted(_) => EventType::MessageDeleted,
+                NoticeEvent::MessageEdited(_) => EventType::MessageEdited,
             },
-            Self::RequestEvent(event) => match event {
-                RequestEvent::FriendAddEvent(_) => EventType::RequestFriendAdd,
-                RequestEvent::GroupAddEvent(_) => EventType::RequestGroupAdd,
-                RequestEvent::GroupInviteEvent(_) => EventType::RequestGroupInvite,
+            Self::Request(event) => match event {
+                RequestEvent::Friend(_) => EventType::FriendRequested,
+                RequestEvent::GroupJoin(_) => EventType::GroupJoinRequested,
+                RequestEvent::GroupInvite(_) => EventType::GroupInvited,
             },
-            Self::InteractionEvent(_) => EventType::Interaction,
-            Self::LifecycleEvent(event) => match event {
+            Self::Interaction(_) => EventType::Interaction,
+            Self::Lifecycle(event) => match event {
                 LifecycleEvent::MessageCreated(_) => EventType::LifecycleMessageCreated,
                 LifecycleEvent::MessageUpdated(_) => EventType::LifecycleMessageUpdated,
                 LifecycleEvent::MessagesDeleted { .. } => EventType::LifecycleMessagesDeleted,
@@ -111,42 +101,11 @@ impl Event {
                 LifecycleEvent::ScheduledMessageFailed { .. } => {
                     EventType::LifecycleScheduledMessageFailed
                 }
-                LifecycleEvent::PlatformNative(_) => EventType::LifecyclePlatformNative,
             },
-            Self::MetaEvent(MetaEvent::ConnectEvent) => EventType::MetaConnect,
-            Self::MetaEvent(MetaEvent::DisconnectEvent) => EventType::MetaDisconnect,
-            Self::AnyEvent(_) => EventType::Any,
+            Self::Meta(MetaEvent::Connected) => EventType::MetaConnected,
+            Self::Meta(MetaEvent::Disconnected) => EventType::MetaDisconnected,
+            Self::Native(_) => EventType::Native,
         }
-    }
-}
-
-/// Adapter event source.
-pub trait EventTrait: Send + Sync + Any {
-    fn get_events(&self) -> Vec<Event>;
-
-    fn get_event_envelopes(&self) -> Vec<EventEnvelope> {
-        self.get_events()
-            .into_iter()
-            .map(|event| EventEnvelope::new(self.server(), event))
-            .collect()
-    }
-
-    fn server(&self) -> &'static str;
-    fn clone_box(&self) -> EventObject;
-    fn as_any(&self) -> &dyn Any;
-}
-
-pub type EventObject = Box<dyn EventTrait>;
-
-impl Clone for EventObject {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
-impl std::fmt::Debug for EventObject {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_list().entries(self.get_events()).finish()
     }
 }
 
@@ -156,19 +115,19 @@ impl std::fmt::Debug for EventObject {
 #[repr(u8)]
 pub enum EventType {
     Message = 0,
-    NoticeGroupMemberIncrease = 1,
-    NoticeGroupMemberDecrease = 2,
-    NoticeGroupAdminChange = 3,
-    NoticeGroupMuteChange = 4,
-    NoticeGroupMemberMuteChange = 5,
-    NoticeGroupHighlightChange = 6,
-    NoticeGroupMemberAliasChange = 7,
-    NoticeMessageReactions = 8,
-    NoticeMessageDeleted = 9,
-    NoticeMessageEdited = 10,
-    RequestFriendAdd = 11,
-    RequestGroupAdd = 12,
-    RequestGroupInvite = 13,
+    GroupMemberJoined = 1,
+    GroupMemberLeft = 2,
+    GroupAdminChanged = 3,
+    GroupMuteChanged = 4,
+    GroupMemberMuteChanged = 5,
+    GroupHighlightChanged = 6,
+    GroupMemberAliasChanged = 7,
+    MessageReactionsChanged = 8,
+    MessageDeleted = 9,
+    MessageEdited = 10,
+    FriendRequested = 11,
+    GroupJoinRequested = 12,
+    GroupInvited = 13,
     Interaction = 14,
     LifecycleMessageCreated = 15,
     LifecycleMessageUpdated = 16,
@@ -204,14 +163,13 @@ pub enum EventType {
     LifecycleSubscriptionUpdated = 46,
     LifecycleScheduledMessageSent = 47,
     LifecycleScheduledMessageFailed = 48,
-    LifecyclePlatformNative = 49,
-    MetaConnect = 50,
-    MetaDisconnect = 51,
-    Any = 52,
+    MetaConnected = 49,
+    MetaDisconnected = 50,
+    Native = 51,
 }
 
 impl EventType {
-    pub const COUNT: usize = 53;
+    pub const COUNT: usize = 52;
 
     #[must_use]
     pub const fn bit(self) -> u64 {
@@ -224,34 +182,30 @@ impl EventType {
         use kernel::DispatchKind;
         match self {
             Self::Message | Self::LifecycleMessageCreated => DispatchKind::Message,
-            Self::LifecycleMessageUpdated | Self::NoticeMessageEdited => {
-                DispatchKind::MessageUpdate
-            }
-            Self::LifecycleMessagesDeleted | Self::NoticeMessageDeleted => {
-                DispatchKind::MessageDelete
-            }
+            Self::LifecycleMessageUpdated | Self::MessageEdited => DispatchKind::MessageUpdate,
+            Self::LifecycleMessagesDeleted | Self::MessageDeleted => DispatchKind::MessageDelete,
             Self::Interaction
-            | Self::RequestFriendAdd
-            | Self::RequestGroupAdd
-            | Self::RequestGroupInvite
+            | Self::FriendRequested
+            | Self::GroupJoinRequested
+            | Self::GroupInvited
             | Self::LifecycleSuggestionRequested
             | Self::LifecycleSuggestionSelected
             | Self::LifecycleMiniApp
             | Self::LifecycleShippingRequested
             | Self::LifecycleCheckoutRequested => DispatchKind::Interaction,
-            Self::LifecycleReactionsChanged | Self::NoticeMessageReactions => {
+            Self::LifecycleReactionsChanged | Self::MessageReactionsChanged => {
                 DispatchKind::Reaction
             }
-            Self::NoticeGroupMemberIncrease
-            | Self::NoticeGroupMemberDecrease
-            | Self::NoticeGroupAdminChange
-            | Self::NoticeGroupMuteChange
-            | Self::NoticeGroupMemberMuteChange
-            | Self::NoticeGroupMemberAliasChange
+            Self::GroupMemberJoined
+            | Self::GroupMemberLeft
+            | Self::GroupAdminChanged
+            | Self::GroupMuteChanged
+            | Self::GroupMemberMuteChanged
+            | Self::GroupMemberAliasChanged
             | Self::LifecycleMemberUpdated
             | Self::LifecycleJoinRequested
             | Self::LifecyclePermissionsChanged => DispatchKind::Member,
-            Self::NoticeGroupHighlightChange
+            Self::GroupHighlightChanged
             | Self::LifecycleActivityChanged
             | Self::LifecycleReadReceiptUpdated
             | Self::LifecycleCallUpdated
@@ -274,10 +228,7 @@ impl EventType {
             Self::LifecyclePaymentUpdated | Self::LifecycleSubscriptionUpdated => {
                 DispatchKind::Payment
             }
-            Self::LifecyclePlatformNative
-            | Self::MetaConnect
-            | Self::MetaDisconnect
-            | Self::Any => DispatchKind::Native,
+            Self::MetaConnected | Self::MetaDisconnected | Self::Native => DispatchKind::Native,
         }
     }
 }
@@ -345,12 +296,12 @@ pub mod tags {
         )+};
     }
 
-    category_tags!(MessageEvent, MessageEvent, Message => Message);
-    category_tags!(InteractionEvent, InteractionEvent, Interaction => Interaction);
-    category_tags!(AnyEvent, AnyEvent, Any => Any);
-    category_tags!(MetaEvent, MetaEvent,
-        Connect => MetaConnect,
-        Disconnect => MetaDisconnect,
+    category_tags!(Message, MessageEvent, Message => Message);
+    category_tags!(Interaction, InteractionEvent, Interaction => Interaction);
+    category_tags!(Native, NativeEvent, Native => Native);
+    category_tags!(Meta, MetaEvent,
+        Connected => MetaConnected,
+        Disconnected => MetaDisconnected,
     );
     macro_rules! notice_tags {
         ($( $name:ident => $variant:ident : $target:ty => $kind:ident ),+ $(,)?) => {$ (
@@ -361,7 +312,7 @@ pub mod tags {
                 const TYPE: EventType = EventType::$kind;
                 fn get(event: &Event) -> Option<&Self::Event> {
                     match event {
-                        Event::NoticeEvent(NoticeEvent::$variant(value)) => Some(value),
+                        Event::Notice(NoticeEvent::$variant(value)) => Some(value),
                         _ => None,
                     }
                 }
@@ -370,16 +321,16 @@ pub mod tags {
     }
 
     notice_tags!(
-        GroupMemberIncrease => GroupMemberIncreaseEvent : GroupMemberIncreaseEvent => NoticeGroupMemberIncrease,
-        GroupMemberDecrease => GroupMemberDecreaseEvent : GroupMemberDecreaseEvent => NoticeGroupMemberDecrease,
-        GroupAdminChange => GroupAdminChangeEvent : GroupAdminChangeEvent => NoticeGroupAdminChange,
-        GroupMuteChange => GroupMuteChangeEvent : GroupMuteChangeEvent => NoticeGroupMuteChange,
-        GroupMemberMuteChange => GroupMemberMuteChangeEvent : GroupMemberMuteChangeEvent => NoticeGroupMemberMuteChange,
-        GroupHighlightChange => GroupHighlightChangeEvent : GroupHighlightChangeEvent => NoticeGroupHighlightChange,
-        GroupMemberAliasChange => GroupMemberAliasChangeEvent : GroupMemberAliasChangeEvent => NoticeGroupMemberAliasChange,
-        MessageReactions => MessageReactionsEvent : MessageReactionsEvent => NoticeMessageReactions,
-        MessageDeleted => MessageDeletedEvent : MessageDeletedEvent => NoticeMessageDeleted,
-        MessageEdited => MessageEditedEvent : MessageEditedEvent => NoticeMessageEdited,
+        GroupMemberJoined => GroupMemberJoined : GroupMemberJoinedEvent => GroupMemberJoined,
+        GroupMemberLeft => GroupMemberLeft : GroupMemberLeftEvent => GroupMemberLeft,
+        GroupAdminChanged => GroupAdminChanged : GroupAdminChangedEvent => GroupAdminChanged,
+        GroupMuteChanged => GroupMuteChanged : GroupMuteChangedEvent => GroupMuteChanged,
+        GroupMemberMuteChanged => GroupMemberMuteChanged : GroupMemberMuteChangedEvent => GroupMemberMuteChanged,
+        GroupHighlightChanged => GroupHighlightChanged : GroupHighlightChangedEvent => GroupHighlightChanged,
+        GroupMemberAliasChanged => GroupMemberAliasChanged : GroupMemberAliasChangedEvent => GroupMemberAliasChanged,
+        MessageReactionsChanged => MessageReactionsChanged : MessageReactionsChangedEvent => MessageReactionsChanged,
+        MessageDeleted => MessageDeleted : MessageDeletedEvent => MessageDeleted,
+        MessageEdited => MessageEdited : MessageEditedEvent => MessageEdited,
     );
 
     macro_rules! request_tags {
@@ -391,7 +342,7 @@ pub mod tags {
                 const TYPE: EventType = EventType::$kind;
                 fn get(event: &Event) -> Option<&Self::Event> {
                     match event {
-                        Event::RequestEvent(RequestEvent::$variant(value)) => Some(value),
+                        Event::Request(RequestEvent::$variant(value)) => Some(value),
                         _ => None,
                     }
                 }
@@ -400,11 +351,11 @@ pub mod tags {
     }
 
     request_tags!(
-        FriendAdd => FriendAddEvent : FriendAddEvent => RequestFriendAdd,
-        GroupAdd => GroupAddEvent : GroupAddEvent => RequestGroupAdd,
-        GroupInvite => GroupInviteEvent : GroupInviteEvent => RequestGroupInvite,
+        FriendRequested => Friend : FriendRequest => FriendRequested,
+        GroupJoinRequested => GroupJoin : GroupJoinRequest => GroupJoinRequested,
+        GroupInvited => GroupInvite : GroupInviteRequest => GroupInvited,
     );
-    category_tags!(LifecycleEvent, LifecycleEvent,
+    category_tags!(Lifecycle, LifecycleEvent,
         MessageCreated => LifecycleMessageCreated,
         MessageUpdated => LifecycleMessageUpdated,
         MessagesDeleted => LifecycleMessagesDeleted,
@@ -439,6 +390,5 @@ pub mod tags {
         SubscriptionUpdated => LifecycleSubscriptionUpdated,
         ScheduledMessageSent => LifecycleScheduledMessageSent,
         ScheduledMessageFailed => LifecycleScheduledMessageFailed,
-        PlatformNative => LifecyclePlatformNative,
     );
 }

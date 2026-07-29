@@ -127,7 +127,7 @@ impl Dialogue {
     pub async fn ask_text(&self, prompt: impl Into<Message>) -> Result<String, HandlerError> {
         let event = self.ask_message(prompt).await?;
         match event.event() {
-            Event::MessageEvent(event) => Ok(event.message.get_raw_text()),
+            Event::Message(event) => Ok(event.message.get_raw_text()),
             _ => Err(HandlerError::Parse(
                 "dialogue response is not a message event".into(),
             )),

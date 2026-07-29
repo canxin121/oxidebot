@@ -253,7 +253,7 @@ impl BotHandle {
             .call(CommandOperation::Deliver { target, plan })
             .await?
         {
-            CommandResult::Delivery(report) => Ok(report),
+            ApiCommandResult::Delivery(report) => Ok(report),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -282,7 +282,7 @@ impl BotHandle {
             })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -297,7 +297,7 @@ impl BotHandle {
             .call(CommandOperation::DeletePublic { message })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -318,7 +318,7 @@ impl BotHandle {
             })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -334,7 +334,7 @@ impl BotHandle {
             .call(CommandOperation::AnswerInteraction { handle, response })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -350,7 +350,7 @@ impl BotHandle {
             .call(CommandOperation::DeferInteraction { handle, visibility })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -366,7 +366,7 @@ impl BotHandle {
             .call(CommandOperation::InteractionFollowup { handle, message })
             .await?
         {
-            CommandResult::Messages(messages) => Ok(messages),
+            ApiCommandResult::Messages(messages) => Ok(messages),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -382,7 +382,7 @@ impl BotHandle {
             .call(CommandOperation::EditInteraction { handle, message })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -397,7 +397,7 @@ impl BotHandle {
             .call(CommandOperation::PublishCommands { definitions })
             .await?
         {
-            CommandResult::Unit => Ok(()),
+            ApiCommandResult::Unit => Ok(()),
             _ => Err(CommandError::UnexpectedResult),
         }
     }
@@ -459,7 +459,7 @@ impl CommandClient {
     async fn call(
         &self,
         operation: CommandOperation,
-    ) -> std::result::Result<CommandResult, CommandError> {
+    ) -> std::result::Result<ApiCommandResult, CommandError> {
         let (sender, receiver) = oneshot::channel();
         let deadline = self.submit(operation, Some(sender)).await?;
         await_before(deadline, receiver)
@@ -470,7 +470,7 @@ impl CommandClient {
     async fn submit(
         &self,
         operation: CommandOperation,
-        reply: Option<CommandReply>,
+        reply: Option<ApiCommandReply>,
     ) -> std::result::Result<Option<Instant>, CommandError> {
         let deadline = self
             .total_timeout
@@ -845,13 +845,13 @@ fn push_ready(
     }
 }
 
-enum CommandResult {
+enum ApiCommandResult {
     Messages(Vec<PublicMessageRef>),
     Delivery(PublicDeliveryReport),
     Unit,
 }
 
-type CommandReply = oneshot::Sender<std::result::Result<CommandResult, CommandError>>;
+type ApiCommandReply = oneshot::Sender<std::result::Result<ApiCommandResult, CommandError>>;
 
 struct CommandEnvelope {
     key: CommandKey,
@@ -859,7 +859,7 @@ struct CommandEnvelope {
     deadline: Option<Instant>,
     priority: CommandPriority,
     operation: CommandOperation,
-    reply: Option<CommandReply>,
+    reply: Option<ApiCommandReply>,
     submitted_at: Instant,
     _leases: HierarchicalLease,
 }
@@ -1267,9 +1267,9 @@ async fn execute_with_retry(
     max_retries: u8,
     retry_base: Duration,
     retry_max: Duration,
-    reply: Option<&CommandReply>,
+    reply: Option<&ApiCommandReply>,
     metrics: &RuntimeMetrics,
-) -> std::result::Result<CommandResult, CommandError> {
+) -> std::result::Result<ApiCommandResult, CommandError> {
     let idempotent = operation.idempotent(services.capabilities());
     let mut attempt = 0_u8;
     loop {
@@ -1388,7 +1388,7 @@ fn deterministic_jitter(base: Duration, seed: u64, attempt: u8) -> Duration {
 async fn execute_once(
     operation: &CommandOperation,
     services: &BotServices,
-) -> std::result::Result<CommandResult, CommandError> {
+) -> std::result::Result<ApiCommandResult, CommandError> {
     match operation {
         CommandOperation::Deliver { target, plan } => services
             .api
@@ -1396,7 +1396,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .send_delivery_plan(target.clone(), plan.clone())
             .await
-            .map(CommandResult::Delivery)
+            .map(ApiCommandResult::Delivery)
             .map_err(command_api_error),
         CommandOperation::EditPublic {
             message,
@@ -1407,7 +1407,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .edit_outgoing_message(message.clone(), replacement.clone())
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::DeletePublic { message } => {
             let result = services
@@ -1417,13 +1417,13 @@ async fn execute_once(
                 .delete_message_ref(message.clone())
                 .await;
             match result {
-                Ok(()) => Ok(CommandResult::Unit),
+                Ok(()) => Ok(ApiCommandResult::Unit),
                 Err(error) => {
                     let error = platform_error(error);
                     if services.capabilities().delete_idempotent
                         && error.kind == PlatformErrorKind::NotFound
                     {
-                        Ok(CommandResult::Unit)
+                        Ok(ApiCommandResult::Unit)
                     } else {
                         Err(CommandError::Platform(error))
                     }
@@ -1440,7 +1440,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .add_message_reaction(message.clone(), reaction.clone(), options.clone())
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::AnswerInteraction { handle, response } => services
             .api
@@ -1448,7 +1448,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .answer_interaction(handle.id.clone(), response.clone())
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::DeferInteraction { handle, visibility } => services
             .api
@@ -1456,7 +1456,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .defer_interaction(handle.clone(), *visibility)
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::InteractionFollowup { handle, message } => services
             .api
@@ -1464,7 +1464,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .send_interaction_followup(handle.clone(), message.clone())
             .await
-            .map(CommandResult::Messages)
+            .map(ApiCommandResult::Messages)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::EditInteraction { handle, message } => services
             .api
@@ -1472,7 +1472,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .edit_interaction_response(handle.clone(), message.clone())
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
         CommandOperation::PublishCommands { definitions } => services
             .api
@@ -1480,7 +1480,7 @@ async fn execute_once(
             .ok_or(CommandError::ApiUnsupported)?
             .set_command_definitions(definitions.clone())
             .await
-            .map(|()| CommandResult::Unit)
+            .map(|()| ApiCommandResult::Unit)
             .map_err(|error| CommandError::Platform(platform_error(error))),
     }
 }

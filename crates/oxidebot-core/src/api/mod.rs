@@ -2,26 +2,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-pub mod payload;
 pub mod platform;
-pub mod response;
-
-use payload::{GroupAdminChangeType, GroupMuteType, RequestResponse, SendMessageTarget};
-pub use response::{
-    BotGetFriendListResponse, BotGetGroupListResponse, BotGetProfileResponse,
-    GetMessageDetailResponse, GroupGetFileCountResponse, GroupGetFsListResponse,
-    GroupGetProfileResponse, GroupMemberListResponse, SendMessageResponse, UserGetProfileResponse,
-};
 
 use crate::interaction::{
     BotCommand, BotCommandQuery, BotCommandSet, ChatMenu, InteractionCapabilities,
-    InteractionResponse, InteractionResponseHandle, MessageComponents, MessageOptions,
-    UnsupportedInteractionError,
-};
-use crate::source::{
-    group::GroupProfile,
-    message::{File, MessageSegment},
-    user::UserProfile,
+    InteractionResponse, InteractionResponseHandle, MessageComponents, UnsupportedInteractionError,
 };
 use crate::{
     application::{
@@ -35,20 +20,18 @@ use crate::{
     commerce::{CheckoutRequest, Invoice, InvoiceOptions, Payment, ShippingOption},
     content::{
         BatchMessage, BatchSendResult, Checklist, ForwardOptions, MessageEnvelope, MessageQuery,
-        OutgoingMessage, Poll,
+        Poll,
     },
     conversation::{
         ConversationMember, ConversationProfile, ConversationRef, InviteLink, InviteLinkOptions,
         MessageRef, MessageTarget, Page, PageRequest, PermissionSet, Thread, ThreadOptions,
     },
-    source::message::{
-        DeliveryItemResult, DeliveryPlan, DeliveryReport, FallbackPolicy, PartialDeliveryError,
-    },
+    event::RequestDecision,
+    source::message::{DeliveryPlan, DeliveryReport, FallbackPolicy, Message},
 };
 use platform::{PlatformApiRequest, PlatformApiResponse, UnsupportedPlatformApiError};
 
-/// CallApiTrait is a trait that defines the methods that a bot should implement to interact with the API.
-/// If the bot does not implement the method, it will return an error.
+/// Canonical cross-platform operations implemented by a bot adapter.
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 pub trait CallApiTrait: Send + Sync {
@@ -65,7 +48,7 @@ pub trait CallApiTrait: Send + Sync {
 
     /// Returns the platform-native methods explicitly known by this adapter.
     /// Calls are not required to be limited to this list, which keeps adapters
-    /// forward-compatible with newly released platform methods.
+    /// open to newly released platform methods.
     fn platform_api_methods(&self) -> &'static [&'static str] {
         &[]
     }
@@ -80,10 +63,9 @@ pub trait CallApiTrait: Send + Sync {
         InteractionCapabilities::default()
     }
 
-    /// Returns granular capabilities and platform limits. This is the
-    /// preferred capability API for new adapters.
+    /// Returns granular capabilities and platform limits for this adapter.
     fn bot_capabilities(&self) -> BotCapabilities {
-        BotCapabilities::legacy_message_api()
+        BotCapabilities::default()
     }
 
     /// Builds the exact physical message plan that would be sent by
@@ -91,7 +73,7 @@ pub trait CallApiTrait: Send + Sync {
     /// used by previews, tests, observability, and strict-delivery workflows.
     fn plan_outgoing_message(
         &self,
-        message: &OutgoingMessage,
+        message: &Message,
         policy: FallbackPolicy,
     ) -> Result<DeliveryPlan> {
         Ok(message.plan_for(&self.bot_capabilities(), policy)?)
@@ -101,15 +83,10 @@ pub trait CallApiTrait: Send + Sync {
     /// planner and returns both physical message references and every
     /// degradation that occurred.
     ///
-    /// The default implementation is the compatibility transport for legacy
-    /// adapters and lowers every physical message through
-    /// [`CallApiTrait::send_message_with_options`]. An adapter that advertises
-    /// native support for portable rich segments or components must override
-    /// this method so its transport preserves those features.
     async fn send_outgoing_message_with(
         &self,
         target: MessageTarget,
-        message: OutgoingMessage,
+        message: Message,
         policy: FallbackPolicy,
     ) -> Result<DeliveryReport> {
         let plan = self.plan_outgoing_message(&message, policy)?;
@@ -118,76 +95,20 @@ pub trait CallApiTrait: Send + Sync {
 
     /// Executes a previously inspected or middleware-transformed delivery plan.
     /// This is the shared transport boundary used by the runtime delivery
-    /// pipeline, previews, strict delivery, and legacy adapter compatibility.
+    /// pipeline, previews, and strict-delivery workflows.
     async fn send_delivery_plan(
         &self,
         target: MessageTarget,
         plan: DeliveryPlan,
     ) -> Result<DeliveryReport> {
-        let legacy_target = legacy_send_target(&target)?;
-        let conversation = target.conversation.clone();
-        let mut references = Vec::new();
-        let degradations = plan.degradations;
-        let mut items = Vec::with_capacity(plan.messages.len());
-
-        for (index, physical) in plan.messages.into_iter().enumerate() {
-            let result = match physical.try_into_legacy() {
-                Ok((segments, options)) => self
-                    .send_message_with_options(segments, legacy_target.clone(), options)
-                    .await
-                    .map(|responses| {
-                        responses
-                            .into_iter()
-                            .map(|response| {
-                                MessageRef::new(response.sent_message_id)
-                                    .in_conversation(conversation.clone())
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                Err(error) => Err(error.into()),
-            };
-            match result {
-                Ok(sent) => {
-                    references.extend(sent.iter().cloned());
-                    items.push(DeliveryItemResult {
-                        index,
-                        messages: sent,
-                        error: None,
-                    });
-                }
-                Err(error) => {
-                    if references.is_empty() {
-                        return Err(error);
-                    }
-                    items.push(DeliveryItemResult {
-                        index,
-                        messages: Vec::new(),
-                        error: Some(error.to_string()),
-                    });
-                    return Err(PartialDeliveryError {
-                        report: DeliveryReport {
-                            messages: references,
-                            degradations,
-                            items,
-                        },
-                    }
-                    .into());
-                }
-            }
-        }
-
-        Ok(DeliveryReport {
-            messages: references,
-            degradations,
-            items,
-        })
+        Err(UnsupportedFeatureError::new("sending messages").into())
     }
 
     /// Sends a fully modeled message with the safe automatic fallback policy.
     async fn send_outgoing_message(
         &self,
         target: MessageTarget,
-        message: OutgoingMessage,
+        message: Message,
     ) -> Result<Vec<MessageRef>> {
         Ok(self
             .send_outgoing_message_with(target, message, FallbackPolicy::Auto)
@@ -195,28 +116,12 @@ pub trait CallApiTrait: Send + Sync {
             .messages)
     }
 
-    async fn edit_outgoing_message(
-        &self,
-        message: MessageRef,
-        new_message: OutgoingMessage,
-    ) -> Result<()> {
-        let plan = self.plan_outgoing_message(&new_message, FallbackPolicy::Strict)?;
-        if plan.messages.len() != 1 {
-            return Err(UnsupportedFeatureError::new(
-                "editing a logical message that expands to multiple physical messages",
-            )
-            .into());
-        }
-        let physical = plan.messages.into_iter().next().expect("length checked");
-        let (segments, options) = physical.try_into_legacy()?;
-        if !options.is_empty() {
-            return Err(UnsupportedFeatureError::new("editing message options atomically").into());
-        }
-        self.edit_message(message.id, segments).await
+    async fn edit_outgoing_message(&self, message: MessageRef, new_message: Message) -> Result<()> {
+        Err(UnsupportedFeatureError::new("editing messages").into())
     }
 
     async fn delete_message_ref(&self, message: MessageRef) -> Result<()> {
-        self.delete_message(message.id).await
+        Err(UnsupportedFeatureError::new("deleting messages").into())
     }
 
     async fn delete_messages(&self, messages: Vec<MessageRef>) -> Result<()> {
@@ -224,41 +129,6 @@ pub trait CallApiTrait: Send + Sync {
             self.delete_message_ref(message).await?;
         }
         Ok(())
-    }
-
-    /// Sends a message with interactive components while keeping the original
-    /// `send_message` API source-compatible for existing adapters.
-    async fn send_message_with_options(
-        &self,
-        message: Vec<MessageSegment>,
-        target: SendMessageTarget,
-        options: MessageOptions,
-    ) -> Result<Vec<SendMessageResponse>> {
-        let mut message = message;
-        let mut options = options;
-
-        // Reply metadata is part of the canonical message IR, while the 0.1.8
-        // adapter surface represented replies as a message segment. Fold the
-        // option into that stable representation so existing adapters keep
-        // working without implementing the richer options method.
-        if let Some(reply) = options.reply.take() {
-            let reply_id = reply.message.id;
-            let already_present = message.iter().any(|segment| {
-                matches!(
-                    segment,
-                    MessageSegment::Reply { message_id } if message_id == &reply_id
-                )
-            });
-            if !already_present {
-                message.insert(0, MessageSegment::reply(reply_id));
-            }
-        }
-
-        if options.is_empty() {
-            self.send_message(message, target).await
-        } else {
-            Err(UnsupportedInteractionError::new("message options").into())
-        }
     }
 
     async fn edit_message_components(
@@ -309,7 +179,7 @@ pub trait CallApiTrait: Send + Sync {
     async fn send_interaction_followup(
         &self,
         handle: InteractionResponseHandle,
-        message: OutgoingMessage,
+        message: Message,
     ) -> Result<Vec<MessageRef>> {
         Err(UnsupportedInteractionError::new("interaction follow-up messages").into())
     }
@@ -317,7 +187,7 @@ pub trait CallApiTrait: Send + Sync {
     async fn edit_interaction_response(
         &self,
         handle: InteractionResponseHandle,
-        message: OutgoingMessage,
+        message: Message,
     ) -> Result<()> {
         Err(UnsupportedInteractionError::new("editing the original interaction response").into())
     }
@@ -331,12 +201,7 @@ pub trait CallApiTrait: Send + Sync {
         message: MessageRef,
         reactions: Vec<Reaction>,
     ) -> Result<()> {
-        if let [reaction] = reactions.as_slice() {
-            self.set_message_reaction(message.id, legacy_reaction_id(reaction)?)
-                .await
-        } else {
-            Err(UnsupportedFeatureError::new("setting multiple message reactions").into())
-        }
+        Err(UnsupportedFeatureError::new("setting message reactions").into())
     }
 
     async fn add_message_reaction(
@@ -345,8 +210,7 @@ pub trait CallApiTrait: Send + Sync {
         reaction: Reaction,
         options: ReactionOptions,
     ) -> Result<()> {
-        self.set_message_reaction(message.id, legacy_reaction_id(&reaction)?)
-            .await
+        Err(UnsupportedFeatureError::new("adding message reactions").into())
     }
 
     async fn remove_message_reaction(&self, message: MessageRef, reaction: Reaction) -> Result<()> {
@@ -669,17 +533,25 @@ pub trait CallApiTrait: Send + Sync {
     async fn answer_mini_app_query(
         &self,
         event: MiniAppEvent,
-        message: OutgoingMessage,
+        message: Message,
     ) -> Result<Vec<MessageRef>> {
         Err(UnsupportedFeatureError::new("answering mini-app queries").into())
     }
 
-    async fn set_bot_profile_v2(&self, profile: BotProfile) -> Result<()> {
+    async fn set_bot_profile(&self, profile: BotProfile) -> Result<()> {
         Err(UnsupportedFeatureError::new("localized bot profiles").into())
     }
 
-    async fn get_bot_profile_v2(&self) -> Result<BotProfile> {
+    async fn get_bot_profile(&self) -> Result<BotProfile> {
         Err(UnsupportedFeatureError::new("localized bot profiles").into())
+    }
+
+    async fn respond_to_request(
+        &self,
+        request_id: String,
+        decision: RequestDecision,
+    ) -> Result<()> {
+        Err(UnsupportedFeatureError::new("responding to requests").into())
     }
 
     async fn send_invoice(
@@ -712,213 +584,12 @@ pub trait CallApiTrait: Send + Sync {
     async fn refund_payment(&self, payment: Payment) -> Result<()> {
         Err(UnsupportedFeatureError::new("payment refunds").into())
     }
-
-    async fn send_message(
-        &self,
-        message: Vec<MessageSegment>,
-        target: SendMessageTarget,
-    ) -> Result<Vec<SendMessageResponse>> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn delete_message(&self, message_id: String) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    /// Edits an existing message.
-    async fn edit_message(
-        &self,
-        message_id: String,
-        new_message: Vec<MessageSegment>,
-    ) -> Result<()> {
-        let _ = (message_id, new_message);
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_message_detail(&self, message_id: String) -> Result<GetMessageDetailResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn set_message_reaction(&self, message_id: String, reaction_id: String) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_group_member_list(&self, group_id: String) -> Result<GroupMemberListResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn kick_group_member(
-        &self,
-        group_id: String,
-        user_id: String,
-        reject_add_request: Option<bool>,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn mute_group(
-        &self,
-        group_id: String,
-        duration: Option<Duration>,
-        r#type: GroupMuteType,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn mute_group_member(
-        &self,
-        group_id: String,
-        user_id: String,
-        r#type: GroupMuteType,
-        duration: Option<Duration>,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn change_group_admin(
-        &self,
-        group_id: String,
-        user_id: String,
-        r#type: GroupAdminChangeType,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn set_group_member_alias(
-        &self,
-        group_id: String,
-        user_id: String,
-        new_alias: String,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_group_profile(&self, group_id: String) -> Result<GroupGetProfileResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn set_group_profile(&self, group_id: String, new_profile: GroupProfile) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_group_file_count(
-        &self,
-        group_id: String,
-        parent_folder_id: Option<String>,
-    ) -> Result<GroupGetFileCountResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_group_fs_list(
-        &self,
-        group_id: String,
-        start_index: u64,
-        count: u64,
-    ) -> Result<GroupGetFsListResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn delete_group_file(&self, group_id: String, file_id: String) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn delete_group_folder(&self, group_id: String, folder_id: String) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn create_group_folder(
-        &self,
-        group_id: String,
-        folder_name: String,
-        parent_folder_id: Option<String>,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_user_profile(&self, user_id: String) -> Result<UserGetProfileResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn set_bot_profile(&self, new_profile: UserProfile) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_bot_profile(&self) -> Result<BotGetProfileResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_bot_friend_list(&self) -> Result<BotGetFriendListResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_bot_group_list(&self) -> Result<BotGetGroupListResponse> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn handle_add_friend_request(&self, id: String, response: RequestResponse) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn handle_add_group_request(&self, id: String, response: RequestResponse) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn handle_invite_group_request(
-        &self,
-        id: String,
-        response: RequestResponse,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-
-    async fn get_file_info(&self, file_id: String) -> Result<File> {
-        Err(anyhow::anyhow!("Not implemented"))
-    }
-}
-
-fn legacy_send_target(target: &MessageTarget) -> Result<SendMessageTarget> {
-    anyhow::ensure!(
-        target.conversation.parent.is_none()
-            && target.conversation.platform_data.is_none()
-            && target.platform_data.is_none()
-            && target.recipients.is_empty(),
-        "nested or platform-specific message targets require the v2 adapter API"
-    );
-    Ok(match target.conversation.kind {
-        crate::conversation::ConversationKind::Direct => {
-            SendMessageTarget::Private(target.conversation.id.clone())
-        }
-        crate::conversation::ConversationKind::Group
-        | crate::conversation::ConversationKind::Channel => {
-            SendMessageTarget::Group(target.conversation.id.clone())
-        }
-        _ => {
-            return Err(UnsupportedFeatureError::new(
-                "this conversation kind in the legacy message API",
-            )
-            .into())
-        }
-    })
-}
-
-fn legacy_reaction_id(reaction: &Reaction) -> Result<String> {
-    Ok(match reaction {
-        Reaction::UnicodeEmoji(emoji) => emoji.clone(),
-        Reaction::CustomEmoji { id, .. } => id.clone(),
-        Reaction::Paid => "paid".to_owned(),
-        Reaction::PlatformNative { .. } => {
-            return Err(UnsupportedFeatureError::new(
-                "platform-native reactions in the legacy reaction API",
-            )
-            .into())
-        }
-    })
 }
 
 #[cfg(test)]
 mod partial_delivery_tests {
     use super::*;
-    use crate::source::message::Message;
+    use crate::source::message::{DeliveryItemResult, Message, PartialDeliveryError};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -926,18 +597,44 @@ mod partial_delivery_tests {
 
     #[async_trait::async_trait]
     impl CallApiTrait for FailSecondApi {
-        async fn send_message(
+        async fn send_delivery_plan(
             &self,
-            _message: Vec<MessageSegment>,
-            _target: SendMessageTarget,
-        ) -> Result<Vec<crate::api::response::SendMessageResponse>> {
-            let attempt = self.0.fetch_add(1, Ordering::AcqRel);
-            if attempt == 1 {
-                anyhow::bail!("second physical message failed");
+            target: MessageTarget,
+            plan: DeliveryPlan,
+        ) -> Result<DeliveryReport> {
+            let mut messages = Vec::new();
+            let mut items = Vec::with_capacity(plan.messages.len());
+            for (index, _) in plan.messages.into_iter().enumerate() {
+                let attempt = self.0.fetch_add(1, Ordering::AcqRel);
+                if attempt == 1 {
+                    items.push(DeliveryItemResult {
+                        index,
+                        messages: Vec::new(),
+                        error: Some("second physical message failed".to_owned()),
+                    });
+                    return Err(PartialDeliveryError {
+                        report: DeliveryReport {
+                            messages,
+                            degradations: plan.degradations,
+                            items,
+                        },
+                    }
+                    .into());
+                }
+                let sent = MessageRef::new(format!("message-{attempt}"))
+                    .in_conversation(target.conversation.clone());
+                messages.push(sent.clone());
+                items.push(DeliveryItemResult {
+                    index,
+                    messages: vec![sent],
+                    error: None,
+                });
             }
-            Ok(vec![crate::api::response::SendMessageResponse {
-                sent_message_id: format!("message-{attempt}"),
-            }])
+            Ok(DeliveryReport {
+                messages,
+                degradations: plan.degradations,
+                items,
+            })
         }
     }
 

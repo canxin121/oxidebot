@@ -1,5 +1,5 @@
 use crate::{
-    authoring::AuthoringRuntime, Address, BotHandle, BotSelection, CommandResult, HandlerError,
+    authoring::AuthoringRuntime, Address, BotHandle, BotSelection, CommandMatch, HandlerError,
     HandlerResult, SessionRegistry, ShutdownSignal,
 };
 use oxidebot_core::{
@@ -24,7 +24,7 @@ where
     pub(crate) bot: BotHandle,
     pub(crate) sessions: SessionRegistry,
     pub(crate) shutdown: ShutdownSignal,
-    pub(crate) command: Option<CommandResult>,
+    pub(crate) command: Option<CommandMatch>,
     pub(crate) responder: Option<crate::Responder>,
     outbound_sequence: Arc<AtomicU64>,
     pub(crate) authoring: Arc<AuthoringRuntime<S>>,
@@ -44,7 +44,7 @@ where
         bot: BotHandle,
         sessions: SessionRegistry,
         shutdown: ShutdownSignal,
-        command: Option<CommandResult>,
+        command: Option<CommandMatch>,
         responder: Option<crate::Responder>,
         authoring: Arc<AuthoringRuntime<S>>,
     ) -> Self {
@@ -74,7 +74,7 @@ where
     #[must_use]
     pub fn message(&self) -> Option<&MessageEvent> {
         match self.event() {
-            Event::MessageEvent(event) => Some(event),
+            Event::Message(event) => Some(event),
             _ => None,
         }
     }
@@ -109,7 +109,7 @@ where
     }
 
     #[must_use]
-    pub fn command(&self) -> Option<&CommandResult> {
+    pub fn command(&self) -> Option<&CommandMatch> {
         self.command.as_ref()
     }
 

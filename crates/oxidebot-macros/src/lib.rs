@@ -372,7 +372,6 @@ fn expand_command_function(
         &format!("__oxidebot_{}_handler", feature_ident),
         feature_ident.span(),
     );
-    let spec_ident = syn::Ident::new(&format!("{}_command", feature_ident), feature_ident.span());
     let args_ident = syn::Ident::new(
         &format!(
             "__OxideBot{}Args",
@@ -570,12 +569,6 @@ fn expand_command_function(
             }
         }
 
-        #(#implementation_attributes)*
-        #[deprecated(note = "use Module::add(the_command_feature) or the_command_feature.feature()")]
-        #[must_use]
-        #visibility fn #spec_ident() -> #oxidebot::runtime::Command {
-            #feature_ident::command()
-        }
     })
 }
 

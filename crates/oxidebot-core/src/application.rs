@@ -5,10 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    content::{FormValue, OutgoingMessage, RichLayout},
+    content::{FormValue, RichLayout},
     conversation::{ConversationPermission, ConversationRef, PermissionSet},
     interaction::{Modal, PlatformNativeData},
-    source::{message::File, user::User},
+    source::{
+        message::{File, Message},
+        user::User,
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +179,7 @@ pub struct Suggestion {
     pub description: Option<String>,
     pub image: Option<File>,
     pub value: FormValue,
-    pub message: Option<OutgoingMessage>,
+    pub message: Option<Message>,
     pub platform_data: Option<PlatformNativeData>,
 }
 

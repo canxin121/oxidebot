@@ -1,8 +1,3 @@
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-
 use crate::{
     application::{MiniAppEvent, SuggestionRequest, SuggestionSelection},
     collaboration::{ActivityState, CallSession, PinnedMessage, ReactionChange, ReadReceipt},
@@ -91,36 +86,4 @@ pub enum LifecycleEvent {
         client_message_id: Option<String>,
         error: String,
     },
-    PlatformNative(PlatformNativeData),
-}
-
-#[derive(Clone, Debug)]
-pub struct EventEnvelope {
-    pub id: String,
-    pub platform: String,
-    pub bot_id: Option<String>,
-    pub occurred_at: Option<DateTime<Utc>>,
-    pub received_at: DateTime<Utc>,
-    pub conversation: Option<ConversationRef>,
-    pub delivery_attempt: Option<u32>,
-    pub raw: Option<Value>,
-    pub metadata: BTreeMap<String, Value>,
-    pub event: super::Event,
-}
-
-impl EventEnvelope {
-    pub fn new(platform: impl Into<String>, event: super::Event) -> Self {
-        Self {
-            id: String::new(),
-            platform: platform.into(),
-            bot_id: None,
-            occurred_at: None,
-            received_at: Utc::now(),
-            conversation: None,
-            delivery_attempt: None,
-            raw: None,
-            metadata: BTreeMap::new(),
-            event,
-        }
-    }
 }

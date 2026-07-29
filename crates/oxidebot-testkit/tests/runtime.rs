@@ -47,7 +47,7 @@ async fn command_interest_skips_unrelated_full_decodes() {
 }
 
 #[tokio::test]
-async fn handlers_receive_the_original_018_event_model() {
+async fn handlers_receive_the_canonical_event_model() {
     let (adapter, _) = ScriptedAdapter::new(
         platform(),
         bot_id(),
@@ -64,6 +64,7 @@ async fn handlers_receive_the_original_018_event_model() {
         tags::Message,
         |context: EventContext<tags::Message>| async move {
             assert_eq!(context.event().sender.id, "user");
+            assert_eq!(context.event().conversation.id, "room");
             assert_eq!(context.event().message.get_raw_text(), "hello");
             Outcome::continue_()
         },

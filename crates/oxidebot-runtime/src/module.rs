@@ -5,8 +5,8 @@ use crate::{
     hooks::{
         After, Before, Endpoint, Guard, GuardDecision, SharedAfter, SharedBefore, SharedGuard,
     },
-    BuildError, Command, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandOutput,
-    CommandParseError, CommandResult, CompletionConfig, CompletionInput, Context, Dialogue,
+    BuildError, Command, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandMatch,
+    CommandOutput, CommandParseError, CompletionConfig, CompletionInput, Context, Dialogue,
     DynamicCompleter, Extract, HandlerError, HandlerResult, Outcome, RewriteInput, Shortcut,
     SourceSpan,
 };
@@ -1310,7 +1310,7 @@ where
             .for_identity(context.bot_identity())
             .enabled(&context.authoring().registry);
         Box::pin(async move {
-            let Event::LifecycleEvent(oxidebot_core::event::LifecycleEvent::SuggestionRequested(
+            let Event::Lifecycle(oxidebot_core::event::LifecycleEvent::SuggestionRequested(
                 request,
             )) = context.event()
             else {
@@ -1364,7 +1364,7 @@ where
 }
 
 fn explicit_completion_input(event: &Event) -> Option<(String, usize)> {
-    let Event::MessageEvent(message) = event else {
+    let Event::Message(message) = event else {
         return None;
     };
     let raw = message.message.get_raw_text();
@@ -1544,7 +1544,7 @@ where
             }
         }
         let response = dialogue.ask_message(prompt_message).await?;
-        let Event::MessageEvent(message) = response.event() else {
+        let Event::Message(message) = response.event() else {
             return Err(HandlerError::internal(
                 "command completion received a non-message event",
             ));
@@ -1601,12 +1601,12 @@ async fn match_command_event<S>(
     event: &Event,
     context: &Context<S>,
     command_input: Option<&tokio::sync::OnceCell<RewriteInput>>,
-) -> Result<Option<CommandResult>, CommandEventError>
+) -> Result<Option<CommandMatch>, CommandEventError>
 where
     S: Send + Sync + 'static,
 {
     match event {
-        Event::MessageEvent(message_event) => {
+        Event::Message(message_event) => {
             let shortcuts = context
                 .authoring()
                 .registry
@@ -1646,7 +1646,7 @@ where
                 .map(|matched| matched.map(|matched| matched.with_locale(input.locale)))
                 .map_err(Into::into)
         }
-        Event::InteractionEvent(interaction)
+        Event::Interaction(interaction)
             if interaction.kind == InteractionKind::Command && interaction.command.is_some() =>
         {
             command
@@ -1664,7 +1664,7 @@ where
 
 fn event_locale(event: &Event) -> Option<&str> {
     match event {
-        Event::InteractionEvent(interaction) => interaction
+        Event::Interaction(interaction) => interaction
             .command
             .as_ref()
             .and_then(|command| command.locale.as_deref())
@@ -1675,7 +1675,7 @@ fn event_locale(event: &Event) -> Option<&str> {
 
 async fn finalize_command<S>(
     mut context: Context<S>,
-    result: CommandResult,
+    result: CommandMatch,
     arguments: crate::ParsedArguments,
 ) -> Result<CommandPreparation<S>, HandlerError>
 where
@@ -1692,7 +1692,7 @@ where
 
 async fn command_match_error_outcome<S>(
     context: &Context<S>,
-    result: &CommandResult,
+    result: &CommandMatch,
     error: CommandParseError,
 ) -> Result<Outcome, HandlerError>
 where

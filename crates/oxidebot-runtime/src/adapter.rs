@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex, DispatchKind};
 use oxidebot_core::event::{EventType, EventTypeSet, MessageEvent};
 use oxidebot_core::{
-    source::{group::Group, message::Message, user::User},
-    BotIdentity, BotSlot, CompactId, ConversationKey, Event, EventId, PlatformId, RetainedSize,
-    UserKey,
+    source::{message::Message, user::User},
+    BotIdentity, BotSlot, CompactId, ConversationKey, ConversationRef, Event, EventId, PlatformId,
+    RetainedSize, UserKey,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -78,11 +78,9 @@ pub trait InboundFrame: Send + 'static {
 /// directly to reuse offsets from their wire format.
 pub struct MessageFrame {
     id: EventId,
-    conversation: CompactId,
-    subspace: Option<CompactId>,
+    conversation: ConversationRef,
     actor: CompactId,
     sender: User,
-    group: Option<Group>,
     message: Message,
     occurred_at: Option<SystemTime>,
 }
@@ -91,17 +89,15 @@ impl MessageFrame {
     #[must_use]
     pub fn new(
         id: EventId,
-        conversation: impl Into<CompactId>,
+        conversation: ConversationRef,
         actor: impl Into<CompactId>,
         message: Message,
     ) -> Self {
         Self {
             id,
-            conversation: conversation.into(),
-            subspace: None,
+            conversation,
             actor: actor.into(),
             sender: User::default(),
-            group: None,
             message,
             occurred_at: Some(SystemTime::now()),
         }
@@ -111,7 +107,7 @@ impl MessageFrame {
     #[must_use]
     pub fn text(
         id: EventId,
-        conversation: impl Into<CompactId>,
+        conversation: ConversationRef,
         actor: impl Into<CompactId>,
         message_id: impl Into<String>,
         text: impl Into<String>,
@@ -121,26 +117,12 @@ impl MessageFrame {
         Self::new(id, conversation, actor, message)
     }
 
-    #[must_use]
-    pub fn in_subspace(mut self, subspace: impl Into<CompactId>) -> Self {
-        self.subspace = Some(subspace.into());
-        self
-    }
-
     /// Preserves adapter-provided sender profile data while keeping routing
     /// identity consistent with `sender.id`.
     #[must_use]
     pub fn sender(mut self, sender: User) -> Self {
         self.actor = CompactId::from(sender.id.clone());
         self.sender = sender;
-        self
-    }
-
-    /// Marks this as a group/channel-style message and preserves the portable
-    /// group profile in the public event.
-    #[must_use]
-    pub fn group(mut self, group: Group) -> Self {
-        self.group = Some(group);
         self
     }
 
@@ -157,10 +139,12 @@ impl MessageFrame {
 
     fn dispatch_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
         let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
-        let mut conversation = ConversationKey::new(bot, self.conversation.clone());
-        if let Some(subspace) = &self.subspace {
-            conversation = conversation.in_subspace(subspace.clone());
-        }
+        let conversation = if let Some(parent) = &self.conversation.parent {
+            ConversationKey::new(bot, CompactId::from(parent.id.clone()))
+                .in_subspace(CompactId::from(self.conversation.id.clone()))
+        } else {
+            ConversationKey::new(bot, CompactId::from(self.conversation.id.clone()))
+        };
         index.conversation = Some(conversation);
         index.actor = Some(UserKey::new(bot, self.actor.clone()));
         index.command = self
@@ -177,11 +161,9 @@ impl MessageFrame {
     fn retained_bytes(&self) -> usize {
         self.id
             .estimated_bytes()
-            .saturating_add(self.conversation.estimated_bytes())
-            .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
+            .saturating_add(conversation_retained_bytes(&self.conversation))
             .saturating_add(self.actor.estimated_bytes())
             .saturating_add(user_retained_bytes(&self.sender))
-            .saturating_add(self.group.as_ref().map_or(0, group_retained_bytes))
             .saturating_add(self.message.estimated_bytes())
             .saturating_add(2_048)
     }
@@ -197,7 +179,7 @@ fn user_retained_bytes(user: &User) -> usize {
     let mut bytes = user.id.capacity().saturating_add(64);
     if let Some(profile) = &user.profile {
         bytes = bytes
-            .saturating_add(optional_string_bytes(&profile.nickname))
+            .saturating_add(optional_string_bytes(&profile.display_name))
             .saturating_add(optional_string_bytes(&profile.avatar))
             .saturating_add(optional_string_bytes(&profile.email))
             .saturating_add(optional_string_bytes(&profile.phone))
@@ -205,24 +187,23 @@ fn user_retained_bytes(user: &User) -> usize {
             .saturating_add(optional_string_bytes(&profile.level))
             .saturating_add(128);
     }
-    if let Some(group_info) = &user.group_info {
-        bytes = bytes
-            .saturating_add(optional_string_bytes(&group_info.alias))
-            .saturating_add(optional_string_bytes(&group_info.level))
-            .saturating_add(128);
-    }
     bytes
 }
 
-fn group_retained_bytes(group: &Group) -> usize {
-    let mut bytes = group.id.capacity().saturating_add(64);
-    if let Some(profile) = &group.profile {
-        bytes = bytes
-            .saturating_add(optional_string_bytes(&profile.name))
-            .saturating_add(optional_string_bytes(&profile.avatar))
-            .saturating_add(96);
-    }
-    bytes
+fn conversation_retained_bytes(conversation: &ConversationRef) -> usize {
+    conversation
+        .id
+        .capacity()
+        .saturating_add(
+            conversation
+                .parent
+                .as_deref()
+                .map_or(0, conversation_retained_bytes),
+        )
+        .saturating_add(conversation.platform_data.as_ref().map_or(0, |data| {
+            data.platform.capacity() + data.data.to_string().len()
+        }))
+        .saturating_add(128)
 }
 
 impl InboundFrame for MessageFrame {
@@ -234,16 +215,18 @@ impl InboundFrame for MessageFrame {
         self.id
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid message event id: {error}")))?;
-        self.conversation
+        CompactId::from(self.conversation.id.clone())
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid conversation id: {error}")))?;
         self.actor
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid actor id: {error}")))?;
-        if let Some(subspace) = &self.subspace {
-            subspace
+        if let Some(parent) = &self.conversation.parent {
+            CompactId::from(parent.id.clone())
                 .validate()
-                .map_err(|error| DecodeError::new(format!("invalid subspace id: {error}")))?;
+                .map_err(|error| {
+                    DecodeError::new(format!("invalid parent conversation id: {error}"))
+                })?;
         }
         if self.message.id.is_empty() {
             return Err(DecodeError::new("message id must not be empty"));
@@ -279,11 +262,11 @@ impl InboundFrame for MessageFrame {
             .as_ref()
             .ok_or_else(|| DecodeError::new("message frame has no conversation"))?;
         let retained = self.retained_bytes();
-        let event = Event::MessageEvent(MessageEvent {
+        let event = Event::Message(MessageEvent {
             id: self.id.as_str().to_owned(),
             time: None,
             sender: self.sender,
-            group: self.group,
+            conversation: self.conversation,
             message: self.message,
         });
         let mut draft = DispatchDraft::new(self.id, index, event, retained);
@@ -302,7 +285,7 @@ impl MessageFrameBuilder {
     #[must_use]
     pub fn new(
         id: EventId,
-        conversation: impl Into<CompactId>,
+        conversation: ConversationRef,
         actor: impl Into<CompactId>,
         message: Message,
     ) -> Self {
@@ -312,20 +295,8 @@ impl MessageFrameBuilder {
     }
 
     #[must_use]
-    pub fn subspace(mut self, subspace: impl Into<CompactId>) -> Self {
-        self.frame = self.frame.in_subspace(subspace);
-        self
-    }
-
-    #[must_use]
     pub fn sender(mut self, sender: User) -> Self {
         self.frame = self.frame.sender(sender);
-        self
-    }
-
-    #[must_use]
-    pub fn group(mut self, group: Group) -> Self {
-        self.frame = self.frame.group(group);
         self
     }
 
@@ -603,7 +574,7 @@ impl AdapterContext {
     pub async fn submit_message(
         &self,
         id: EventId,
-        conversation: impl Into<CompactId>,
+        conversation: ConversationRef,
         actor: impl Into<CompactId>,
         message: Message,
     ) -> std::result::Result<Submission, AdapterError> {
@@ -616,7 +587,7 @@ impl AdapterContext {
     pub async fn submit_text(
         &self,
         id: EventId,
-        conversation: impl Into<CompactId>,
+        conversation: ConversationRef,
         actor: impl Into<CompactId>,
         message_id: impl Into<String>,
         text: impl Into<String>,
@@ -820,16 +791,22 @@ mod retained_size_tests {
     #[test]
     fn message_frame_charges_owned_profile_strings() {
         let id = EventId::new("retained-profile").expect("static event id");
-        let baseline = MessageFrame::text(id.clone(), "room", "user", "1", "hello");
+        let baseline = MessageFrame::text(
+            id.clone(),
+            ConversationRef::direct("room"),
+            "user",
+            "1",
+            "hello",
+        );
         let baseline_bytes = baseline.retained_bytes();
-        let frame = MessageFrame::text(id, "room", "user", "1", "hello").sender(User {
-            id: "user".into(),
-            profile: Some(UserProfile {
-                nickname: Some("x".repeat(1024 * 1024)),
-                ..UserProfile::default()
-            }),
-            group_info: None,
-        });
+        let frame = MessageFrame::text(id, ConversationRef::direct("room"), "user", "1", "hello")
+            .sender(User {
+                id: "user".into(),
+                profile: Some(UserProfile {
+                    display_name: Some("x".repeat(1024 * 1024)),
+                    ..UserProfile::default()
+                }),
+            });
 
         assert!(frame.retained_bytes() >= baseline_bytes.saturating_add(1024 * 1024));
     }

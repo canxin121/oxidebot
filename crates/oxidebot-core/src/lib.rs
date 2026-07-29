@@ -37,7 +37,7 @@ pub use application::{
     MiniAppLaunch, MiniAppMode, Suggestion, SuggestionRequest, SuggestionSelection, SurfaceContent,
     VerificationState,
 };
-pub use bot::{BotObject, BotTrait};
+pub use bot::BotObject;
 pub use capability::{
     ApplicationCapabilities, BotCapabilities, ButtonCapabilities, CollaborationCapabilities,
     ComponentCapabilities, ContentCapabilities, ConversationCapabilities, DeliveryCapabilities,
@@ -53,19 +53,18 @@ pub use commerce::{
 };
 pub use content::{
     BatchItemResult, BatchMessage, BatchSendResult, Checklist, ChecklistChange, ChecklistTask,
-    ContactCard, ContentConversionError, CustomEmoji, DeliveryTime, FormValue, ForwardContext,
-    ForwardOptions, LayoutColumn, LayoutNode, LayoutStyle, LinkPreviewOptions, LocationContent,
-    Media, MediaGalleryItem, MediaType, MentionAllowance, MentionPolicy, MessageContent,
-    MessageEnvelope, MessageOrigin, MessageQuery, MessageVisibility, NotificationPolicy,
-    OutgoingMessage, PhoneNumber, Poll, PollOption, PollType, ReplyContext, ReplyOptions,
-    RichLayout, RichText, Sticker, TableCell, TextSpan, TextStyle,
+    ContactCard, CustomEmoji, DeliveryTime, FormValue, ForwardContext, ForwardOptions,
+    LayoutColumn, LayoutNode, LayoutStyle, LinkPreviewOptions, LocationContent, Media,
+    MediaGalleryItem, MediaType, MentionAllowance, MentionPolicy, MessageEnvelope, MessageOrigin,
+    MessageQuery, MessageVisibility, NotificationPolicy, PhoneNumber, Poll, PollOption, PollType,
+    ReplyContext, ReplyOptions, RichLayout, RichText, Sticker, TableCell, TextSpan, TextStyle,
 };
 pub use conversation::{
     ConversationKind, ConversationMember, ConversationPermission, ConversationProfile,
     ConversationRef, InviteLink, InviteLinkOptions, JoinRequest, MessageRef, MessageTarget, Page,
     PageRequest, PermissionSet, RoleRef, Thread, ThreadOptions, ThreadState,
 };
-pub use event::{Event, EventObject, EventTrait};
+pub use event::Event;
 pub use interaction::{
     ActionRow, BotCommand, BotCommandQuery, BotCommandSet, Button, ButtonAction, ButtonIcon,
     ButtonStyle, ChatMenu, ChoiceOption, ChosenChatCriteria, CommandScope, InlineKeyboard,
@@ -78,8 +77,8 @@ pub use interaction::{
 };
 pub use source::message::{
     DegradationKind, DeliveryDegradation, DeliveryItemResult, DeliveryPlan, DeliveryPlanningError,
-    DeliveryReport, FallbackPolicy, File, Folder, FsNode, IntoMessageSegment, Message,
-    MessageOptions, MessageSegment, PartialDeliveryError, SegmentKind,
+    DeliveryReport, FallbackPolicy, File, IntoMessageSegment, Message, MessageOptions,
+    MessageSegment, PartialDeliveryError, SegmentKind,
 };
 
 pub use template::*;

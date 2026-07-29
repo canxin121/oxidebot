@@ -7,8 +7,8 @@ Bot-domain concepts throughout:
 Module -> match -> Context -> Extract -> async handler -> Outcome
 ```
 
-There is no public HTTP-style `Request` or `Response`, no URL tree, no nested
-routing, and no Tower continuation chain.
+There is one Bot-domain handler pipeline with no parallel request or routing
+object model.
 
 ## Ordinary async handlers
 
@@ -26,11 +26,11 @@ async fn echo(Text(text): Text) -> Message {
 
 async fn inspect(
     Sender(user): Sender,
-    MaybeGroup(group): MaybeGroup,
+    MaybeConversation(conversation): MaybeConversation,
     State(state): State<AppState>,
 ) -> HandlerResult<String> {
     state
-        .inspect(user.id, group.0)
+        .inspect(user.id, conversation)
         .await
         .internal("inspect account")
 }
@@ -45,12 +45,12 @@ handler has matched and after module admission and command validation/completion
 let features = Module::new()
     .add(ping)
     .message(observe_message)
-    .on(tags::FriendAdd, friend_request)
+    .on(tags::FriendRequested, friend_request)
     .interaction("settings.save", save_settings)
     .native("vendor.event", native_event);
 ```
 
-`on(tag, handler)` uses the exact 0.1.8 `EventTag` and the stable dense event
+`on(tag, handler)` uses the exact canonical `EventTag` and the dense event
 index. `message` is a convenience for `on(tags::Message, ...)`. Commands,
 interactions, and native identifiers use their exact compiled indexes whenever
 possible.
@@ -115,8 +115,8 @@ Common extractors are intentionally domain-specific:
 Text
 Segments
 Sender
-ChatGroup
-MaybeGroup
+Conversation
+MaybeConversation
 MessageId
 Target
 State<S>
@@ -124,7 +124,7 @@ Bot
 Reply
 Dialogue
 Args<T>
-CommandResult
+CommandMatch
 EventContext<Tag>
 BotIdentity
 EventId
@@ -181,11 +181,11 @@ fallback policy, deterministic bot selection, delivery middleware, and
 
 ```rust
 async fn joined(
-    event: EventContext<tags::GroupMemberIncrease>,
+    event: EventContext<tags::GroupMemberJoined>,
 ) -> Message {
     Message::text("Welcome ")
         .at(event.user.id.clone())
-        .then(format!(" to group {}", event.group.id))
+        .then(format!(" to conversation {}", event.conversation.id))
 }
 ```
 
@@ -213,7 +213,7 @@ fn admin_module() -> Module<AppState> {
 let application = Module::new()
     .include(todo_module())
     .include(admin_module())
-    .on(tags::GroupMemberIncrease, joined)
+    .on(tags::GroupMemberJoined, joined)
     .help();
 ```
 
@@ -298,9 +298,8 @@ Infallible hooks return `()` or `Outcome` directly; fallible hooks return
 
 Module guards and hooks apply to all direct and included handlers regardless of
 method-call order. Child guards and before hooks run inside parent guards and
-before hooks; child after hooks run before parent after hooks. This fixed
-structural order replaces Tower's order-sensitive `layer` / `route_layer`
-behavior.
+before hooks; child after hooks run before parent after hooks. This order is
+fixed by structure.
 
 ## Platform and bot scope
 
@@ -370,7 +369,7 @@ application builder also accepts narrow cross-cutting authoring phases:
 ```rust
 OxideBot::with_state(state)
     .message_normalizer(normalize_message)
-    .command_rewriter(rewrite_legacy_commands)
+    .command_rewriter(rewrite_natural_language)
     .command_middleware(audit_parsed_command)
     .command_output_middleware(theme_help)
     .delivery_middleware(inspect_delivery)
@@ -385,8 +384,7 @@ registry or load-order-dependent mutation after startup.
 Use the narrowest phase:
 
 - `MessageNormalizer` for canonical inbound-message cleanup;
-- `CommandRewriter` for deliberate legacy, shortcut, or natural-language input
-  translation;
+- `CommandRewriter` for shortcut or natural-language input translation;
 - `CommandMiddleware` for an already parsed `CommandMatch`;
 - `CommandOutputMiddleware` for structured help, error, or completion output;
 - `DeliveryMiddleware` for a bounded, capability-checked `DeliveryPlan`.

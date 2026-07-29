@@ -2,8 +2,8 @@
 
 ## One semantic model
 
-OxideBot exposes one event hierarchy: the restored 0.1.8 `Event`. It exposes one
-platform-neutral bot API: `CallApiTrait`. Commands, modules, extractors,
+OxideBot exposes one canonical `Event` hierarchy and one platform-neutral bot
+API: `CallApiTrait`. Commands, modules, extractors,
 dialogues, and reply helpers are orchestration around those same types; they do
 not introduce a reduced event body or second API.
 
@@ -41,7 +41,7 @@ Module candidate match
 - current `BotHandle` and complete API object;
 - the bounded `SessionRegistry`;
 - shutdown;
-- an optional lossless `CommandResult`.
+- an optional lossless `CommandMatch`.
 
 There is no parallel request object, dynamic request extensions, or per-handler
 event copy.
@@ -64,8 +64,7 @@ across the application builder and several small modules.
 
 Module-wide guards and before hooks are prepended to included handlers. Module
 `after` hooks are appended, so child after hooks run before parent after hooks.
-The result is deterministic and independent of method-call order; there is no
-Tower `layer` / `route_layer` distinction.
+The result is deterministic and independent of method-call order.
 
 Platform and bot restrictions also compose structurally. Inclusion intersects
 scopes instead of overwriting them, so a parent cannot accidentally broaden a
@@ -80,7 +79,7 @@ compact.
 
 Routes use existing indexes:
 
-- exact `EventType` handlers enter the stable 53-slot dense table;
+- exact `EventType` handlers enter the 52-slot dense table;
 - normal `/name` commands enter the exact command-root table;
 - interaction IDs and platform-native names enter exact hash tables;
 - custom-prefix, no-prefix, case-insensitive commands, and applications with
@@ -102,10 +101,10 @@ without a runtime type map or repetitive extractor implementations.
 
 No extractor runs before a handler matches. Interactive completion is not an
 extractor: the command endpoint performs that workflow once, then `Args<T>`
-parses synchronously from the completed `CommandResult`.
+parses synchronously from the completed `CommandMatch`.
 
 The lack of a generic optional extractor is intentional. Absence is expressed
-by domain types such as `MaybeGroup`, while parse, permission, API, and
+by domain types such as `MaybeConversation`, while parse, permission, API, and
 configuration errors remain visible.
 
 ## Commands
@@ -202,7 +201,7 @@ A platform frame first produces a compact `DispatchIndex` containing:
 Static route interest and dynamic session interest are checked against this
 index. An uninterested frame can be dropped before full event decode. An
 admitted adapter frame becomes a `DispatchDraft`; runtime validation confirms
-that the decoded 0.1.8 event agrees with the compact index.
+that the decoded event agrees with the compact index.
 
 ## Ownership and ordering
 
@@ -270,8 +269,8 @@ The convenience layer is intentionally compile-time or cold-path only:
 - `DialogueQuestion<T>` validates and retries without changing normal dispatch;
 - `ResultExt` and `OptionExt` preserve the explicit user/internal/API error
   boundary while removing repetitive `map_err` blocks;
-- focused preludes keep ordinary IDE completion small while retaining an
-  explicit `oxidebot::all::*` compatibility surface;
+- focused preludes keep ordinary IDE completion small; adapter and framework
+  work imports the focused facade module or explicit core/runtime exports;
 - `MessageFrame` and `AdapterContext::submit_text` provide a conservative
   canonical-frame path for simple transports, while high-throughput adapters
   retain direct `InboundFrame` control;

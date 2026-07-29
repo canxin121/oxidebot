@@ -8,11 +8,10 @@ use crate::{
     router::{CompiledRouter, RouterLimits, RouterRuntime},
     session::{SessionDelivery, SessionRegistry},
     Adapter, AuthoringRuntime, BotDescriptor, BotDirectory, BotServices, BuildError,
-    CatalogCommandRenderer, CommandCatalog, CommandFieldId, CommandId, CommandMiddleware,
-    CommandOutputMiddleware, CommandRegistry, CommandRenderer, CommandRewriter, DeliveryMiddleware,
-    DynamicCompleter, Filter, LocaleResolver, MessageNormalizer, MetricsHandle, Result,
-    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeProfile, Service, ServiceContext,
-    ServiceError, ShutdownSignal,
+    CatalogCommandRenderer, CommandCatalog, CommandMiddleware, CommandOutputMiddleware,
+    CommandRegistry, CommandRenderer, CommandRewriter, DeliveryMiddleware, Filter, LocaleResolver,
+    MessageNormalizer, MetricsHandle, Result, RuntimeConfig, RuntimeError, RuntimeMetrics,
+    RuntimeProfile, Service, ServiceContext, ServiceError, ShutdownSignal,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use oxidebot_core::event::kernel::{DispatchEnvelope, DispatchKind, MAX_ROUTE_KEY_BYTES};
@@ -225,44 +224,6 @@ where
             .delivery_middleware
             .push(Arc::new(middleware));
         self
-    }
-
-    #[deprecated(note = "attach dynamic completion to Feature::complete or #[arg(complete = ...)]")]
-    #[must_use]
-    pub fn completer<C>(mut self, command: CommandId, field: CommandFieldId, completer: C) -> Self
-    where
-        C: DynamicCompleter<S>,
-    {
-        self.authoring
-            .completers
-            .insert((command, field), Arc::new(completer));
-        self
-    }
-
-    /// Registers a dynamic completion provider by branch and field name while
-    /// resolving the stable IDs from the canonical command tree.
-    #[deprecated(note = "attach dynamic completion to Feature::complete or #[arg(complete = ...)]")]
-    pub fn completer_for<C>(
-        mut self,
-        command: &crate::Command,
-        branch: &[&str],
-        field: &str,
-        completer: C,
-    ) -> std::result::Result<Self, BuildError>
-    where
-        C: DynamicCompleter<S>,
-    {
-        let field_id = command.field_id(branch, field).ok_or_else(|| {
-            BuildError::InvalidRoute(format!(
-                "command `{}` has no field `{field}` on branch `{}`",
-                command.name(),
-                branch.join(" "),
-            ))
-        })?;
-        self.authoring
-            .completers
-            .insert((command.id(), field_id), Arc::new(completer));
-        Ok(self)
     }
 
     #[must_use]

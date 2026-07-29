@@ -405,10 +405,10 @@ mod tests {
     use async_trait::async_trait;
     use oxidebot_core::event::kernel::{DispatchDraft, DispatchIndex};
     use oxidebot_core::{
-        api::{payload::SendMessageTarget, response::SendMessageResponse},
+        conversation::{ConversationRef, MessageRef, MessageTarget},
         event::{Event, EventType, MessageEvent},
         source::{
-            message::{Message, MessageSegment},
+            message::{DeliveryItemResult, DeliveryPlan, DeliveryReport, Message, MessageSegment},
             user::User,
         },
         BotId, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
@@ -420,14 +420,21 @@ mod tests {
 
     #[async_trait]
     impl CallApiTrait for NoopApi {
-        async fn send_message(
+        async fn send_delivery_plan(
             &self,
-            _message: Vec<MessageSegment>,
-            _target: SendMessageTarget,
-        ) -> anyhow::Result<Vec<SendMessageResponse>> {
-            Ok(vec![SendMessageResponse {
-                sent_message_id: "1".to_owned(),
-            }])
+            target: MessageTarget,
+            plan: DeliveryPlan,
+        ) -> anyhow::Result<DeliveryReport> {
+            let sent = MessageRef::new("1").in_conversation(target.conversation);
+            Ok(DeliveryReport {
+                messages: vec![sent.clone()],
+                degradations: plan.degradations,
+                items: vec![DeliveryItemResult {
+                    index: 0,
+                    messages: vec![sent],
+                    error: None,
+                }],
+            })
         }
     }
 
@@ -442,14 +449,14 @@ mod tests {
             DispatchDraft::new(
                 EventId::new("wake-up").expect("static event ID"),
                 index,
-                Event::MessageEvent(MessageEvent {
+                Event::Message(MessageEvent {
                     id: "wake-up".to_owned(),
                     time: None,
                     sender: User {
                         id: "user".to_owned(),
                         ..User::default()
                     },
-                    group: None,
+                    conversation: ConversationRef::direct("room"),
                     message: Message {
                         id: "1".to_owned(),
                         segments: vec![MessageSegment::text("hello")],

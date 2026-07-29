@@ -3,14 +3,16 @@
 use async_trait::async_trait;
 use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex};
 use oxidebot_core::{
-    api::{payload::SendMessageTarget, response::SendMessageResponse},
-    conversation::{ConversationRef, MessageRef},
+    conversation::{ConversationRef, MessageRef, MessageTarget},
     event::{Event, EventType, MessageEvent},
     interaction::{
         InteractionEvent, InteractionKind, InteractionResponse, InteractionResponseHandle,
     },
     source::{
-        message::{Message, MessageOptions, MessageSegment},
+        message::{
+            DeliveryItemResult, DeliveryPlan, DeliveryReport, Message, MessageSegment,
+            PartialDeliveryError,
+        },
         user::User,
     },
     BotCapabilities, BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId,
@@ -45,7 +47,6 @@ impl DecodeCounter {
 pub struct TestFrame {
     id: EventId,
     conversation: CompactId,
-    subspace: Option<CompactId>,
     actor: CompactId,
     message_id: CompactId,
     text: Arc<str>,
@@ -64,18 +65,11 @@ impl TestFrame {
         Self {
             id,
             conversation: conversation.into(),
-            subspace: None,
             actor: actor.into(),
             message_id: message_id.into(),
             text: text.into(),
             decodes: DecodeCounter::default(),
         }
-    }
-
-    #[must_use]
-    pub fn in_subspace(mut self, subspace: impl Into<CompactId>) -> Self {
-        self.subspace = Some(subspace.into());
-        self
     }
 
     #[must_use]
@@ -85,11 +79,7 @@ impl TestFrame {
 
     fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
         let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
-        let mut conversation = ConversationKey::new(bot, self.conversation.clone());
-        if let Some(subspace) = &self.subspace {
-            conversation = conversation.in_subspace(subspace.clone());
-        }
-        index.conversation = Some(conversation);
+        index.conversation = Some(ConversationKey::new(bot, self.conversation.clone()));
         index.actor = Some(UserKey::new(bot, self.actor.clone()));
         index.command = self
             .text
@@ -106,7 +96,6 @@ impl TestFrame {
         self.id
             .estimated_bytes()
             .saturating_add(self.conversation.estimated_bytes())
-            .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
             .saturating_add(self.actor.estimated_bytes())
             .saturating_add(self.message_id.estimated_bytes())
             .saturating_add(self.text.len())
@@ -154,14 +143,14 @@ impl InboundFrame for TestFrame {
         let message_id = self.message_id.to_string();
         let actor_id = self.actor.to_string();
         let text = self.text.to_string();
-        let event = Event::MessageEvent(MessageEvent {
+        let event = Event::Message(MessageEvent {
             id: self.id.as_str().to_owned(),
             time: None,
             sender: User {
                 id: actor_id,
                 ..User::default()
             },
-            group: None,
+            conversation: ConversationRef::direct(self.conversation.to_string()),
             message: Message {
                 id: message_id,
                 segments: vec![MessageSegment::text(text)],
@@ -258,7 +247,7 @@ impl InboundFrame for InteractionFrame {
         let index = self.event_index(bot, platform);
         let retained_event_bytes = self.retained_event_bytes();
         let actor_id = self.actor.to_string();
-        let event = Event::InteractionEvent(InteractionEvent {
+        let event = Event::Interaction(InteractionEvent {
             id: self.id.as_str().to_owned(),
             kind: InteractionKind::Button,
             action_id: Some(self.action_id.to_string()),
@@ -267,7 +256,7 @@ impl InboundFrame for InteractionFrame {
                 id: actor_id,
                 ..User::default()
             },
-            group: None,
+            conversation: Some(ConversationRef::direct(self.conversation.to_string())),
             message: None,
             context_id: Some(self.conversation.to_string()),
             response: Some(InteractionResponseHandle {
@@ -296,8 +285,8 @@ impl InboundFrame for InteractionFrame {
 /// Successfully sent message recorded by the scripted API.
 #[derive(Clone, Debug)]
 pub struct SentMessage {
-    pub target: SendMessageTarget,
-    pub message: Vec<MessageSegment>,
+    pub target: MessageTarget,
+    pub message: Message,
 }
 
 /// Scheduler-observable interaction API call recorded by [`ScriptedApi`].
@@ -411,11 +400,7 @@ impl ScriptedApi {
 }
 
 impl ScriptedApi {
-    fn record(
-        &self,
-        target: SendMessageTarget,
-        message: Vec<MessageSegment>,
-    ) -> Result<usize, PlatformError> {
+    fn record(&self, target: MessageTarget, message: Message) -> Result<usize, PlatformError> {
         let attempt = self.0.attempts.fetch_add(1, Ordering::AcqRel) + 1;
         let mut failures = self.0.temporary_failures.load(Ordering::Acquire);
         let should_fail = loop {
@@ -451,7 +436,7 @@ impl ScriptedApi {
 #[async_trait]
 impl CallApiTrait for ScriptedApi {
     fn bot_capabilities(&self) -> BotCapabilities {
-        let mut capabilities = BotCapabilities::legacy_message_api();
+        let mut capabilities = BotCapabilities::portable();
         capabilities.delivery.idempotency_keys = SupportLevel::Native;
         capabilities.interaction_lifecycle.acknowledge = SupportLevel::Native;
         capabilities.interaction_lifecycle.defer = SupportLevel::Native;
@@ -461,27 +446,51 @@ impl CallApiTrait for ScriptedApi {
         capabilities
     }
 
-    async fn send_message_with_options(
+    async fn send_delivery_plan(
         &self,
-        message: Vec<MessageSegment>,
-        target: SendMessageTarget,
-        _options: MessageOptions,
-    ) -> anyhow::Result<Vec<SendMessageResponse>> {
-        let attempt = self.record(target, message).map_err(anyhow::Error::new)?;
-        Ok(vec![SendMessageResponse {
-            sent_message_id: attempt.to_string(),
-        }])
-    }
-
-    async fn send_message(
-        &self,
-        message: Vec<MessageSegment>,
-        target: SendMessageTarget,
-    ) -> anyhow::Result<Vec<SendMessageResponse>> {
-        let attempt = self.record(target, message).map_err(anyhow::Error::new)?;
-        Ok(vec![SendMessageResponse {
-            sent_message_id: attempt.to_string(),
-        }])
+        target: MessageTarget,
+        plan: DeliveryPlan,
+    ) -> anyhow::Result<DeliveryReport> {
+        let mut messages = Vec::new();
+        let mut items = Vec::with_capacity(plan.messages.len());
+        for (index, message) in plan.messages.into_iter().enumerate() {
+            match self
+                .record(target.clone(), message)
+                .map_err(anyhow::Error::new)
+            {
+                Ok(attempt) => {
+                    let sent = MessageRef::new(attempt.to_string())
+                        .in_conversation(target.conversation.clone());
+                    messages.push(sent.clone());
+                    items.push(DeliveryItemResult {
+                        index,
+                        messages: vec![sent],
+                        error: None,
+                    });
+                }
+                Err(error) if messages.is_empty() => return Err(error),
+                Err(error) => {
+                    items.push(DeliveryItemResult {
+                        index,
+                        messages: Vec::new(),
+                        error: Some(error.to_string()),
+                    });
+                    return Err(PartialDeliveryError {
+                        report: DeliveryReport {
+                            messages,
+                            degradations: plan.degradations,
+                            items,
+                        },
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(DeliveryReport {
+            messages,
+            degradations: plan.degradations,
+            items,
+        })
     }
 
     async fn answer_interaction(
@@ -904,7 +913,7 @@ where
             ));
         }
         for (index, (actual, expected)) in sent.iter().zip(&self.expectations).enumerate() {
-            let actual_message = Message::from(actual.message.clone());
+            let actual_message = actual.message.clone();
             let actual_text = actual_message.get_raw_text();
             let matches = match expected {
                 ReplyExpectation::Exact(expected) => actual_text == *expected,

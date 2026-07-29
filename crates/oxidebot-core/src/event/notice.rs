@@ -1,150 +1,72 @@
-use anyhow::Result;
 use std::time::Duration;
 
 use crate::{
-    api::response,
-    bot::BotObject,
-    source::{
-        group::Group,
-        message::{Message, MessageSegment},
-        user::User,
-    },
+    conversation::ConversationRef,
+    source::{message::Message, user::User},
 };
 
-#[allow(clippy::large_enum_variant)] // Kept inline for public API compatibility.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(
-    clippy::enum_variant_names,
-    reason = "variant names preserve the public 0.1.8 event model"
-)]
 pub enum NoticeEvent {
-    GroupMemberIncreaseEvent(GroupMemberIncreaseEvent),
-    GroupMemberDecreaseEvent(GroupMemberDecreaseEvent),
-    GroupAdminChangeEvent(GroupAdminChangeEvent),
-    GroupMuteChangeEvent(GroupMuteChangeEvent),
-    GroupMemberMuteChangeEvent(GroupMemberMuteChangeEvent),
-    GroupHighlightChangeEvent(GroupHighlightChangeEvent),
-    GroupMemberAliasChangeEvent(GroupMemberAliasChangeEvent),
-    MessageReactionsEvent(MessageReactionsEvent),
-    MessageDeletedEvent(MessageDeletedEvent),
-    MessageEditedEvent(MessageEditedEvent),
-}
-
-impl NoticeEvent {
-    pub async fn send_message(
-        &self,
-        bot: BotObject,
-        message: Vec<MessageSegment>,
-    ) -> Result<Vec<response::SendMessageResponse>> {
-        async fn send_group_message_helper(
-            bot: BotObject,
-            message: Vec<MessageSegment>,
-            group_id: String,
-        ) -> Result<Vec<response::SendMessageResponse>> {
-            bot.send_message(
-                message,
-                crate::api::payload::SendMessageTarget::Group(group_id),
-            )
-            .await
-        }
-        async fn send_private_message_helper(
-            bot: BotObject,
-            message: Vec<MessageSegment>,
-            user_id: String,
-        ) -> Result<Vec<response::SendMessageResponse>> {
-            bot.send_message(
-                message,
-                crate::api::payload::SendMessageTarget::Private(user_id),
-            )
-            .await
-        }
-        match self {
-            NoticeEvent::GroupAdminChangeEvent(GroupAdminChangeEvent { group, .. })
-            | NoticeEvent::GroupHighlightChangeEvent(GroupHighlightChangeEvent { group, .. })
-            | NoticeEvent::GroupMemberAliasChangeEvent(GroupMemberAliasChangeEvent {
-                group, ..
-            })
-            | NoticeEvent::GroupMemberIncreaseEvent(GroupMemberIncreaseEvent { group, .. })
-            | NoticeEvent::GroupMemberDecreaseEvent(GroupMemberDecreaseEvent { group, .. })
-            | NoticeEvent::GroupMemberMuteChangeEvent(GroupMemberMuteChangeEvent {
-                group, ..
-            }) => send_group_message_helper(bot, message, group.id.clone()).await,
-            NoticeEvent::MessageEditedEvent(MessageEditedEvent { user, group, .. })
-            | NoticeEvent::MessageReactionsEvent(MessageReactionsEvent { user, group, .. }) => {
-                if let Some(group) = group {
-                    send_group_message_helper(bot, message, group.id.clone()).await
-                } else {
-                    send_private_message_helper(bot, message, user.id.clone()).await
-                }
-            }
-            NoticeEvent::GroupMuteChangeEvent(GroupMuteChangeEvent { group, r#type, .. }) => {
-                if let MuteType::Mute { .. } = r#type {
-                    Err(anyhow::anyhow!("Group is muted, can't send message"))
-                } else {
-                    send_group_message_helper(bot, message, group.id.clone()).await
-                }
-            }
-            NoticeEvent::MessageDeletedEvent(MessageDeletedEvent { user, group, .. }) => {
-                if let Some(group) = group {
-                    send_group_message_helper(bot, message, group.id.clone()).await
-                } else if let Some(user) = user {
-                    send_private_message_helper(bot, message, user.id.clone()).await
-                } else {
-                    Err(anyhow::anyhow!("Can't send message to unknown user"))
-                }
-            }
-        }
-    }
+    GroupMemberJoined(Box<GroupMemberJoinedEvent>),
+    GroupMemberLeft(Box<GroupMemberLeftEvent>),
+    GroupAdminChanged(Box<GroupAdminChangedEvent>),
+    GroupMuteChanged(Box<GroupMuteChangedEvent>),
+    GroupMemberMuteChanged(Box<GroupMemberMuteChangedEvent>),
+    GroupHighlightChanged(Box<GroupHighlightChangedEvent>),
+    GroupMemberAliasChanged(Box<GroupMemberAliasChangedEvent>),
+    MessageReactionsChanged(Box<MessageReactionsChangedEvent>),
+    MessageDeleted(Box<MessageDeletedEvent>),
+    MessageEdited(Box<MessageEditedEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupMemberIncreaseEvent {
-    pub group: Group,
+pub struct GroupMemberJoinedEvent {
+    pub conversation: ConversationRef,
     pub user: User,
-    pub reason: GroupMemberIncreaseReason,
+    pub reason: GroupMemberJoinReason,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupMemberDecreaseEvent {
-    pub group: Group,
+pub struct GroupMemberLeftEvent {
+    pub conversation: ConversationRef,
     pub user: User,
-    pub reason: GroupMemberDecreaseReason,
+    pub reason: GroupMemberLeaveReason,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupAdminChangeEvent {
-    pub group: Group,
+pub struct GroupAdminChangedEvent {
+    pub conversation: ConversationRef,
     pub user: User,
-    pub r#type: GroupAdminChangeType,
+    pub state: GroupAdminState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupMuteChangeEvent {
-    pub group: Group,
+pub struct GroupMuteChangedEvent {
+    pub conversation: ConversationRef,
     pub operator: Option<User>,
-    pub r#type: MuteType,
+    pub state: MuteState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupMemberMuteChangeEvent {
-    pub group: Group,
+pub struct GroupMemberMuteChangedEvent {
+    pub conversation: ConversationRef,
     pub user: User,
     pub operator: Option<User>,
-    pub r#type: MuteType,
+    pub state: MuteState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupHighlightChangeEvent {
-    pub group: Group,
-    pub r#type: GroupHighlightChangeType,
+pub struct GroupHighlightChangedEvent {
+    pub conversation: ConversationRef,
+    pub state: GroupHighlightState,
     pub message: Message,
     pub sender: Option<User>,
     pub operator: Option<User>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GroupMemberAliasChangeEvent {
-    pub group: Group,
+pub struct GroupMemberAliasChangedEvent {
+    pub conversation: ConversationRef,
     pub user: User,
     pub operator: Option<User>,
     pub old_alias: Option<String>,
@@ -155,65 +77,64 @@ pub struct GroupMemberAliasChangeEvent {
 pub struct MessageDeletedEvent {
     pub user: Option<User>,
     pub operator: Option<User>,
-    pub group: Option<Group>,
+    pub conversation: Option<ConversationRef>,
     pub message: Option<Message>,
 }
 
-#[allow(clippy::large_enum_variant)] // Kept inline for public API compatibility.
 #[derive(Debug, Clone, PartialEq)]
-pub enum GroupMemberIncreaseReason {
-    Approve {
-        operator: Option<User>,
+pub enum GroupMemberJoinReason {
+    Approved {
+        operator: Option<Box<User>>,
     },
-    Invite {
-        inviter: Option<User>,
-        operator: Option<User>,
+    Invited {
+        inviter: Option<Box<User>>,
+        operator: Option<Box<User>>,
     },
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum GroupMemberDecreaseReason {
-    Kick { operator: Option<User> },
-    KickMe { operator: Option<User> },
-    Leave,
+pub enum GroupMemberLeaveReason {
+    Kicked { operator: Option<User> },
+    BotKicked { operator: Option<User> },
+    Left,
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum GroupAdminChangeType {
-    Set,
-    Unset,
+pub enum GroupAdminState {
+    Granted,
+    Revoked,
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum GroupHighlightChangeType {
-    Set,
-    Unset,
+pub enum GroupHighlightState {
+    Enabled,
+    Disabled,
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MuteType {
-    Mute { duration: Option<Duration> },
-    UnMute,
+pub enum MuteState {
+    Muted { duration: Option<Duration> },
+    Unmuted,
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageEditedEvent {
     pub user: User,
-    pub group: Option<Group>,
+    pub conversation: Option<ConversationRef>,
     pub new_message: Option<Message>,
     pub operator: Option<User>,
     pub old_message: Option<Message>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MessageReactionsEvent {
+pub struct MessageReactionsChangedEvent {
     pub user: User,
-    pub group: Option<Group>,
+    pub conversation: Option<ConversationRef>,
     pub message: Message,
     pub reactions: Vec<String>,
 }

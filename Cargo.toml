@@ -27,7 +27,7 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 async-trait = "0.1.91"
 bytes = "1.10.1"
-criterion = { version = "0.7.0", features = ["async_tokio"] }
+criterion = { version = "0.7.0", default-features = false, features = ["async_tokio"] }
 futures-util = "0.3.31"
 mime_guess = "2.0.5"
 proc-macro2 = "1.0.106"

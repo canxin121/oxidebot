@@ -156,8 +156,8 @@ where
 {
     async fn resolve(&self, context: &Context<S>) -> Option<Arc<str>> {
         let user_id = match context.event() {
-            oxidebot_core::Event::MessageEvent(event) => Some(event.sender.id.as_str()),
-            oxidebot_core::Event::InteractionEvent(event) => Some(event.user.id.as_str()),
+            oxidebot_core::Event::Message(event) => Some(event.sender.id.as_str()),
+            oxidebot_core::Event::Interaction(event) => Some(event.user.id.as_str()),
             _ => None,
         };
         if let Some(locale) = match user_id {

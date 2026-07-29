@@ -109,8 +109,8 @@ let features = Module::new()
 
 The grammar above accepts `/todo add`, `/todo done`, and `/todo list`. Missing
 or unknown branches are diagnosed before the handler runs, with localized
-choices and edit-distance suggestions. This is a command syntax tree; it does
-not reintroduce `mount`, nested application routers, or Tower layers.
+choices and edit-distance suggestions. This is a command syntax tree, while
+application composition remains flat.
 
 Nested branches can also be built explicitly with `CommandBranch::subcommand`
 when a project needs more than one enum level.

@@ -37,14 +37,12 @@ selectors! {
     Videos => Video,
     Audios => Audio,
     Files => File,
-    Replies => Reply,
     UserMentions => MentionUser,
     RoleMentions => MentionRole,
     ChannelMentions => MentionChannel,
     References => Reference,
     Forwards => Forward,
     Polls => Poll,
-    Components => Components,
     NativeSegments => PlatformNative,
 }
 
@@ -143,8 +141,8 @@ pub enum SegmentTransform {
 #[derive(Clone, Debug)]
 pub enum TemplateValue {
     Text(String),
-    Message(Message),
-    Segment(MessageSegment),
+    Message(Box<Message>),
+    Segment(Box<MessageSegment>),
     Mention(String),
     File(File),
 }
@@ -193,12 +191,12 @@ impl From<char> for TemplateValue {
 }
 impl From<Message> for TemplateValue {
     fn from(value: Message) -> Self {
-        Self::Message(value)
+        Self::Message(Box::new(value))
     }
 }
 impl From<MessageSegment> for TemplateValue {
     fn from(value: MessageSegment) -> Self {
-        Self::Segment(value)
+        Self::Segment(Box::new(value))
     }
 }
 impl From<File> for TemplateValue {
@@ -340,7 +338,7 @@ fn render_value(
             output.extend(value.segments.clone())
         }
         (TemplateKind::Auto | TemplateKind::Segment, TemplateValue::Segment(value)) => {
-            output.push(value.clone())
+            output.push(value.as_ref().clone())
         }
         (TemplateKind::Auto | TemplateKind::Mention, TemplateValue::Mention(value)) => {
             output.push(MessageSegment::at(value.clone()))
