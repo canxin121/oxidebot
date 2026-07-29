@@ -1,5 +1,10 @@
 # OxideBot
 
+> **Release status:** `1.0.0-alpha.1`. The public API is being frozen for the
+> 1.0 beta; see [the changelog](CHANGELOG.md),
+> [the 0.1 migration guide](MIGRATING_FROM_0_1.md), and
+> [the stability policy](STABILITY.md).
+
 OxideBot is a high-performance, platform-neutral bot framework built around one
 complete semantic model: one `Event` hierarchy, one cross-platform `Message`
 intermediate representation, and one canonical `CallApiTrait` adapter boundary.

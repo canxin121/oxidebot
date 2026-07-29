@@ -1,21 +1,162 @@
-name: Release validation
+name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v<version> tag to validate or publish"
+        required: true
+        type: string
+      publish:
+        description: "Publish packages and create the GitHub release after validation"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
 
 jobs:
-  package:
+  validate:
+    name: Validate tag, version, changelog, and packages
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo +stable test --workspace --all-targets --all-features --locked
-      - name: Inspect release packages
+        with:
+          components: rustfmt, clippy
+      - id: release
+        name: Require an exact tag/version match
+        shell: bash
         run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "release tag must be v<semver>, got: $tag" >&2
+            exit 1
+          }
+          version="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "oxidebot") | .version')"
+          [[ "$tag" == "v$version" ]] || {
+            echo "tag $tag does not match facade version $version" >&2
+            exit 1
+          }
+          cargo metadata --no-deps --format-version=1 |
+            jq -e --arg version "$version" '
+              [.packages[]
+               | select(.manifest_path | contains("/crates/"))
+               | select(.publish != [])
+               | .version] | all(. == $version)' >/dev/null
+          grep -Fqx "## [$version]" CHANGELOG.md || {
+            echo "CHANGELOG.md needs a ## [$version] section before release" >&2
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: cargo +stable fmt --all -- --check
+      - run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo +stable test --workspace --all-targets --all-features --locked
+      - run: cargo +stable doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -Dwarnings -Dmissing-docs
+      - name: Package every publishable source crate
+        run: |
+          set -euo pipefail
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
+            cargo +stable package -p "$package" --locked
+          done
+      - name: Inspect packaged manifests and sources
+        run: |
+          set -euo pipefail
           for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
             cargo +stable package -p "$package" --list --locked
           done
+
+  publish:
+    name: Publish crates.io release
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: crates-io-release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for package in oxidebot-core oxidebot-runtime oxidebot-macros oxidebot oxidebot-testkit oxidebot-adapter-console; do
+            cargo +stable publish -p "$package" --locked
+          done
+
+  smoke:
+    name: Smoke test published packages
+    needs: [validate, publish]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build a fresh crates.io application
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$(mktemp -d)"
+          trap 'rm -rf "$project"' EXIT
+          cargo +stable new --bin "$project/smoke"
+          cd "$project/smoke"
+          cat >> Cargo.toml <<EOF
+          oxidebot = "=$VERSION"
+          oxidebot-adapter-console = "=$VERSION"
+          EOF
+          cat > src/main.rs <<'EOF'
+          use oxidebot::prelude::*;
+          use oxidebot_adapter_console::ConsoleAdapter;
+
+          fn main() {
+              let _app = OxideBot::new().adapter(ConsoleAdapter::development());
+          }
+          EOF
+          # A new application intentionally has no pre-existing lockfile.
+          cargo +stable check
+
+  github-release:
+    name: Create GitHub release
+    needs: [validate, smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Extract release notes
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          awk -v heading="## [$VERSION]" '
+            $0 == heading { printing=1; next }
+            printing && /^## / { exit }
+            printing { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.validate.outputs.tag }}" \
+            --title "OxideBot ${{ needs.validate.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md
