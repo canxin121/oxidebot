@@ -827,6 +827,7 @@ where
 }
 
 impl I18n {
+    /// Starts an awaitable localized message identified by `key`.
     #[must_use]
     pub fn message(&self, key: impl Into<Arc<str>>) -> I18nMessage {
         I18nMessage {
@@ -835,6 +836,7 @@ impl I18n {
         }
     }
 
+    /// Renders a localized message using the current handler locale.
     pub async fn render(&self, message: LocalizedMessage) -> HandlerResult<Message> {
         self.inner.render(message).await
     }
@@ -854,12 +856,14 @@ pub struct I18nMessage {
 }
 
 impl I18nMessage {
+    /// Supplies one template argument.
     #[must_use]
     pub fn arg(mut self, name: impl Into<Arc<str>>, value: impl Into<TemplateValue>) -> Self {
         self.message = self.message.arg(name, value);
         self
     }
 
+    /// Renders this localized message with its accumulated arguments.
     pub async fn render(self) -> HandlerResult<Message> {
         self.i18n.render(self.message).await
     }
@@ -887,6 +891,7 @@ where
     }
 }
 
+/// Bounded, mutable state for runtime command enablement and shortcuts.
 #[derive(Clone, Debug)]
 pub struct CommandRegistry {
     inner: Arc<RwLock<CommandRegistryState>>,
@@ -906,10 +911,15 @@ struct CommandPublicationState {
 /// Snapshot of local-to-platform command-definition synchronization.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommandPublicationStatus {
+    /// Current local command-registry revision requested for publication.
     pub desired_revision: u64,
+    /// Most recently published revision, if synchronization has succeeded.
     pub published_revision: Option<u64>,
+    /// Revision currently waiting to be published, if any.
     pub pending_revision: Option<u64>,
+    /// Last publication failure, if one occurred.
     pub last_error: Option<Arc<str>>,
+    /// Whether this registry is attached to connected bots for publication.
     pub attached: bool,
 }
 
@@ -927,9 +937,12 @@ struct CommandRegistryState {
     broad_command_matching: bool,
 }
 
+/// Current runtime state for a registered command.
 #[derive(Clone, Debug)]
 pub struct RuntimeCommandState {
+    /// Canonical command name.
     pub name: Arc<str>,
+    /// Whether dispatch currently permits this command.
     pub enabled: bool,
     schema_fingerprint: u64,
     /// Shortcuts compiled with the command definition. They are immutable at runtime.
@@ -945,6 +958,7 @@ impl Default for CommandRegistry {
 }
 
 impl CommandRegistry {
+    /// Creates a registry bounded by the number of commands it retains.
     #[must_use]
     pub fn bounded(capacity: usize) -> Self {
         let capacity = capacity.max(1);
@@ -974,6 +988,7 @@ impl CommandRegistry {
         }
     }
 
+    /// Registers static metadata for a command and initializes its runtime state.
     pub fn register(&self, command: &Command) -> Result<(), HandlerError> {
         let mut state = self.inner.write().expect("command registry lock poisoned");
         for shortcut in command.shortcuts() {
@@ -1519,10 +1534,15 @@ where
 }
 
 pub trait CommandBranchTag: Send + Sync + Sized + 'static {
+    /// Generated command tree that owns this branch.
     type Command: crate::CommandTree;
+    /// Generated arguments parsed for this branch.
     type Arguments: FromCommandMatch;
+    /// Case-insensitive branch path beneath the command root.
     const PATH: &'static [&'static str];
+    /// Whether this branch handler also matches descendant paths.
     const MATCH_DESCENDANTS: bool = false;
+    /// Number of path components removed before parsing [`Self::Arguments`].
     const STRIP_PREFIX: usize = 0;
 
     /// Binds this generated branch marker to its handler as one feature.
@@ -1536,6 +1556,7 @@ pub trait CommandBranchTag: Send + Sync + Sized + 'static {
     }
 }
 
+/// Empty argument type for a command branch without fields.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UnitBranch;
 
@@ -1545,6 +1566,7 @@ impl FromCommandMatch for UnitBranch {
     }
 }
 
+/// Extracted, strongly typed arguments for a generated command branch.
 #[derive(Clone, Debug)]
 pub struct BranchArgs<B>(pub B::Arguments)
 where
@@ -1648,16 +1670,23 @@ where
     }
 }
 
+/// Selects the bot used when sending to an [`Address`].
 #[derive(Clone, Debug)]
 pub enum BotSelection {
+    /// Use the bot currently processing a handler event.
     Current,
+    /// Use the connection with this exact identity.
     Exact(BotIdentity),
+    /// Use the sole connected bot for this platform.
     Platform(PlatformId),
 }
 
+/// A message target plus deterministic bot-selection policy.
 #[derive(Clone, Debug)]
 pub struct Address {
+    /// Destination conversation and optional recipients.
     pub target: MessageTarget,
+    /// Bot selection used to reach the destination.
     pub bot: BotSelection,
 }
 
