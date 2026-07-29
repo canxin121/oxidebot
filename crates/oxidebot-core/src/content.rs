@@ -354,56 +354,91 @@ pub struct Poll {
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// One task in a portable checklist.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChecklistTask {
+    /// Platform task identifier, if available.
     pub id: Option<String>,
+    /// User-visible task text.
     pub text: RichText,
+    /// Whether the task is complete.
     pub completed: bool,
+    /// User that completed the task, if known.
     pub completed_by: Option<User>,
+    /// Completion time, if known.
     pub completed_at: Option<DateTime<Utc>>,
+    /// Lossless platform-specific task metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Portable checklist content.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Checklist {
+    /// Platform checklist identifier, if available.
     pub id: Option<String>,
+    /// Checklist title.
     pub title: RichText,
+    /// Ordered tasks.
     pub tasks: Vec<ChecklistTask>,
+    /// Whether users may add tasks.
     pub can_add_tasks: bool,
+    /// Whether users may mark tasks complete.
     pub can_mark_tasks_done: bool,
+    /// Lossless platform-specific checklist metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Incremental change to a checklist.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChecklistChange {
+    /// Message containing the checklist, if known.
     pub message: Option<MessageRef>,
+    /// Tasks added by the change.
     pub added_tasks: Vec<ChecklistTask>,
+    /// Task identifiers marked complete.
     pub completed_task_ids: Vec<String>,
+    /// Task identifiers reopened by the change.
     pub reopened_task_ids: Vec<String>,
+    /// User that made the change, if known.
     pub actor: Option<User>,
+    /// Lossless platform-specific change metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Presentation options for a rich layout node.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LayoutStyle {
+    /// Optional RGB accent color.
     pub accent_color: Option<u32>,
+    /// Whether content is a spoiler.
     pub spoiler: bool,
+    /// Whether the client may collapse the content.
     pub collapsible: bool,
+    /// Whether collapsible content starts collapsed.
     pub initially_collapsed: bool,
+    /// Lossless platform-specific styling.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// One column in a multi-column rich layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayoutColumn {
+    /// Optional relative column width.
     pub width: Option<u16>,
+    /// Nodes within the column.
     pub nodes: Vec<LayoutNode>,
 }
 
+/// One cell in a rich-layout table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableCell {
+    /// Nodes rendered in the cell.
     pub content: Vec<LayoutNode>,
+    /// Whether the cell is a table header.
     pub header: bool,
+    /// Number of columns spanned.
     pub colspan: Option<u16>,
+    /// Number of rows spanned.
     pub rowspan: Option<u16>,
 }
 
