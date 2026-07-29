@@ -69,6 +69,7 @@ pub trait IntoFeature<S>: Sized
 where
     S: Send + Sync + 'static,
 {
+    /// Installs this feature into `module`.
     fn install(self, module: Module<S>) -> Module<S>;
 }
 
@@ -81,11 +82,13 @@ pub trait GeneratedFeature<S>: IntoFeature<S>
 where
     S: Send + Sync + 'static,
 {
+    /// Converts the generated value into its configurable single-handler feature.
     fn into_feature(self) -> Feature<S>;
 }
 
 /// Local configuration shortcuts for generated command feature values.
 pub trait FeatureExt: Sized {
+    /// Adds a guard to a generated feature.
     fn guard<S, G>(self, guard: G) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -95,6 +98,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().guard(guard)
     }
 
+    /// Adds a before hook to a generated feature.
     fn before<S, B>(self, hook: B) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -104,6 +108,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().before(hook)
     }
 
+    /// Adds an after hook to a generated feature.
     fn after<S, A>(self, hook: A) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -113,6 +118,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().after(hook)
     }
 
+    /// Restricts a generated feature to one platform.
     fn for_platform<S>(self, platform: PlatformId) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -121,6 +127,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().for_platform(platform)
     }
 
+    /// Restricts a generated feature to one bot.
     fn for_bot<S>(self, bot: BotIdentity) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -129,6 +136,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().for_bot(bot)
     }
 
+    /// Sets whether this generated feature stops matching after success.
     fn block<S>(self, block: bool) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -137,6 +145,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().block(block)
     }
 
+    /// Lets matching continue after this generated feature succeeds.
     fn continue_after<S>(self) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -145,6 +154,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().continue_after()
     }
 
+    /// Stops matching after this generated feature succeeds.
     fn stop_after<S>(self) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -153,6 +163,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().stop_after()
     }
 
+    /// Adds a static command shortcut to a generated command feature.
     fn shortcut<S>(self, shortcut: Shortcut) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -161,6 +172,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().shortcut(shortcut)
     }
 
+    /// Enables runtime shortcuts for a generated command feature.
     fn runtime_shortcuts<S>(self) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -169,6 +181,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().runtime_shortcuts()
     }
 
+    /// Adds declarative completion metadata to a generated command feature.
     fn completion<S>(self, completion: CompletionConfig) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -177,6 +190,7 @@ pub trait FeatureExt: Sized {
         self.into_feature().completion(completion)
     }
 
+    /// Attaches a dynamic completion provider to a generated command field.
     fn complete<S, F, C>(self, field: F, provider: C) -> Feature<S>
     where
         S: Send + Sync + 'static,
@@ -203,6 +217,7 @@ where
         }
     }
 
+    /// Creates a feature that handles one exact canonical event type.
     #[must_use]
     pub fn event<E, H, T>(_event: E, handler: H) -> Self
     where
@@ -224,6 +239,7 @@ where
         })
     }
 
+    /// Creates a feature for ordinary message events.
     #[must_use]
     pub fn message<H, T>(handler: H) -> Self
     where
@@ -232,6 +248,7 @@ where
         Self::event(tags::Message, handler)
     }
 
+    /// Creates a feature for one command definition.
     #[must_use]
     pub fn command<H, T>(command: Command, handler: H) -> Self
     where
@@ -249,6 +266,7 @@ where
         })
     }
 
+    /// Creates a feature for a generated command tree.
     #[must_use]
     pub fn command_tree<C, H, T>(handler: H) -> Self
     where
@@ -258,6 +276,7 @@ where
         Self::command(C::command(), handler)
     }
 
+    /// Creates a feature for a generated command-tree branch.
     #[must_use]
     pub fn command_branch<B, H, T>(_branch: B, handler: H) -> Self
     where
@@ -279,6 +298,7 @@ where
         })
     }
 
+    /// Creates a feature for one interaction custom ID.
     #[must_use]
     pub fn interaction<H, T>(custom_id: impl Into<Arc<str>>, handler: H) -> Self
     where
@@ -296,6 +316,7 @@ where
         })
     }
 
+    /// Creates a feature for one adapter-native event kind.
     #[must_use]
     pub fn native<H, T>(kind: impl Into<Arc<str>>, handler: H) -> Self
     where
@@ -313,6 +334,7 @@ where
         })
     }
 
+    /// Adds a guard that runs before this feature's handler.
     #[must_use]
     pub fn guard<G>(mut self, guard: G) -> Self
     where
@@ -322,6 +344,7 @@ where
         self
     }
 
+    /// Adds a hook that runs before this feature's handler.
     #[must_use]
     pub fn before<B>(mut self, hook: B) -> Self
     where
@@ -331,6 +354,7 @@ where
         self
     }
 
+    /// Adds a hook that runs after this feature's handler.
     #[must_use]
     pub fn after<A>(mut self, hook: A) -> Self
     where
@@ -340,6 +364,7 @@ where
         self
     }
 
+    /// Restricts this feature to one platform.
     #[must_use]
     pub fn for_platform(mut self, platform: PlatformId) -> Self {
         let restriction = RouteScope::for_platform(platform);
@@ -350,6 +375,7 @@ where
         self
     }
 
+    /// Restricts this feature to one bot.
     #[must_use]
     pub fn for_bot(mut self, bot: BotIdentity) -> Self {
         let restriction = RouteScope::for_bot(bot);
@@ -360,22 +386,26 @@ where
         self
     }
 
+    /// Sets whether successful handling stops further route matching.
     #[must_use]
     pub const fn block(mut self, block: bool) -> Self {
         self.definition.default_block = block;
         self
     }
 
+    /// Lets routing continue after successful handling.
     #[must_use]
     pub const fn continue_after(self) -> Self {
         self.block(false)
     }
 
+    /// Stops routing after successful handling.
     #[must_use]
     pub const fn stop_after(self) -> Self {
         self.block(true)
     }
 
+    /// Adds a static shortcut to this command feature.
     #[must_use]
     pub fn shortcut(mut self, shortcut: Shortcut) -> Self {
         match &mut self.definition.selector {
@@ -394,6 +424,7 @@ where
         self
     }
 
+    /// Adds declarative completion metadata to this command feature.
     #[must_use]
     pub fn completion(mut self, completion: CompletionConfig) -> Self {
         match &mut self.definition.selector {
@@ -405,6 +436,7 @@ where
         self
     }
 
+    /// Attaches a dynamic completion provider to a named command field.
     #[must_use]
     pub fn complete<F, C>(mut self, _field: F, provider: C) -> Self
     where
@@ -506,6 +538,7 @@ impl<S> Module<S>
 where
     S: Send + Sync + 'static,
 {
+    /// Creates an empty flat module.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -724,6 +757,7 @@ where
         )
     }
 
+    /// Adds a help handler using `command` as its command definition.
     #[must_use]
     pub fn help_command(mut self, command: Command) -> Self {
         if self.handlers.iter().any(|handler| {
@@ -746,6 +780,7 @@ where
         self
     }
 
+    /// Returns the scoped command catalog after applying metadata overlays.
     #[must_use]
     pub fn catalog(&self) -> CommandCatalog {
         let mut seen = std::collections::HashSet::new();
