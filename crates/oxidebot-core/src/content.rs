@@ -235,73 +235,122 @@ pub struct PhoneNumber {
     pub value: String,
 }
 
+/// Contact information sent as message content.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ContactCard {
+    /// Platform user identifier, if associated with one.
     pub user_id: Option<String>,
+    /// Contact first name.
     pub first_name: String,
+    /// Contact last name.
     pub last_name: Option<String>,
+    /// Labeled phone numbers.
     pub phone_numbers: Vec<PhoneNumber>,
+    /// Email addresses.
     pub emails: Vec<String>,
+    /// Organization name.
     pub organization: Option<String>,
+    /// Raw vCard payload.
     pub vcard: Option<String>,
+    /// Lossless platform-specific contact metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Custom platform emoji and its fallback data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomEmoji {
+    /// Platform custom-emoji identifier.
     pub id: String,
+    /// Optional user-visible name.
     pub name: Option<String>,
+    /// Text fallback.
     pub fallback: Option<String>,
+    /// Optional emoji asset.
     pub file: Option<File>,
+    /// Lossless platform-specific emoji metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Sticker content and associated asset metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sticker {
+    /// Platform sticker identifier.
     pub id: String,
+    /// Optional sticker pack identifier.
     pub pack_id: Option<String>,
+    /// Optional associated emoji.
     pub emoji: Option<String>,
+    /// Optional sticker asset.
     pub file: Option<File>,
+    /// Whether the sticker is animated.
     pub animated: bool,
+    /// Whether the sticker is video-based.
     pub video: bool,
+    /// Lossless platform-specific sticker metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Poll behavior supported by the platform.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum PollType {
+    /// Ordinary poll.
     #[default]
     Regular,
+    /// Quiz poll.
     Quiz,
+    /// Platform-native poll type.
     PlatformNative(String),
 }
 
+/// One selectable answer in a poll.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PollOption {
+    /// Platform option identifier, if available.
     pub id: Option<String>,
+    /// User-visible option text.
     pub text: RichText,
+    /// Current vote count, if exposed.
     pub voter_count: Option<u64>,
+    /// Lossless platform-specific option metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
+/// Portable poll state and configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Poll {
+    /// Platform poll identifier, if available.
     pub id: Option<String>,
+    /// Poll question.
     pub question: RichText,
+    /// Available answers.
     pub options: Vec<PollOption>,
+    /// Whether multiple answers may be selected.
     pub allows_multiple_answers: bool,
+    /// Whether users may change their vote.
     pub allows_revoting: Option<bool>,
+    /// Whether only conversation members may vote.
     pub members_only: Option<bool>,
+    /// Country availability restrictions.
     pub country_codes: Vec<String>,
+    /// Whether votes are anonymous.
     pub anonymous: Option<bool>,
+    /// Poll behavior.
     pub kind: PollType,
+    /// Duration for which the poll remains open.
     pub open_for: Option<Duration>,
+    /// Absolute closing time.
     pub closes_at: Option<DateTime<Utc>>,
+    /// Total vote count, if exposed.
     pub total_voter_count: Option<u64>,
     /// Retained as a convenience for platforms limited to one correct answer.
     pub correct_option: Option<usize>,
+    /// Correct answer indexes for platforms that support multiple correct answers.
     pub correct_options: Vec<usize>,
+    /// Optional answer explanation.
     pub explanation: Option<RichText>,
+    /// Whether voting is closed.
     pub closed: bool,
+    /// Lossless platform-specific poll metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
 
