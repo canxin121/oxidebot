@@ -37,11 +37,13 @@ pub struct Message {
 }
 
 impl Message {
+    /// Creates a message from ordered portable segments.
     #[must_use]
     pub fn new(segments: impl IntoIterator<Item = MessageSegment>) -> Self {
         Self::from_segments(segments)
     }
 
+    /// Creates a one-segment plain-text message.
     #[must_use]
     pub fn text(content: impl Into<String>) -> Self {
         Self {
@@ -51,11 +53,13 @@ impl Message {
         }
     }
 
+    /// Creates a one-segment rich-text message.
     #[must_use]
     pub fn rich_text(content: RichText) -> Self {
         Self::from(MessageSegment::RichText(content))
     }
 
+    /// Creates a message from segments while merging adjacent text segments.
     #[must_use]
     pub fn from_segments(segments: impl IntoIterator<Item = MessageSegment>) -> Self {
         let mut message = Self::default();
@@ -63,12 +67,14 @@ impl Message {
         message
     }
 
+    /// Replaces all message-wide delivery options.
     #[must_use]
     pub fn options(mut self, options: MessageOptions) -> Self {
         self.options = options;
         self
     }
 
+    /// Replaces the message interactive component container.
     #[must_use]
     pub fn components(mut self, components: MessageComponents) -> Self {
         self.options.components = Some(components);
@@ -98,32 +104,38 @@ impl Message {
         self.component_row(ActionRow::buttons(buttons))
     }
 
+    /// Appends one button as a new inline keyboard row.
     #[must_use]
     pub fn button(self, button: Button) -> Self {
         self.buttons([button])
     }
 
+    /// Appends a URL button as a new inline keyboard row.
     #[must_use]
     pub fn button_url(self, label: impl Into<String>, url: impl Into<String>) -> Self {
         self.button(Button::url(label, url))
     }
 
+    /// Appends a callback-action button as a new inline keyboard row.
     #[must_use]
     pub fn button_action(self, label: impl Into<String>, data: impl Into<String>) -> Self {
         self.button(Button::callback(label, data))
     }
 
+    /// Appends a send-text button as a new inline keyboard row.
     #[must_use]
     pub fn button_text(self, label: impl Into<String>, text: impl Into<String>) -> Self {
         self.button(Button::send_text(label, text))
     }
 
+    /// Appends one segment and returns the changed message.
     #[must_use]
     pub fn then(mut self, segment: impl IntoMessageSegment) -> Self {
         self.push(segment);
         self
     }
 
+    /// Appends one segment, merging it with a preceding text segment when possible.
     pub fn push(&mut self, segment: impl IntoMessageSegment) {
         let segment = segment.into_message_segment();
         match segment {
@@ -138,17 +150,20 @@ impl Message {
         }
     }
 
+    /// Appends all segments while preserving text-segment normalization.
     pub fn extend(&mut self, segments: impl IntoIterator<Item = MessageSegment>) {
         for segment in segments {
             self.push(segment);
         }
     }
 
+    /// Appends a user mention.
     #[must_use]
     pub fn at(self, user_id: impl Into<String>) -> Self {
         self.then(MessageSegment::at(user_id))
     }
 
+    /// Appends a role mention.
     #[must_use]
     pub fn at_role(self, role_id: impl Into<String>) -> Self {
         self.then(MessageSegment::AtRole {
@@ -156,6 +171,7 @@ impl Message {
         })
     }
 
+    /// Appends a channel mention.
     #[must_use]
     pub fn at_channel(self, channel_id: impl Into<String>) -> Self {
         self.then(MessageSegment::AtChannel {
@@ -163,42 +179,50 @@ impl Message {
         })
     }
 
+    /// Appends an everyone mention.
     #[must_use]
     pub fn at_all(self) -> Self {
         self.then(MessageSegment::at_all())
     }
 
+    /// Sets a reply target by platform message identifier.
     #[must_use]
     pub fn reply_to(mut self, message_id: impl Into<String>) -> Self {
         self.options.reply = Some(ReplyOptions::new(MessageRef::new(message_id.into())));
         self
     }
 
+    /// Appends a reference to another message.
     #[must_use]
     pub fn reference(self, message_id: impl Into<String>) -> Self {
         self.then(MessageSegment::reference(message_id))
     }
 
+    /// Appends image media.
     #[must_use]
     pub fn image(self, file: File) -> Self {
         self.then(MessageSegment::image(file))
     }
 
+    /// Appends video media with an optional duration.
     #[must_use]
     pub fn video(self, file: File, duration: Option<std::time::Duration>) -> Self {
         self.then(MessageSegment::video(file, duration))
     }
 
+    /// Appends audio media with an optional duration.
     #[must_use]
     pub fn audio(self, file: File, duration: Option<std::time::Duration>) -> Self {
         self.then(MessageSegment::audio(file, duration))
     }
 
+    /// Appends a document attachment.
     #[must_use]
     pub fn file(self, file: File) -> Self {
         self.then(MessageSegment::file(file))
     }
 
+    /// Appends media of an explicit portable kind.
     #[must_use]
     pub fn media(self, kind: MediaType, media: Media) -> Self {
         self.then(MessageSegment::Media {
@@ -207,21 +231,25 @@ impl Message {
         })
     }
 
+    /// Appends a poll.
     #[must_use]
     pub fn poll(self, poll: Poll) -> Self {
         self.then(MessageSegment::Poll(poll))
     }
 
+    /// Appends a rich layout.
     #[must_use]
     pub fn layout(self, layout: RichLayout) -> Self {
         self.then(MessageSegment::Layout(layout))
     }
 
+    /// Appends custom emoji by its platform identifier.
     #[must_use]
     pub fn emoji(self, id: impl Into<String>) -> Self {
         self.then(MessageSegment::emoji(id))
     }
 
+    /// Iterates image and animation files in segment order.
     pub fn image_files(&self) -> impl DoubleEndedIterator<Item = &File> {
         self.segments.iter().filter_map(|segment| match segment {
             MessageSegment::Media {
@@ -232,6 +260,7 @@ impl Message {
         })
     }
 
+    /// Iterates document and platform-native attached files in segment order.
     pub fn attached_files(&self) -> impl DoubleEndedIterator<Item = &File> {
         self.segments.iter().filter_map(|segment| match segment {
             MessageSegment::Media {
@@ -242,6 +271,7 @@ impl Message {
         })
     }
 
+    /// Iterates explicitly mentioned user identifiers in segment order.
     pub fn mentioned_users(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.segments.iter().filter_map(|segment| match segment {
             MessageSegment::At { user_id } => Some(user_id.as_str()),
@@ -249,6 +279,7 @@ impl Message {
         })
     }
 
+    /// Iterates configured reply target identifiers.
     pub fn reply_ids(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.options
             .reply
@@ -256,21 +287,25 @@ impl Message {
             .map(|reply| reply.message.id.as_str())
     }
 
+    /// Consumes the message and returns its normalized segments.
     #[must_use]
     pub fn into_segments(self) -> Vec<MessageSegment> {
         self.segments
     }
 
+    /// Returns whether the message has no content and no delivery options.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty() && self.options.is_empty()
     }
 
+    /// Returns the number of normalized segments.
     #[must_use]
     pub fn len(&self) -> usize {
         self.segments.len()
     }
 
+    /// Returns whether the first segment starts with `text`.
     #[must_use]
     pub fn starts_with_text(&self, text: &str) -> bool {
         self.segments.first().is_some_and(|segment| match segment {
@@ -280,6 +315,7 @@ impl Message {
         })
     }
 
+    /// Returns a clone with `text` removed from its first matching text segment.
     #[must_use]
     pub fn trim_head_text(&self, text: &str) -> Vec<MessageSegment> {
         let mut segments = self.segments.clone();
@@ -302,11 +338,13 @@ impl Message {
         segments
     }
 
+    /// Returns a plain-text rendering of all portable segments.
     #[must_use]
     pub fn get_raw_text(&self) -> String {
         self.extract_plain_text()
     }
 
+    /// Returns a plain-text rendering suitable for command parsing.
     #[must_use]
     pub fn extract_plain_text(&self) -> String {
         let capacity = self
@@ -321,22 +359,26 @@ impl Message {
         output
     }
 
+    /// Returns whether at least one segment has `kind`.
     #[must_use]
     pub fn has(&self, kind: SegmentKind) -> bool {
         self.segments.iter().any(|segment| segment.kind() == kind)
     }
 
+    /// Returns the first segment with `kind`.
     #[must_use]
     pub fn first(&self, kind: SegmentKind) -> Option<&MessageSegment> {
         self.segments.iter().find(|segment| segment.kind() == kind)
     }
 
+    /// Iterates all segments with `kind`.
     pub fn select(&self, kind: SegmentKind) -> impl DoubleEndedIterator<Item = &MessageSegment> {
         self.segments
             .iter()
             .filter(move |segment| segment.kind() == kind)
     }
 
+    /// Returns a clone that retains only the requested segment kinds.
     #[must_use]
     pub fn include(&self, kinds: &[SegmentKind]) -> Self {
         Self {
@@ -351,6 +393,7 @@ impl Message {
         }
     }
 
+    /// Returns a clone that omits the requested segment kinds.
     #[must_use]
     pub fn exclude(&self, kinds: &[SegmentKind]) -> Self {
         Self {
@@ -365,6 +408,7 @@ impl Message {
         }
     }
 
+    /// Returns a clone produced by mapping or removing each segment.
     #[must_use]
     pub fn map_segments(
         &self,
@@ -377,6 +421,7 @@ impl Message {
         }
     }
 
+    /// Returns whether the message explicitly mentions `user_id`.
     #[must_use]
     pub fn is_related_to_user(&self, user_id: &str) -> bool {
         self.segments.iter().any(|segment| match segment {
@@ -439,6 +484,7 @@ impl Message {
         })
     }
 
+    /// Estimates bytes retained by this message and its owned data.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         self.id
