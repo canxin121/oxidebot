@@ -4,12 +4,17 @@ use async_trait::async_trait;
 use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex};
 use oxidebot_core::{
     api::{payload::SendMessageTarget, response::SendMessageResponse},
+    conversation::{ConversationRef, MessageRef},
     event::{Event, EventType, MessageEvent},
+    interaction::{
+        InteractionEvent, InteractionKind, InteractionResponse, InteractionResponseHandle,
+    },
     source::{
-        message::{Message, MessageSegment},
+        message::{Message, MessageOptions, MessageSegment},
         user::User,
     },
-    BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId, PlatformId, UserKey,
+    BotCapabilities, BotId, BotSlot, CallApiTrait, CompactId, ConversationKey, EventId,
+    InteractionVisibility, PlatformId, SupportLevel, UserKey,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, Command,
@@ -172,6 +177,7 @@ impl InboundFrame for TestFrame {
 /// One scripted transport action.
 pub enum ScriptStep {
     Frame(TestFrame),
+    Interaction(InteractionFrame),
     Pause(Duration),
     /// Waits until the scripted API has observed at least `count` successful
     /// sends. This is a deterministic synchronization point for multi-turn
@@ -180,6 +186,111 @@ pub enum ScriptStep {
         count: usize,
         timeout: Duration,
     },
+    WaitForInteractions {
+        count: usize,
+        timeout: Duration,
+    },
+}
+
+/// Deterministic answerable interaction frame used by high-level scenarios.
+pub struct InteractionFrame {
+    id: EventId,
+    conversation: CompactId,
+    actor: CompactId,
+    action_id: Arc<str>,
+    response_id: Arc<str>,
+    deadline_after: Duration,
+}
+
+impl InteractionFrame {
+    #[must_use]
+    pub fn click(
+        id: EventId,
+        conversation: impl Into<CompactId>,
+        actor: impl Into<CompactId>,
+        action_id: impl Into<Arc<str>>,
+    ) -> Self {
+        let response_id: Arc<str> = Arc::from(format!("interaction-response-{}", id.as_str()));
+        Self {
+            id,
+            conversation: conversation.into(),
+            actor: actor.into(),
+            action_id: action_id.into(),
+            response_id,
+            deadline_after: Duration::from_secs(5),
+        }
+    }
+
+    #[must_use]
+    pub const fn deadline_after(mut self, deadline_after: Duration) -> Self {
+        self.deadline_after = deadline_after;
+        self
+    }
+
+    fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
+        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Interaction);
+        index.conversation = Some(ConversationKey::new(bot, self.conversation.clone()));
+        index.actor = Some(UserKey::new(bot, self.actor.clone()));
+        index.interaction = Some(Arc::clone(&self.action_id));
+        index
+    }
+
+    fn retained_event_bytes(&self) -> usize {
+        self.id
+            .estimated_bytes()
+            .saturating_add(self.conversation.estimated_bytes())
+            .saturating_add(self.actor.estimated_bytes())
+            .saturating_add(self.action_id.len())
+            .saturating_add(self.response_id.len())
+            .saturating_add(2_048)
+    }
+}
+
+impl InboundFrame for InteractionFrame {
+    fn index(&self, bot: BotSlot, platform: &PlatformId) -> Result<FrameIndex, DecodeError> {
+        Ok(FrameIndex::one(
+            self.event_index(bot, platform),
+            self.retained_event_bytes().saturating_add(2_048),
+        ))
+    }
+
+    fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<DispatchBatch, DecodeError> {
+        let index = self.event_index(bot, platform);
+        let retained_event_bytes = self.retained_event_bytes();
+        let actor_id = self.actor.to_string();
+        let event = Event::InteractionEvent(InteractionEvent {
+            id: self.id.as_str().to_owned(),
+            kind: InteractionKind::Button,
+            action_id: Some(self.action_id.to_string()),
+            values: Vec::new(),
+            user: User {
+                id: actor_id,
+                ..User::default()
+            },
+            group: None,
+            message: None,
+            context_id: Some(self.conversation.to_string()),
+            response: Some(InteractionResponseHandle {
+                id: self.response_id.to_string(),
+                deadline: Some(
+                    chrono::Utc::now()
+                        + chrono::Duration::from_std(self.deadline_after)
+                            .unwrap_or(chrono::Duration::MAX),
+                ),
+                ack_required: true,
+                followups_supported: true,
+                platform_data: None,
+            }),
+            fields: Default::default(),
+            command: None,
+            locale: None,
+            permissions: Default::default(),
+            data: serde_json::Value::Null,
+        });
+        let mut draft = DispatchDraft::new(self.id, index, event, retained_event_bytes);
+        draft.occurred_at = Some(SystemTime::now());
+        Ok(DispatchBatch::new([draft]))
+    }
 }
 
 /// Successfully sent message recorded by the scripted API.
@@ -189,12 +300,31 @@ pub struct SentMessage {
     pub message: Vec<MessageSegment>,
 }
 
+/// Scheduler-observable interaction API call recorded by [`ScriptedApi`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum InteractionCall {
+    Answer {
+        id: String,
+        response: InteractionResponse,
+    },
+    Followup {
+        id: String,
+        message: Message,
+    },
+    Edit {
+        id: String,
+        message: Message,
+    },
+}
+
 #[derive(Default)]
 struct ServiceState {
     sent: Mutex<Vec<SentMessage>>,
     attempts: AtomicUsize,
     temporary_failures: AtomicUsize,
     sent_notify: tokio::sync::Notify,
+    interactions: Mutex<Vec<InteractionCall>>,
+    interaction_notify: tokio::sync::Notify,
 }
 
 /// Clone-cheap bot API fixture with deterministic temporary failures.
@@ -206,6 +336,15 @@ impl ScriptedApi {
     pub fn sent(&self) -> Vec<SentMessage> {
         self.0
             .sent
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    #[must_use]
+    pub fn interactions(&self) -> Vec<InteractionCall> {
+        self.0
+            .interactions
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
@@ -244,6 +383,31 @@ impl ScriptedApi {
             }
         }
     }
+
+    async fn wait_for_interactions(&self, count: usize, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.interactions().len() >= count {
+                return true;
+            }
+            let notified = self.0.interaction_notify.notified();
+            if self.interactions().len() >= count {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.interactions().len() >= count;
+            }
+        }
+    }
+
+    fn record_interaction(&self, call: InteractionCall) {
+        self.0
+            .interactions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(call);
+        self.0.interaction_notify.notify_waiters();
+    }
 }
 
 impl ScriptedApi {
@@ -278,6 +442,29 @@ impl ScriptedApi {
 
 #[async_trait]
 impl CallApiTrait for ScriptedApi {
+    fn bot_capabilities(&self) -> BotCapabilities {
+        let mut capabilities = BotCapabilities::legacy_message_api();
+        capabilities.delivery.idempotency_keys = SupportLevel::Native;
+        capabilities.interaction_lifecycle.acknowledge = SupportLevel::Native;
+        capabilities.interaction_lifecycle.defer = SupportLevel::Native;
+        capabilities.interaction_lifecycle.initial_message = SupportLevel::Native;
+        capabilities.interaction_lifecycle.followups = SupportLevel::Native;
+        capabilities.interaction_lifecycle.edit_original = SupportLevel::Native;
+        capabilities
+    }
+
+    async fn send_message_with_options(
+        &self,
+        message: Vec<MessageSegment>,
+        target: SendMessageTarget,
+        _options: MessageOptions,
+    ) -> anyhow::Result<Vec<SendMessageResponse>> {
+        let attempt = self.record(target, message).map_err(anyhow::Error::new)?;
+        Ok(vec![SendMessageResponse {
+            sent_message_id: attempt.to_string(),
+        }])
+    }
+
     async fn send_message(
         &self,
         message: Vec<MessageSegment>,
@@ -287,6 +474,53 @@ impl CallApiTrait for ScriptedApi {
         Ok(vec![SendMessageResponse {
             sent_message_id: attempt.to_string(),
         }])
+    }
+
+    async fn answer_interaction(
+        &self,
+        interaction_id: String,
+        response: InteractionResponse,
+    ) -> anyhow::Result<()> {
+        self.record_interaction(InteractionCall::Answer {
+            id: interaction_id,
+            response,
+        });
+        Ok(())
+    }
+
+    async fn defer_interaction(
+        &self,
+        handle: InteractionResponseHandle,
+        visibility: InteractionVisibility,
+    ) -> anyhow::Result<()> {
+        self.answer_interaction(handle.id, InteractionResponse::Defer { visibility })
+            .await
+    }
+
+    async fn send_interaction_followup(
+        &self,
+        handle: InteractionResponseHandle,
+        message: Message,
+    ) -> anyhow::Result<Vec<MessageRef>> {
+        let index = self.interactions().len();
+        self.record_interaction(InteractionCall::Followup {
+            id: handle.id,
+            message,
+        });
+        Ok(vec![MessageRef::new(format!("followup-{index}"))
+            .in_conversation(ConversationRef::group("test-room"))])
+    }
+
+    async fn edit_interaction_response(
+        &self,
+        handle: InteractionResponseHandle,
+        message: Message,
+    ) -> anyhow::Result<()> {
+        self.record_interaction(InteractionCall::Edit {
+            id: handle.id,
+            message,
+        });
+        Ok(())
     }
 }
 
@@ -340,6 +574,9 @@ impl Adapter for ScriptedAdapter {
                 ScriptStep::Frame(frame) => {
                     context.submit(frame).await?;
                 }
+                ScriptStep::Interaction(frame) => {
+                    context.submit(frame).await?;
+                }
                 ScriptStep::Pause(duration) => {
                     tokio::select! {
                         () = tokio::time::sleep(duration) => {}
@@ -353,6 +590,19 @@ impl Adapter for ScriptedAdapter {
                                 return Err(AdapterError::new(format!(
                                     "timed out waiting for {count} sent messages; observed {}",
                                     self.service.sent_count(),
+                                )));
+                            }
+                        }
+                        () = context.shutdown().cancelled() => break,
+                    }
+                }
+                ScriptStep::WaitForInteractions { count, timeout } => {
+                    tokio::select! {
+                        reached = self.service.wait_for_interactions(count, timeout) => {
+                            if !reached {
+                                return Err(AdapterError::new(format!(
+                                    "timed out waiting for {count} interaction calls; observed {}",
+                                    self.service.interactions().len(),
                                 )));
                             }
                         }
@@ -373,10 +623,19 @@ pub enum ReplyExpectation {
     Message(Box<Message>),
 }
 
+/// One expected interaction-side effect in call order.
+#[derive(Clone, Debug)]
+pub enum InteractionExpectation {
+    Acknowledged,
+    EditContains(String),
+    FollowupContains(String),
+}
+
 /// Result of a completed high-level Bot test.
 #[derive(Clone, Debug)]
 pub struct BotTestReport {
     pub sent: Vec<SentMessage>,
+    pub interactions: Vec<InteractionCall>,
     pub attempts: usize,
 }
 
@@ -392,6 +651,7 @@ where
     module: oxidebot_runtime::Module<S>,
     steps: Vec<ScriptStep>,
     expectations: Vec<ReplyExpectation>,
+    interaction_expectations: Vec<InteractionExpectation>,
     next_event: u64,
     pause: Duration,
     expectation_timeout: Duration,
@@ -432,6 +692,7 @@ where
             module,
             steps: Vec::new(),
             expectations: Vec::new(),
+            interaction_expectations: Vec::new(),
             next_event: 1,
             pause: Duration::ZERO,
             expectation_timeout: Duration::from_secs(2),
@@ -481,6 +742,10 @@ where
     }
 
     #[must_use]
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "`as_user` is an established fluent scenario-builder phrase"
+    )]
     pub fn as_user(mut self, actor: impl Into<Arc<str>>) -> Self {
         self.actor = actor.into();
         self
@@ -503,6 +768,43 @@ where
             self.steps.push(ScriptStep::Pause(self.pause));
         }
         self
+    }
+
+    /// Adds an answerable button-click interaction to the scenario.
+    #[must_use]
+    pub fn click(mut self, action_id: impl Into<Arc<str>>) -> Self {
+        self.push_click(action_id.into(), Duration::from_secs(5));
+        self
+    }
+
+    /// Adds a click with an explicit platform acknowledgement deadline.
+    #[must_use]
+    pub fn click_with_deadline(
+        mut self,
+        action_id: impl Into<Arc<str>>,
+        deadline_after: Duration,
+    ) -> Self {
+        self.push_click(action_id.into(), deadline_after);
+        self
+    }
+
+    fn push_click(&mut self, action_id: Arc<str>, deadline_after: Duration) {
+        let sequence = self.next_event;
+        self.next_event = self.next_event.saturating_add(1);
+        let id = EventId::new(format!("test-interaction-{sequence}"))
+            .expect("generated test interaction id is valid");
+        self.steps.push(ScriptStep::Interaction(
+            InteractionFrame::click(
+                id,
+                self.conversation.as_ref(),
+                self.actor.as_ref(),
+                action_id,
+            )
+            .deadline_after(deadline_after),
+        ));
+        if !self.pause.is_zero() {
+            self.steps.push(ScriptStep::Pause(self.pause));
+        }
     }
 
     /// Adds an explicit pause to a scenario without changing the default
@@ -537,6 +839,32 @@ where
         self.push_expectation(ReplyExpectation::Message(Box::new(message)))
     }
 
+    fn push_interaction_expectation(mut self, expectation: InteractionExpectation) -> Self {
+        self.interaction_expectations.push(expectation);
+        self.steps.push(ScriptStep::WaitForInteractions {
+            count: self.interaction_expectations.len(),
+            timeout: self.expectation_timeout,
+        });
+        self
+    }
+
+    /// Expects any successful initial interaction acknowledgement, including
+    /// an immediate message or defer response.
+    #[must_use]
+    pub fn expect_interaction_ack(self) -> Self {
+        self.push_interaction_expectation(InteractionExpectation::Acknowledged)
+    }
+
+    #[must_use]
+    pub fn expect_edit_contains(self, text: impl Into<String>) -> Self {
+        self.push_interaction_expectation(InteractionExpectation::EditContains(text.into()))
+    }
+
+    #[must_use]
+    pub fn expect_followup_contains(self, text: impl Into<String>) -> Self {
+        self.push_interaction_expectation(InteractionExpectation::FollowupContains(text.into()))
+    }
+
     /// Explicitly documents that a scenario must not send any messages.
     #[must_use]
     pub fn expect_no_reply(self) -> Self {
@@ -558,6 +886,7 @@ where
             .await
             .map_err(|error| error.to_string())?;
         let sent = api.sent();
+        let interactions = api.interactions();
         if sent.len() != self.expectations.len() {
             return Err(format!(
                 "expected {} replies, observed {}: {:?}",
@@ -583,8 +912,43 @@ where
                 ));
             }
         }
+        if interactions.len() != self.interaction_expectations.len() {
+            return Err(format!(
+                "expected {} interaction calls, observed {}: {:?}",
+                self.interaction_expectations.len(),
+                interactions.len(),
+                interactions,
+            ));
+        }
+        for (index, (actual, expected)) in interactions
+            .iter()
+            .zip(&self.interaction_expectations)
+            .enumerate()
+        {
+            let matches = match (actual, expected) {
+                (InteractionCall::Answer { .. }, InteractionExpectation::Acknowledged) => true,
+                (
+                    InteractionCall::Edit { message, .. },
+                    InteractionExpectation::EditContains(expected),
+                ) => message.get_raw_text().contains(expected),
+                (
+                    InteractionCall::Followup { message, .. },
+                    InteractionExpectation::FollowupContains(expected),
+                ) => message.get_raw_text().contains(expected),
+                _ => false,
+            };
+            if !matches {
+                return Err(format!(
+                    "interaction call {} did not match {:?}; actual call was {:?}",
+                    index + 1,
+                    expected,
+                    actual,
+                ));
+            }
+        }
         Ok(BotTestReport {
             sent,
+            interactions,
             attempts: api.attempts(),
         })
     }

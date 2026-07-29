@@ -733,10 +733,13 @@ pub(crate) async fn publish_command_definitions(
             continue;
         }
         let definitions = scoped_catalog.enabled(registry).definitions();
-        let Ok(api) = bot.api() else {
-            continue;
-        };
-        let capabilities = api.bot_capabilities();
+        let capabilities = bot.bot_capabilities().map_err(|error| {
+            RuntimeError::Service(ServiceError::new(format!(
+                "could not read capabilities for {}:{}: {error}",
+                bot.identity().platform,
+                bot.identity().bot,
+            )))
+        })?;
         if !capabilities.application.structured_commands.is_supported() {
             continue;
         }
@@ -748,7 +751,7 @@ pub(crate) async fn publish_command_definitions(
                     bot.identity().bot,
                 )))
             })?;
-        api.set_command_definitions(definitions)
+        bot.set_command_definitions(definitions)
             .await
             .map_err(|error| {
                 RuntimeError::Service(ServiceError::new(format!(
@@ -794,15 +797,15 @@ where
     authoring
         .registry
         .attach_publication(bot_directory.clone(), command_catalog.clone());
-    if let Err(error) =
-        publish_command_definitions(&bot_directory, &command_catalog, &authoring.registry).await
-    {
+    if let Err(error) = authoring.registry.refresh_publication().await {
         cancellation.cancel();
         authoring.registry.detach_publication();
         authoring.detach_bots();
         command_tasks.abort_all();
         while command_tasks.join_next().await.is_some() {}
-        return Err(error);
+        return Err(RuntimeError::Service(ServiceError::new(format!(
+            "could not publish startup command definitions: {error}"
+        ))));
     }
 
     let (sessions, session_workers) = SessionRegistry::new(
@@ -929,12 +932,12 @@ where
                     Ok(result) => result,
                     Err(error) => Err(RuntimeError::Join(error.to_string())),
                 };
-                if adapters_remaining > 0 && fatal_error.is_none() {
+                if let Err(error) = result {
+                    fatal_error = Some(error);
+                } else if adapters_remaining > 0 && fatal_error.is_none() {
                     fatal_error = Some(RuntimeError::Channel(
                         "event dispatcher exited while adapters are still running",
                     ));
-                } else if let Err(error) = result {
-                    fatal_error = Some(error);
                 }
                 dispatcher_result = Some(Ok(()));
                 break;

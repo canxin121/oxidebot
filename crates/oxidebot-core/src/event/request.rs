@@ -6,6 +6,10 @@ use crate::{
 use anyhow::Result;
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names preserve the public 0.1.8 event model"
+)]
 pub enum RequestEvent {
     FriendAddEvent(FriendAddEvent),
     GroupAddEvent(GroupAddEvent),

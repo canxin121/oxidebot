@@ -143,8 +143,16 @@ and returns `()` still blocks naturally; an event observer that returns a
 message still continues naturally. Explicit `Outcome::stop()` and
 `Outcome::continue_()` are reserved for true overrides.
 
-The compiled dispatcher enforces the configured deferred-reply count and sends
-messages through the same `CallApiTrait` object exposed to handlers.
+The compiled dispatcher enforces the configured deferred-reply count and
+submits delivery through the selected bot's bounded command scheduler.
+`CallApiTrait` is invoked only inside that scheduler for framework-managed
+operations; the raw `Bot` extractor remains an intentional escape hatch.
+
+Answerable interactions create one shared `Responder` state for explicit
+handler calls, automatic returned messages, and deadline protection. Initial
+acknowledgement is atomic, near-deadline work is automatically deferred through
+reserved high-priority capacity, and later messages become follow-ups rather
+than unrelated conversation sends.
 
 `Messenger` is the ordinary immediate-send facade. It unifies natural replies,
 current-conversation sends, explicit proactive `Address` targets, deterministic
@@ -209,10 +217,13 @@ creation.
 
 ## Bounded resources
 
-Ingress, executor, session, and API command queues enforce item and retained-byte
-budgets. Global and per-bot permits are acquired together. Session namespaces,
-route keys, decoded envelopes, raw payloads, completion rounds, and handler
-reply counts are bounded or validated before downstream work.
+Ingress, executor, session, and API command queues enforce item and
+retained-byte budgets. Global and per-bot permits are acquired together.
+Session namespaces, route keys, decoded envelopes (including owned profile
+strings), raw payloads, completion rounds, and handler reply counts are bounded
+or validated before downstream work. Translation catalogs, shortcut
+registries, and target aliases additionally enforce total retained-byte limits;
+shortcut matching releases its registry lock before running a capped scan.
 
 ## Frozen authoring extensions
 
@@ -229,20 +240,23 @@ catalog-aware command renderer. Missing framework templates fall back to the
 built-in renderer rather than making command errors or help delivery fallible.
 
 Runtime shortcuts and command enablement live in a bounded `CommandRegistry`.
-Its revision is explicit, and native command publication is refreshed after an
-enablement change. Static shortcuts opt only matching command IDs into dynamic
-candidate lookup; arbitrary rewriters or normalizers deliberately select the
-broader message candidate path. Both remain cold paths and preserve the exact
-root-command index for ordinary commands.
+Its desired, published, and pending revisions are explicit. A failed platform
+publication remains pending, and a later refresh or repeated no-op toggle
+retries the complete idempotent definition set. Static shortcuts opt only
+matching command IDs into dynamic candidate lookup; arbitrary rewriters or
+normalizers deliberately select the broader message candidate path. Both
+remain cold paths and preserve the exact root-command index for ordinary
+commands.
 
 ## Proactive delivery and media
 
 An `Address` combines a canonical `MessageTarget` with deterministic bot
 selection. Exact bot selection is preferred; platform selection rejects
-ambiguity rather than choosing randomly. `TargetDirectory` is a bounded
-application alias map, not a background global target crawler.
+ambiguity rather than choosing randomly. `TargetDirectory` is an item- and
+byte-bounded application alias map, not a background global target crawler.
 
-Media access is explicit. `LocalMediaResolver` reads bounded local/base64 data;
+Media access is explicit. `LocalMediaResolver` streams at most `limit + 1`
+bytes from local files and bounds retained base64 data;
 network fetching and hosting are caller-supplied `MediaFetcher` and `MediaHost`
 services. This keeps network access, credentials, file retention, and byte
 budgets outside the core parser and dispatcher.

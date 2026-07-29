@@ -71,10 +71,7 @@ impl Messenger {
                     HandlerError::Api("the connected bot directory is not available".into())
                 })?;
                 let handle = directory.select(selection)?;
-                let api = handle
-                    .api()
-                    .map_err(|error| HandlerError::Api(error.to_string()))?;
-                self.reply.rebind(api, address.target)
+                self.reply.rebind(handle, address.target)
             }
         };
         Ok(BoundMessenger { reply })

@@ -8,8 +8,10 @@ members = [
     "crates/oxidebot-adapter-console",
     "examples/minimal",
     "examples/console-bot",
+    "tests/renamed-facade",
 ]
 resolver = "2"
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "1.0.0-alpha.1"
@@ -29,6 +31,7 @@ criterion = { version = "0.7.0", features = ["async_tokio"] }
 futures-util = "0.3.31"
 mime_guess = "2.0.5"
 proc-macro2 = "1.0.106"
+proc-macro-crate = "3.4.0"
 quote = "1.0.45"
 regex = "1.11.1"
 syn = { version = "2.0.117", features = ["full"] }
@@ -38,6 +41,7 @@ thiserror = "2.0.17"
 tokio = { version = "1.53.1", default-features = false }
 tokio-util = { version = "0.7.16", default-features = false }
 tracing = "0.1.44"
+trybuild = "1.0.116"
 
 [profile.release]
 lto = "thin"

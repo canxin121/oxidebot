@@ -13,6 +13,10 @@ use crate::{
 
 #[allow(clippy::large_enum_variant)] // Kept inline for public API compatibility.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names preserve the public 0.1.8 event model"
+)]
 pub enum NoticeEvent {
     GroupMemberIncreaseEvent(GroupMemberIncreaseEvent),
     GroupMemberDecreaseEvent(GroupMemberDecreaseEvent),

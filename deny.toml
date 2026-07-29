@@ -1,0 +1,25 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "warn"
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+skip = [
+    { name = "syn", version = "2", reason = "proc-macro ecosystem still spans syn 2 and syn 3" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

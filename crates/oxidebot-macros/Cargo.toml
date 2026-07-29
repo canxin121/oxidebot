@@ -14,5 +14,10 @@ proc-macro = true
 
 [dependencies]
 proc-macro2.workspace = true
+proc-macro-crate.workspace = true
 quote.workspace = true
 syn.workspace = true
+
+[dev-dependencies]
+oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
+trybuild.workspace = true

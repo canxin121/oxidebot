@@ -12,9 +12,11 @@ description = "Deterministic adapter and API fixtures for OxideBot"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 oxidebot-core = { path = "../oxidebot-core", version = "1.0.0-alpha.1" }
 oxidebot-runtime = { path = "../oxidebot-runtime", version = "1.0.0-alpha.1" }
 tokio = { workspace = true, features = ["sync", "time"] }
+serde_json.workspace = true
 
 [dev-dependencies]
 oxidebot = { path = "../oxidebot", version = "1.0.0-alpha.1" }

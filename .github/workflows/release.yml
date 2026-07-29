@@ -1,0 +1,22 @@
+name: Release validation
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - name: Inspect release packages
+        run: |
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console; do
+            cargo package -p "$package" --list --locked
+          done

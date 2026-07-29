@@ -1208,6 +1208,11 @@ impl DeliveryPlan {
 pub struct DeliveryReport {
     pub messages: Vec<MessageRef>,
     pub degradations: Vec<DeliveryDegradation>,
+    /// Per-physical-message outcomes in delivery-plan order. This remains
+    /// populated on a partial-delivery error so callers can retry or
+    /// compensate without duplicating already successful messages.
+    #[serde(default)]
+    pub items: Vec<DeliveryItemResult>,
 }
 
 impl DeliveryReport {
@@ -1215,7 +1220,58 @@ impl DeliveryReport {
     pub fn degraded(&self) -> bool {
         !self.degradations.is_empty()
     }
+
+    /// Returns true when every attempted physical message succeeded.
+    #[must_use]
+    pub fn completed(&self) -> bool {
+        self.items.iter().all(DeliveryItemResult::succeeded)
+    }
+
+    /// Iterates the failed physical messages without losing successful refs.
+    pub fn failures(&self) -> impl Iterator<Item = &DeliveryItemResult> {
+        self.items.iter().filter(|item| !item.succeeded())
+    }
 }
+
+/// Outcome of one physical message in a logical delivery plan.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeliveryItemResult {
+    pub index: usize,
+    pub messages: Vec<MessageRef>,
+    pub error: Option<String>,
+}
+
+impl DeliveryItemResult {
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+/// Error returned after a logical delivery has already produced a structured
+/// per-item report. The report may contain successful physical messages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartialDeliveryError {
+    pub report: DeliveryReport,
+}
+
+impl fmt::Display for PartialDeliveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let completed = self
+            .report
+            .items
+            .iter()
+            .filter(|item| item.succeeded())
+            .count();
+        write!(
+            formatter,
+            "logical delivery stopped after {completed} of {} physical messages succeeded",
+            self.report.items.len()
+        )
+    }
+}
+
+impl Error for PartialDeliveryError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryPlanningError {

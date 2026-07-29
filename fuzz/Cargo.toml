@@ -1,0 +1,20 @@
+[package]
+name = "oxidebot-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxidebot-core = { path = "../crates/oxidebot-core" }
+oxidebot-runtime = { path = "../crates/oxidebot-runtime", default-features = false }
+
+[[bin]]
+name = "command_parser"
+path = "fuzz_targets/command_parser.rs"
+test = false
+doc = false
+bench = false

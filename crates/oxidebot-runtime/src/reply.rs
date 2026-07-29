@@ -1,4 +1,4 @@
-use crate::{authoring::ErasedDeliveryPipeline, HandlerError};
+use crate::{authoring::ErasedDeliveryPipeline, BotHandle, HandlerError};
 use oxidebot_core::{
     collaboration::{Reaction, ReactionOptions},
     conversation::{MessageRef, MessageTarget},
@@ -6,6 +6,77 @@ use oxidebot_core::{
     BotCapabilities, BotObject,
 };
 use std::{ops::Deref, sync::Arc, time::Duration};
+
+/// One physical-message outcome from a bulk receipt mutation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MutationItemResult {
+    pub index: usize,
+    pub message: MessageRef,
+    pub error: Option<String>,
+}
+
+impl MutationItemResult {
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+/// Complete per-item result for edit, delete, or reaction operations on a
+/// logical receipt that contains multiple physical messages.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MutationReport {
+    pub items: Vec<MutationItemResult>,
+}
+
+impl MutationReport {
+    #[must_use]
+    pub fn completed(&self) -> bool {
+        self.items.iter().all(MutationItemResult::succeeded)
+    }
+
+    pub fn failures(&self) -> impl Iterator<Item = &MutationItemResult> {
+        self.items.iter().filter(|item| !item.succeeded())
+    }
+
+    fn into_result(self, operation: &'static str) -> Result<(), HandlerError> {
+        if self.completed() {
+            Ok(())
+        } else {
+            Err(PartialMutationError {
+                operation,
+                report: self,
+            }
+            .into())
+        }
+    }
+}
+
+/// Error retaining all successful and failed physical mutations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartialMutationError {
+    pub operation: &'static str,
+    pub report: MutationReport,
+}
+
+impl std::fmt::Display for PartialMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let succeeded = self
+            .report
+            .items
+            .iter()
+            .filter(|item| item.succeeded())
+            .count();
+        write!(
+            formatter,
+            "receipt {} completed for {succeeded} of {} physical messages",
+            self.operation,
+            self.report.items.len()
+        )
+    }
+}
+
+impl std::error::Error for PartialMutationError {}
 
 /// Complete unified API object extracted for the current bot.
 #[derive(Clone)]
@@ -35,7 +106,7 @@ impl std::fmt::Debug for Bot {
 /// Immediate sender bound to the event's natural reply target.
 #[derive(Clone)]
 pub struct Reply {
-    api: BotObject,
+    bot: BotHandle,
     target: MessageTarget,
     reply_to: Option<String>,
     fallback: FallbackPolicy,
@@ -44,13 +115,13 @@ pub struct Reply {
 
 impl Reply {
     pub(crate) fn new(
-        api: BotObject,
+        bot: BotHandle,
         target: MessageTarget,
         reply_to: Option<String>,
         pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
     ) -> Self {
         Self {
-            api,
+            bot,
             target,
             reply_to,
             fallback: FallbackPolicy::Auto,
@@ -65,7 +136,7 @@ impl Reply {
 
     pub(crate) fn retarget(&self, target: MessageTarget) -> Self {
         Self {
-            api: Arc::clone(&self.api),
+            bot: self.bot.clone(),
             target,
             reply_to: None,
             fallback: self.fallback,
@@ -73,9 +144,9 @@ impl Reply {
         }
     }
 
-    pub(crate) fn rebind(&self, api: BotObject, target: MessageTarget) -> Self {
+    pub(crate) fn rebind(&self, bot: BotHandle, target: MessageTarget) -> Self {
         Self {
-            api,
+            bot,
             target,
             reply_to: None,
             fallback: self.fallback,
@@ -110,16 +181,16 @@ impl Reply {
         }
         let report = if let Some(pipeline) = &self.pipeline {
             pipeline
-                .deliver(&self.api, self.target.clone(), message, self.fallback)
+                .deliver(&self.bot, self.target.clone(), message, self.fallback)
                 .await?
         } else {
-            self.api
+            self.bot
                 .send_outgoing_message_with(self.target.clone(), message, self.fallback)
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?
+                .map_err(HandlerError::from)?
         };
         Ok(Receipt {
-            api: Arc::clone(&self.api),
+            bot: self.bot.clone(),
             target: self.target.clone(),
             report: Arc::new(report),
             pipeline: self.pipeline.clone(),
@@ -143,7 +214,7 @@ impl std::fmt::Debug for Reply {
 /// indexed methods operate on one physical message.
 #[derive(Clone)]
 pub struct Receipt {
-    api: BotObject,
+    bot: BotHandle,
     target: MessageTarget,
     report: Arc<DeliveryReport>,
     pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
@@ -179,7 +250,7 @@ impl Receipt {
 
     #[must_use]
     pub fn capabilities(&self) -> BotCapabilities {
-        self.api.bot_capabilities()
+        self.bot.bot_capabilities().unwrap_or_default()
     }
 
     #[must_use]
@@ -202,20 +273,20 @@ impl Receipt {
         let report = if let Some(pipeline) = &self.pipeline {
             pipeline
                 .deliver(
-                    &self.api,
+                    &self.bot,
                     self.target.clone(),
                     message,
                     FallbackPolicy::Auto,
                 )
                 .await?
         } else {
-            self.api
+            self.bot
                 .send_outgoing_message_with(self.target.clone(), message, FallbackPolicy::Auto)
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?
+                .map_err(HandlerError::from)?
         };
         Ok(Self {
-            api: Arc::clone(&self.api),
+            bot: self.bot.clone(),
             target: self.target.clone(),
             report: Arc::new(report),
             pipeline: self.pipeline.clone(),
@@ -233,14 +304,28 @@ impl Receipt {
     }
 
     pub async fn edit(&self, replacement: impl Into<Message>) -> Result<(), HandlerError> {
+        self.edit_report(replacement).await.into_result("edit")
+    }
+
+    /// Edits every physical message and retains all per-item outcomes instead
+    /// of stopping after the first failure.
+    pub async fn edit_report(&self, replacement: impl Into<Message>) -> MutationReport {
         let replacement = replacement.into();
-        for reference in self.references() {
-            self.api
+        let mut items = Vec::with_capacity(self.references().len());
+        for (index, reference) in self.references().iter().enumerate() {
+            let error = self
+                .bot
                 .edit_outgoing_message(reference.clone(), replacement.clone())
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?;
+                .err()
+                .map(|error| error.to_string());
+            items.push(MutationItemResult {
+                index,
+                message: reference.clone(),
+                error,
+            });
         }
-        Ok(())
+        MutationReport { items }
     }
 
     pub async fn edit_at(
@@ -249,43 +334,69 @@ impl Receipt {
         replacement: impl Into<Message>,
     ) -> Result<(), HandlerError> {
         let reference = self.reference_at(index)?;
-        self.api
+        self.bot
             .edit_outgoing_message(reference.clone(), replacement.into())
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+            .map_err(HandlerError::from)
     }
 
     pub async fn delete(&self) -> Result<(), HandlerError> {
-        for reference in self.references() {
-            self.api
+        self.delete_report().await.into_result("delete")
+    }
+
+    /// Deletes every physical message and retains partial success.
+    pub async fn delete_report(&self) -> MutationReport {
+        let mut items = Vec::with_capacity(self.references().len());
+        for (index, reference) in self.references().iter().enumerate() {
+            let error = self
+                .bot
                 .delete_message_ref(reference.clone())
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?;
+                .err()
+                .map(|error| error.to_string());
+            items.push(MutationItemResult {
+                index,
+                message: reference.clone(),
+                error,
+            });
         }
-        Ok(())
+        MutationReport { items }
     }
 
     pub async fn delete_at(&self, index: usize) -> Result<(), HandlerError> {
         let reference = self.reference_at(index)?;
-        self.api
+        self.bot
             .delete_message_ref(reference.clone())
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+            .map_err(HandlerError::from)
     }
 
     pub async fn react(&self, reaction: impl Into<String>) -> Result<(), HandlerError> {
+        self.react_report(reaction).await.into_result("reaction")
+    }
+
+    /// Adds a reaction to every physical message and retains partial success.
+    pub async fn react_report(&self, reaction: impl Into<String>) -> MutationReport {
         let reaction = Reaction::UnicodeEmoji(reaction.into());
-        for reference in self.references() {
-            self.api
+        let mut items = Vec::with_capacity(self.references().len());
+        for (index, reference) in self.references().iter().enumerate() {
+            let error = self
+                .bot
                 .add_message_reaction(
                     reference.clone(),
                     reaction.clone(),
                     ReactionOptions::default(),
                 )
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?;
+                .err()
+                .map(|error| error.to_string());
+            items.push(MutationItemResult {
+                index,
+                message: reference.clone(),
+                error,
+            });
         }
-        Ok(())
+        MutationReport { items }
     }
 
     pub async fn react_at(
@@ -294,14 +405,14 @@ impl Receipt {
         reaction: impl Into<String>,
     ) -> Result<(), HandlerError> {
         let reference = self.reference_at(index)?;
-        self.api
+        self.bot
             .add_message_reaction(
                 reference.clone(),
                 Reaction::UnicodeEmoji(reaction.into()),
                 ReactionOptions::default(),
             )
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+            .map_err(HandlerError::from)
     }
 
     /// Waits and then deletes every physical message represented by this receipt.

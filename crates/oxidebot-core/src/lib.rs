@@ -77,9 +77,9 @@ pub use interaction::{
     SelectOption, UnsupportedInteractionError, ViewNavigation,
 };
 pub use source::message::{
-    DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
-    FallbackPolicy, File, Folder, FsNode, IntoMessageSegment, Message, MessageOptions,
-    MessageSegment, SegmentKind,
+    DegradationKind, DeliveryDegradation, DeliveryItemResult, DeliveryPlan, DeliveryPlanningError,
+    DeliveryReport, FallbackPolicy, File, Folder, FsNode, IntoMessageSegment, Message,
+    MessageOptions, MessageSegment, PartialDeliveryError, SegmentKind,
 };
 
 pub use template::*;

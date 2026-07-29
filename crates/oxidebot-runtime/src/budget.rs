@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Shared queue primitives also support the retained compatibility command queue.
-
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 

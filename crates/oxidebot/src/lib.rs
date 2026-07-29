@@ -3,10 +3,27 @@
 //! Most applications need `use oxidebot::prelude::*;`, one or more adapters,
 //! a flat [`Module`], and ordinary async functions.
 
+#![warn(missing_docs)]
+
 pub use oxidebot_core as core;
-pub use oxidebot_core::*;
 pub use oxidebot_runtime as runtime;
-pub use oxidebot_runtime::*;
+
+// The facade root is intentionally curated. The complete, explicitly unstable
+// compatibility surface remains available from `oxidebot::all`, while focused
+// modules and preludes keep additions in core/runtime from silently becoming
+// facade-level SemVer commitments.
+pub use oxidebot_core::{
+    event, BotId, BotIdentity, CallApiTrait, Event, EventId, Message, PlatformId,
+};
+pub use oxidebot_runtime::{
+    command, Adapter, Args, Bot, BranchArgs, ChatGroup, Command, CommandArgs, CommandBranchTag,
+    CommandTree, CompletionConfig, ConfirmationWords, Context, Dialogue, DialogueForm,
+    DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
+    GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeGroup, MessageContext,
+    MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation, Receipt, Reply,
+    Responder, Result, ResultExt, RuntimeMetrics, RuntimeProfile, Segments, Sender, SessionPolicy,
+    ShutdownSignal, State, Target, Text,
+};
 
 /// Derives a strongly typed command schema and parser.
 pub use oxidebot_macros::{
@@ -20,8 +37,8 @@ pub mod extract {
         Args, Bot, BranchArgs, ChatGroup, CommandRegistry, CommandResult, ConfirmationWords,
         Context, Dialogue, DialogueForm, DialogueFormFuture, DialogueQuestion, EventContext,
         Extract, ExtractError, FromState, I18n, I18nMessage, MaybeGroup, MessageContext, MessageId,
-        Messenger, OptionExt, Reply, Resolve, ResultExt, Segments, Sender, ShutdownSignal, State,
-        Target, Text,
+        Messenger, OptionExt, Reply, Resolve, Responder, ResultExt, Segments, Sender,
+        ShutdownSignal, State, Target, Text,
     };
 }
 
@@ -40,6 +57,7 @@ pub mod commands {
         ResolveCommandValue, Shortcut, ShortcutPattern, SourceSpan, UnitBranch, ValuePattern,
     };
 
+    /// Common command-authoring imports.
     pub mod prelude {
         pub use super::{
             command, ArgumentAction, ArgumentChoice, ArgumentSpec, BranchArgs, Command,
@@ -68,6 +86,7 @@ pub mod message {
         TranslationCatalog, TranslationError, UserMentions, Videos,
     };
 
+    /// Common message-construction and localization imports.
     pub mod prelude {
         pub use super::{
             ActionRow, Button, File, InlineKeyboard, LocalizedMessage, Media, Message,
@@ -82,16 +101,17 @@ pub mod message {
 /// resolution.
 pub mod delivery {
     pub use oxidebot_core::source::message::{
-        DegradationKind, DeliveryDegradation, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
-        FallbackPolicy,
+        DegradationKind, DeliveryDegradation, DeliveryItemResult, DeliveryPlan,
+        DeliveryPlanningError, DeliveryReport, FallbackPolicy, PartialDeliveryError,
     };
     pub use oxidebot_runtime::{
         resolve_and_host_file, resolve_message_media, Address, BotDirectory, BotSelection,
         DeliveryMiddleware, LocalMediaResolver, MediaFetcher, MediaHost, MediaResolver, Messenger,
-        PortableMediaResolver, Receipt, Reply, ResolvedMedia, ResolvedMessageMedia,
-        TargetDirectory,
+        MutationItemResult, MutationReport, PartialMutationError, PortableMediaResolver, Receipt,
+        Reply, ResolvedMedia, ResolvedMessageMedia, TargetDirectory,
     };
 
+    /// Common delivery and receipt imports.
     pub mod prelude {
         pub use super::{
             Address, BotDirectory, BotSelection, DeliveryReport, FallbackPolicy, Messenger,
@@ -107,6 +127,7 @@ pub mod adapter {
         InboundFrame, MessageFrame, MessageFrameBuilder, Submission,
     };
 
+    /// Common adapter-authoring imports.
     pub mod prelude {
         pub use super::{
             Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -142,9 +163,9 @@ pub mod advanced {
     pub use oxidebot_runtime::{
         Adapter, AdapterContext, AdapterError, AdapterMode, AdminTools, BotDescriptor, BotServices,
         CatalogCommandRenderer, CommandMiddleware, CommandOutputMiddleware, CommandOverlay,
-        CommandRewriter, DeliveryMiddleware, FrameIndex, InboundFrame, MessageFrame,
-        MessageFrameBuilder, MessageNormalizer, MetricsHandle, RuntimeConfig, RuntimeProfile,
-        Service, ServiceContext,
+        CommandPublicationStatus, CommandRewriter, DeliveryMiddleware, FrameIndex, InboundFrame,
+        MessageFrame, MessageFrameBuilder, MessageNormalizer, MetricsHandle, RuntimeConfig,
+        RuntimeProfile, Service, ServiceContext,
     };
 }
 
@@ -174,7 +195,7 @@ pub mod prelude {
         DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
         GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeGroup, MessageContext,
         MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, Propagation, Receipt, Reply,
-        ResultExt, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
+        Responder, ResultExt, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
     };
 }
 
@@ -203,13 +224,13 @@ macro_rules! message {
 #[macro_export]
 macro_rules! button {
     ($label:expr => url($value:expr)) => {
-        $crate::Button::url($label, $value)
+        $crate::core::Button::url($label, $value)
     };
     ($label:expr => action($value:expr)) => {
-        $crate::Button::callback($label, $value)
+        $crate::core::Button::callback($label, $value)
     };
     ($label:expr => text($value:expr)) => {
-        $crate::Button::send_text($label, $value)
+        $crate::core::Button::send_text($label, $value)
     };
 }
 
@@ -217,7 +238,7 @@ macro_rules! button {
 #[macro_export]
 macro_rules! row {
     ($($button:expr),* $(,)?) => {
-        $crate::ActionRow::buttons([$($button),*])
+        $crate::core::ActionRow::buttons([$($button),*])
     };
 }
 
@@ -225,24 +246,24 @@ macro_rules! row {
 #[macro_export]
 macro_rules! message_template {
     ($source:literal) => {{
-        static TEMPLATE: ::std::sync::OnceLock<$crate::MessageTemplate> =
+        static TEMPLATE: ::std::sync::OnceLock<$crate::core::MessageTemplate> =
             ::std::sync::OnceLock::new();
         TEMPLATE
             .get_or_init(|| {
-                $crate::MessageTemplate::parse($source)
+                $crate::core::MessageTemplate::parse($source)
                     .expect("static message template must be valid")
             })
             .clone()
     }};
 }
 
-/// Builds values for [`MessageTemplate::render`]. Use
+/// Builds values for [`core::MessageTemplate::render`]. Use
 /// `TemplateValue::mention(value)` for an explicit mention placeholder.
 #[macro_export]
 macro_rules! message_args {
     ($($name:ident => $value:expr),* $(,)?) => {{
         let mut values = ::std::collections::BTreeMap::new();
-        $(values.insert(::std::sync::Arc::<str>::from(stringify!($name)), $crate::TemplateValue::from($value));)*
+        $(values.insert(::std::sync::Arc::<str>::from(stringify!($name)), $crate::core::TemplateValue::from($value));)*
         values
     }};
 }

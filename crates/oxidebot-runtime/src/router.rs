@@ -13,9 +13,10 @@ use oxidebot_core::{
 };
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type RouteId = u32;
@@ -394,6 +395,17 @@ where
             }
         }
 
+        let responder = match event.event() {
+            Event::InteractionEvent(interaction) => interaction
+                .response
+                .clone()
+                .map(|handle| crate::Responder::new(bot.clone(), handle)),
+            _ => None,
+        };
+        if let Some(responder) = &responder {
+            responder.start_auto_defer();
+        }
+
         let command_input = self
             .authoring
             .registry
@@ -407,6 +419,8 @@ where
             }
             let handler = &prepared.handler;
             self.metrics.handler_call();
+            self.metrics.handler_started();
+            let handler_started = Instant::now();
             let future = match catch_unwind(AssertUnwindSafe(|| {
                 handler.call(HandlerCall {
                     event: Arc::clone(&event),
@@ -416,10 +430,12 @@ where
                     shutdown: self.shutdown.clone(),
                     authoring: Arc::clone(&self.authoring),
                     command_input: command_input.clone(),
+                    responder: responder.clone(),
                 })
             })) {
                 Ok(future) => future,
                 Err(_) => {
+                    self.metrics.handler_finished(handler_started.elapsed());
                     self.metrics.handler_panic();
                     tracing::error!(event_id = %event.id, "handler panicked while creating its future");
                     if prepared.default_block {
@@ -432,6 +448,7 @@ where
                 match tokio::time::timeout(timeout, AssertUnwindSafe(future).catch_unwind()).await {
                     Ok(result) => result,
                     Err(_) => {
+                        self.metrics.handler_finished(handler_started.elapsed());
                         self.metrics.handler_timeout();
                         tracing::warn!(event_id = %event.id, "handler timed out");
                         if prepared.default_block {
@@ -443,6 +460,7 @@ where
             } else {
                 AssertUnwindSafe(future).catch_unwind().await
             };
+            self.metrics.handler_finished(handler_started.elapsed());
             let outcome = match result {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(error)) => {
@@ -476,48 +494,95 @@ where
                     limit = self.max_handler_replies,
                     "handler outcome exceeded the deferred-reply limit"
                 );
-            } else if let Some(target) = reply_target(event.event()) {
-                match bot.api() {
-                    Ok(api) => {
-                        for reply in outcome.replies {
-                            let delivery = if let Some(pipeline) = &delivery_pipeline {
-                                pipeline
-                                    .deliver(
-                                        &api,
-                                        target.clone(),
-                                        reply,
-                                        oxidebot_core::FallbackPolicy::Auto,
-                                    )
-                                    .await
-                            } else {
-                                self.authoring
-                                    .deliver(
-                                        None,
-                                        &api,
-                                        target.clone(),
-                                        reply,
-                                        oxidebot_core::FallbackPolicy::Auto,
-                                    )
-                                    .await
-                            };
-                            match delivery {
-                                Ok(report) => {
-                                    if report.degraded() {
-                                        tracing::warn!(
-                                            event_id = %event.id,
-                                            degradations = ?report.degradations,
-                                            "handler reply required delivery fallbacks"
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(event_id = %event.id, %error, "could not send handler reply");
-                                }
-                            }
+            } else if let Some(responder) = &responder {
+                for reply in outcome.replies {
+                    let visibility = match reply.options.visibility {
+                        oxidebot_core::content::MessageVisibility::Ephemeral => {
+                            oxidebot_core::InteractionVisibility::Ephemeral
+                        }
+                        _ => oxidebot_core::InteractionVisibility::Public,
+                    };
+                    match AssertUnwindSafe(responder.respond_with(reply, visibility))
+                        .catch_unwind()
+                        .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            self.metrics.delivery_error();
+                            tracing::warn!(
+                                event_id = %event.id,
+                                %error,
+                                "could not send automatic interaction response"
+                            );
+                        }
+                        Err(_) => {
+                            self.metrics.delivery_panic();
+                            tracing::error!(
+                                event_id = %event.id,
+                                "interaction response panicked"
+                            );
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(event_id = %event.id, %error, "adapter does not expose the OxideBot API");
+                }
+            } else if let Some(target) = reply_target(event.event()) {
+                for (reply_index, mut reply) in outcome.replies.into_iter().enumerate() {
+                    if reply.options.idempotency_key.is_none()
+                        && bot.capabilities().send_idempotency
+                            != crate::IdempotencyGuarantee::Unsupported
+                    {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        event.id.hash(&mut hasher);
+                        reply.options.idempotency_key = Some(format!(
+                            "oxidebot-event-{:016x}-{reply_index}",
+                            hasher.finish()
+                        ));
+                    }
+                    let delivery = if let Some(pipeline) = &delivery_pipeline {
+                        AssertUnwindSafe(pipeline.deliver(
+                            &bot,
+                            target.clone(),
+                            reply,
+                            oxidebot_core::FallbackPolicy::Auto,
+                        ))
+                        .catch_unwind()
+                        .await
+                    } else {
+                        AssertUnwindSafe(self.authoring.deliver(
+                            None,
+                            &bot,
+                            target.clone(),
+                            reply,
+                            oxidebot_core::FallbackPolicy::Auto,
+                        ))
+                        .catch_unwind()
+                        .await
+                    };
+                    match delivery {
+                        Ok(Ok(report)) => {
+                            if report.degraded() {
+                                self.metrics.delivery_degradation();
+                                tracing::warn!(
+                                    event_id = %event.id,
+                                    degradations = ?report.degradations,
+                                    "handler reply required delivery fallbacks"
+                                );
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            if matches!(error, crate::HandlerError::DeliveryPanicked) {
+                                self.metrics.delivery_panic();
+                            } else {
+                                self.metrics.delivery_error();
+                            }
+                            tracing::warn!(event_id = %event.id, %error, "could not send handler reply");
+                        }
+                        Err(_) => {
+                            self.metrics.delivery_panic();
+                            tracing::error!(
+                                event_id = %event.id,
+                                "delivery middleware or adapter panicked while sending a handler reply"
+                            );
+                        }
                     }
                 }
             }

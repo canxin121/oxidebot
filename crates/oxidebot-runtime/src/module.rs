@@ -1155,6 +1155,7 @@ where
             shutdown,
             authoring,
             command_input,
+            responder,
         } = call;
         let endpoint = Arc::clone(&self.endpoint);
         let guards = Arc::clone(&self.guards);
@@ -1171,6 +1172,7 @@ where
                 sessions.clone(),
                 shutdown.clone(),
                 None,
+                responder.clone(),
                 Arc::clone(&authoring),
             );
             let command = if let Some(command) = command {
@@ -1215,8 +1217,9 @@ where
                 }
             }
 
-            let mut context =
-                Context::new(event, state, bot, sessions, shutdown, command, authoring);
+            let mut context = Context::new(
+                event, state, bot, sessions, shutdown, command, responder, authoring,
+            );
 
             // Admission runs before interactive completion. An unauthorized or
             // rate-limited user must never be prompted for missing arguments.

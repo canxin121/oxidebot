@@ -3,9 +3,10 @@ name = "oxidebot-minimal-example"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
-oxidebot = { path = "../../crates/oxidebot" }
-oxidebot-testkit = { path = "../../crates/oxidebot-testkit" }
+oxidebot = { path = "../../crates/oxidebot", version = "1.0.0-alpha.1" }
+oxidebot-testkit = { path = "../../crates/oxidebot-testkit", version = "1.0.0-alpha.1" }
 tokio = { workspace = true, features = ["macros", "rt"] }

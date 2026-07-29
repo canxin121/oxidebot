@@ -243,6 +243,10 @@ impl LoginAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the names distinguish chat-selection scopes in the public model"
+)]
 pub enum InlineQueryTarget {
     ChooseChat,
     CurrentChat,

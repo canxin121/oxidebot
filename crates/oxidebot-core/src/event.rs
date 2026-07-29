@@ -27,6 +27,10 @@ pub use request::*;
 /// The complete OxideBot event hierarchy.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names preserve the public 0.1.8 event model"
+)]
 pub enum Event {
     MessageEvent(MessageEvent),
     NoticeEvent(NoticeEvent),

@@ -180,26 +180,49 @@ impl MessageFrame {
             .saturating_add(self.conversation.estimated_bytes())
             .saturating_add(self.subspace.as_ref().map_or(0, CompactId::estimated_bytes))
             .saturating_add(self.actor.estimated_bytes())
-            .saturating_add(self.sender.id.len())
-            .saturating_add(if self.sender.profile.is_some() {
-                512
-            } else {
-                0
-            })
-            .saturating_add(if self.sender.group_info.is_some() {
-                256
-            } else {
-                0
-            })
-            .saturating_add(self.group.as_ref().map_or(0, |group| {
-                group
-                    .id
-                    .len()
-                    .saturating_add(if group.profile.is_some() { 512 } else { 0 })
-            }))
+            .saturating_add(user_retained_bytes(&self.sender))
+            .saturating_add(self.group.as_ref().map_or(0, group_retained_bytes))
             .saturating_add(self.message.estimated_bytes())
             .saturating_add(2_048)
     }
+}
+
+fn optional_string_bytes(value: &Option<String>) -> usize {
+    value
+        .as_ref()
+        .map_or(0, |value| value.capacity().saturating_add(24))
+}
+
+fn user_retained_bytes(user: &User) -> usize {
+    let mut bytes = user.id.capacity().saturating_add(64);
+    if let Some(profile) = &user.profile {
+        bytes = bytes
+            .saturating_add(optional_string_bytes(&profile.nickname))
+            .saturating_add(optional_string_bytes(&profile.avatar))
+            .saturating_add(optional_string_bytes(&profile.email))
+            .saturating_add(optional_string_bytes(&profile.phone))
+            .saturating_add(optional_string_bytes(&profile.signature))
+            .saturating_add(optional_string_bytes(&profile.level))
+            .saturating_add(128);
+    }
+    if let Some(group_info) = &user.group_info {
+        bytes = bytes
+            .saturating_add(optional_string_bytes(&group_info.alias))
+            .saturating_add(optional_string_bytes(&group_info.level))
+            .saturating_add(128);
+    }
+    bytes
+}
+
+fn group_retained_bytes(group: &Group) -> usize {
+    let mut bytes = group.id.capacity().saturating_add(64);
+    if let Some(profile) = &group.profile {
+        bytes = bytes
+            .saturating_add(optional_string_bytes(&profile.name))
+            .saturating_add(optional_string_bytes(&profile.avatar))
+            .saturating_add(96);
+    }
+    bytes
 }
 
 impl InboundFrame for MessageFrame {
@@ -787,4 +810,27 @@ pub trait Adapter: Send + 'static {
     }
     async fn run(self: Box<Self>, context: AdapterContext)
         -> std::result::Result<(), AdapterError>;
+}
+
+#[cfg(test)]
+mod retained_size_tests {
+    use super::*;
+    use oxidebot_core::source::user::UserProfile;
+
+    #[test]
+    fn message_frame_charges_owned_profile_strings() {
+        let id = EventId::new("retained-profile").expect("static event id");
+        let baseline = MessageFrame::text(id.clone(), "room", "user", "1", "hello");
+        let baseline_bytes = baseline.retained_bytes();
+        let frame = MessageFrame::text(id, "room", "user", "1", "hello").sender(User {
+            id: "user".into(),
+            profile: Some(UserProfile {
+                nickname: Some("x".repeat(1024 * 1024)),
+                ..UserProfile::default()
+            }),
+            group_info: None,
+        });
+
+        assert!(frame.retained_bytes() >= baseline_bytes.saturating_add(1024 * 1024));
+    }
 }

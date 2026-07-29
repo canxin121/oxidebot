@@ -4,11 +4,17 @@ use crate::{File, Message, MessageSegment, SegmentKind};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
+    io::{Read, Take},
     path::Path,
     sync::{Arc, RwLock},
 };
 
 type TranslationEntry = ((Arc<str>, Arc<str>), MessageTemplate);
+
+pub const MAX_TRANSLATION_LOCALE_BYTES: usize = 256;
+pub const MAX_TRANSLATION_KEY_BYTES: usize = 4 * 1024;
+pub const MAX_TRANSLATION_TEMPLATE_BYTES: usize = 1024 * 1024;
+pub const MAX_TRANSLATION_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
 pub trait SegmentSelector: Send + Sync + 'static {
     const KIND: SegmentKind;
@@ -399,6 +405,8 @@ pub struct TranslationCatalog {
 #[derive(Debug)]
 struct TranslationCatalogState {
     capacity: usize,
+    max_bytes: usize,
+    retained_bytes: usize,
     default_locale: Arc<str>,
     templates: HashMap<(Arc<str>, Arc<str>), MessageTemplate>,
 }
@@ -418,9 +426,24 @@ impl TranslationCatalog {
 
     #[must_use]
     pub fn bounded(capacity: usize, default_locale: impl Into<Arc<str>>) -> Self {
+        let capacity = capacity.max(1);
+        let default_max_bytes = capacity.saturating_mul(64 * 1024).min(256 * 1024 * 1024);
+        Self::bounded_bytes(capacity, default_max_bytes, default_locale)
+    }
+
+    /// Creates a catalog bounded by both entry count and retained source
+    /// bytes. The byte budget includes locale, key, and template source text.
+    #[must_use]
+    pub fn bounded_bytes(
+        capacity: usize,
+        max_bytes: usize,
+        default_locale: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TranslationCatalogState {
                 capacity: capacity.max(1),
+                max_bytes: max_bytes.max(1),
+                retained_bytes: 0,
                 default_locale: normalize_locale(default_locale.into()),
                 templates: HashMap::new(),
             })),
@@ -435,6 +458,8 @@ impl TranslationCatalog {
     ) -> Result<(), TranslationError> {
         let locale = normalize_locale(locale.into());
         let key = key.into();
+        let template = template.into();
+        validate_translation_entry(&locale, &key, &template)?;
         let template = MessageTemplate::parse(template).map_err(TranslationError::Template)?;
         let mut state = self
             .inner
@@ -444,7 +469,20 @@ impl TranslationCatalog {
         if !state.templates.contains_key(&map_key) && state.templates.len() >= state.capacity {
             return Err(TranslationError::CapacityExceeded);
         }
+        let previous_bytes = state
+            .templates
+            .get(&map_key)
+            .map_or(0, |previous| translation_entry_bytes(&map_key, previous));
+        let next_bytes = translation_entry_bytes(&map_key, &template);
+        let retained_bytes = state
+            .retained_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(next_bytes);
+        if retained_bytes > state.max_bytes {
+            return Err(TranslationError::ByteCapacityExceeded);
+        }
         state.templates.insert(map_key, template);
+        state.retained_bytes = retained_bytes;
         Ok(())
     }
 
@@ -457,7 +495,13 @@ impl TranslationCatalog {
         locale: impl Into<Arc<str>>,
         path: impl AsRef<Path>,
     ) -> Result<usize, TranslationError> {
-        let entries = parse_translation_file(locale.into(), path.as_ref())?;
+        let max_document_bytes = self
+            .inner
+            .read()
+            .expect("translation catalog lock poisoned")
+            .max_bytes
+            .min(MAX_TRANSLATION_DOCUMENT_BYTES);
+        let entries = parse_translation_file(locale.into(), path.as_ref(), max_document_bytes)?;
         self.insert_parsed(entries)
     }
 
@@ -493,7 +537,17 @@ impl TranslationCatalog {
                         path.display(),
                     ))
                 })?;
-            entries.extend(parse_translation_file(Arc::<str>::from(locale), &path)?);
+            let max_document_bytes = self
+                .inner
+                .read()
+                .expect("translation catalog lock poisoned")
+                .max_bytes
+                .min(MAX_TRANSLATION_DOCUMENT_BYTES);
+            entries.extend(parse_translation_file(
+                Arc::<str>::from(locale),
+                &path,
+                max_document_bytes,
+            )?);
         }
         self.insert_parsed(entries)
     }
@@ -512,10 +566,24 @@ impl TranslationCatalog {
         if state.templates.len().saturating_add(new_keys.len()) > state.capacity {
             return Err(TranslationError::CapacityExceeded);
         }
+        let mut retained_bytes = state.retained_bytes;
+        for (key, template) in &entries {
+            retained_bytes = retained_bytes.saturating_sub(
+                state
+                    .templates
+                    .get(key)
+                    .map_or(0, |previous| translation_entry_bytes(key, previous)),
+            );
+            retained_bytes = retained_bytes.saturating_add(translation_entry_bytes(key, template));
+        }
+        if retained_bytes > state.max_bytes {
+            return Err(TranslationError::ByteCapacityExceeded);
+        }
         let count = entries.len();
         for (key, template) in entries {
             state.templates.insert(key, template);
         }
+        state.retained_bytes = retained_bytes;
         Ok(count)
     }
 
@@ -570,9 +638,27 @@ impl TranslationCatalog {
 fn parse_translation_file(
     locale: Arc<str>,
     path: &Path,
+    max_document_bytes: usize,
 ) -> Result<Vec<TranslationEntry>, TranslationError> {
-    let source = fs::read_to_string(path).map_err(|error| {
+    let file = fs::File::open(path).map_err(|error| {
+        TranslationError::Io(format!("could not open {}: {error}", path.display()))
+    })?;
+    let limit = u64::try_from(max_document_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut reader: Take<fs::File> = file.take(limit);
+    let mut bytes = Vec::with_capacity(max_document_bytes.min(64 * 1024));
+    reader.read_to_end(&mut bytes).map_err(|error| {
         TranslationError::Io(format!("could not read {}: {error}", path.display()))
+    })?;
+    if bytes.len() > max_document_bytes {
+        return Err(TranslationError::DocumentTooLarge {
+            limit: max_document_bytes,
+        });
+    }
+    let source = String::from_utf8(bytes).map_err(|error| {
+        TranslationError::Document(format!(
+            "translation JSON {} is not UTF-8: {error}",
+            path.display(),
+        ))
     })?;
     let values: BTreeMap<String, String> = serde_json::from_str(&source).map_err(|error| {
         TranslationError::Document(format!(
@@ -584,10 +670,38 @@ fn parse_translation_file(
     values
         .into_iter()
         .map(|(key, template)| {
-            let template = MessageTemplate::parse(template).map_err(TranslationError::Template)?;
-            Ok(((Arc::clone(&locale), Arc::<str>::from(key)), template))
+            let key = Arc::<str>::from(key);
+            let source = Arc::<str>::from(template);
+            validate_translation_entry(&locale, &key, &source)?;
+            let template = MessageTemplate::parse(source).map_err(TranslationError::Template)?;
+            Ok(((Arc::clone(&locale), key), template))
         })
         .collect()
+}
+
+fn validate_translation_entry(
+    locale: &str,
+    key: &str,
+    template: &str,
+) -> Result<(), TranslationError> {
+    if locale.is_empty() || locale.len() > MAX_TRANSLATION_LOCALE_BYTES {
+        return Err(TranslationError::ValueTooLarge("locale"));
+    }
+    if key.is_empty() || key.len() > MAX_TRANSLATION_KEY_BYTES {
+        return Err(TranslationError::ValueTooLarge("translation key"));
+    }
+    if template.len() > MAX_TRANSLATION_TEMPLATE_BYTES {
+        return Err(TranslationError::ValueTooLarge("translation template"));
+    }
+    Ok(())
+}
+
+fn translation_entry_bytes(key: &(Arc<str>, Arc<str>), template: &MessageTemplate) -> usize {
+    key.0
+        .len()
+        .saturating_add(key.1.len())
+        .saturating_add(template.source().len())
+        .saturating_add(128)
 }
 
 fn normalize_locale(locale: Arc<str>) -> Arc<str> {
@@ -637,6 +751,9 @@ impl LocalizedMessage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TranslationError {
     CapacityExceeded,
+    ByteCapacityExceeded,
+    DocumentTooLarge { limit: usize },
+    ValueTooLarge(&'static str),
     MissingKey { locale: String, key: String },
     Io(String),
     Document(String),
@@ -647,6 +764,18 @@ impl fmt::Display for TranslationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CapacityExceeded => formatter.write_str("translation catalog capacity exceeded"),
+            Self::ByteCapacityExceeded => {
+                formatter.write_str("translation catalog byte capacity exceeded")
+            }
+            Self::DocumentTooLarge { limit } => {
+                write!(formatter, "translation document exceeds {limit} bytes")
+            }
+            Self::ValueTooLarge(value) => {
+                write!(
+                    formatter,
+                    "{value} exceeds its translation catalog byte limit"
+                )
+            }
             Self::MissingKey { locale, key } => {
                 write!(
                     formatter,
@@ -660,3 +789,28 @@ impl fmt::Display for TranslationError {
 }
 
 impl std::error::Error for TranslationError {}
+
+#[cfg(test)]
+mod catalog_limit_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_enforces_per_value_and_total_byte_limits() {
+        let catalog = TranslationCatalog::bounded_bytes(8, 256, "en");
+        catalog
+            .insert("en", "small", "hello")
+            .expect("small translation fits");
+        let error = catalog
+            .insert("en", "large", "x".repeat(512))
+            .expect_err("total catalog byte budget rejects large value");
+        assert_eq!(error, TranslationError::ByteCapacityExceeded);
+
+        let error = TranslationCatalog::bounded_bytes(8, 2 * 1024 * 1024, "en")
+            .insert("en", "key", "x".repeat(MAX_TRANSLATION_TEMPLATE_BYTES + 1))
+            .expect_err("single template limit is enforced");
+        assert_eq!(
+            error,
+            TranslationError::ValueTooLarge("translation template")
+        );
+    }
+}

@@ -1,165 +1,296 @@
 # Ergonomic bot authoring
 
-OxideBot keeps one event model, one message IR, one command IR, and one runtime. The ergonomic authoring layer is a set of compile-time adapters over those same primitives; it is not a second framework.
+This guide documents the authoring API implemented by this repository. Every
+example is also represented by a compiled workspace example or test; proposed
+APIs belong in an RFC rather than this guide.
 
-## Commands and command values
+OxideBot keeps one event model, one message IR, one command IR, and one
+runtime. The authoring layer provides compile-time adapters over those same
+primitives; it is not a second framework.
 
-A small command is a feature value and is added once:
+## Function commands
+
+`#[oxidebot::command]` turns an async function into a feature value. Add that
+value to a `Module` or directly to `OxideBot`:
 
 ```rust
-#[oxidebot::command(
-    "deploy",
-    alias = "ship",
-    category = "operations",
-    description = "commands.deploy.description",
-)]
-async fn deploy(
-    #[arg(complete = complete_projects, resolve = resolve_project)] project: Project,
-    #[arg(long, short = 'e')] environment: Environment,
-    State(service): State<DeploymentService>,
-    messenger: Messenger,
-) -> HandlerResult<()> {
-    let progress = messenger.reply("deploying …").await?;
-    service.deploy(project, environment).await.internal("deploy project")?;
-    progress.edit("deployed").await?;
-    Ok(())
+use oxidebot::prelude::*;
+
+#[oxidebot::command("ping")]
+/// Checks whether the bot is alive.
+async fn ping() -> &'static str {
+    "pong"
 }
 
-let features = Module::new().add(deploy);
+let features = Module::new().add(ping).help();
 ```
 
-Domain enums derive all command-facing metadata once:
+Command parameters use `#[arg(...)]`. Scalar values are parsed through
+`FromStr`; `Vec<T>` is used for repeated or rest values. Structs derived with
+`CommandArgs` are useful when several fields belong together:
 
 ```rust
-#[derive(CommandValue)]
-enum Environment {
-    #[value(alias = "dev", label = "Development")]
-    Development,
-    #[value(alias = "stage", alias = "staging", label = "Staging")]
-    Staging,
-    #[value(alias = "prod", label = "Production")]
-    Production,
-}
-```
+use oxidebot::prelude::*;
 
-The generated value parser, choices, help, completion, and native-command choices share the same declaration.
+#[derive(Debug, CommandArgs)]
+struct EchoArgs {
+    /// Text to echo. Quotes and escaped spaces are preserved.
+    #[arg(rest, required = true, prompt = "What should I echo?")]
+    text: Vec<String>,
 
-## Interactions
-
-Interactions are first-class features. A returned message is converted to the platform interaction response instead of being sent as an unrelated conversation message. `Responder` shares the same acknowledgement state with automatic responses, so an interaction is acknowledged at most once.
-
-```rust
-#[oxidebot::interaction("deploy.confirm")]
-async fn confirm(
-    Action(payload): Action<DeployConfirmation>,
-    responder: Responder,
-    State(service): State<DeploymentService>,
-) -> HandlerResult<()> {
-    responder.defer().await?;
-    service.confirm(payload.id).await.internal("confirm deployment")?;
-    responder.edit_original("Deployment started").await?;
-    Ok(())
-}
-```
-
-The typed extractors cover button actions, select values, modal fields, and native command interactions. Use `Responder::defer`, `respond`, `update`, `edit_original`, `follow_up`, or `form_error` when explicit interaction control is required.
-
-## Guards, hooks, and completers
-
-All author functions use the same extractor model as handlers:
-
-```rust
-#[oxidebot::guard]
-async fn can_deploy(
-    Sender(user): Sender,
-    State(permissions): State<PermissionService>,
-) -> GuardDecision {
-    permissions.check(&user.id, "deploy").await.into()
+    /// Number of copies.
+    #[arg(long, short = 'n', default = 1_usize, min = 1.0, max = 10.0)]
+    times: usize,
 }
 
-#[oxidebot::completer]
-async fn complete_projects(
-    State(projects): State<ProjectStore>,
-    Sender(user): Sender,
-    input: CompletionInput,
-) -> HandlerResult<Vec<CompletionItem>> {
-    projects.complete_for(&user.id, input.partial()).await
-}
-```
-
-`before` and `after` hooks can likewise request only the values they use. Observer-style after hooks may borrow the final `Outcome` without rebuilding it.
-
-Common rules are normal bounded guards: group-only, private-only, mention-required, reply-to-bot, allow/deny user sets, permission checks, and user/conversation cooldowns. They compose on a feature without a dynamic rule engine.
-
-## Dialogue forms
-
-Dialogue forms support localized prompt/error keys, optional fields, static or dynamic choices, safe field validation errors, conditional fields, and nested forms:
-
-```rust
-#[derive(DialogueForm)]
-struct Setup {
-    #[dialogue(prompt_key = "setup.project", choices = projects_for_user)]
-    project: ProjectId,
-
-    #[dialogue(prompt_key = "setup.advanced", confirm)]
-    advanced: bool,
-
-    #[dialogue(when = advanced, nested)]
-    options: Option<AdvancedOptions>,
-}
-
-let setup = dialogue.named("setup").form::<Setup>().await?;
-```
-
-Every dynamic choice collection is bounded. Optional values can be skipped explicitly; invalid input is retried according to the field policy and only safe, localizable messages are shown to users.
-
-## Delivery policy
-
-Returning `Message` remains the default. Use a delivery wrapper or `Outcome` when one reply needs explicit fallback semantics:
-
-```rust
-async fn menu() -> Delivery<Message> {
-    Delivery::strict(
-        Message::text("Choose")
-            .button_action("Confirm", "deploy.confirm"),
+#[oxidebot::command("echo")]
+async fn echo(args: EchoArgs) -> Message {
+    Message::text(
+        std::iter::repeat_n(args.text.join(" "), args.times)
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
 }
 ```
 
-Immediate and proactive sends go through `Messenger`; raw `Bot`/`CallApiTrait` remains the complete escape hatch.
+For subcommands, derive `BotCommand` on an enum and attach handlers with
+`#[oxidebot::branch(...)]`. The complete compiled example is
+[`examples/minimal`](../examples/minimal/src/main.rs).
 
-## Lifecycle
+## State, event data, and immediate sends
 
-Common lifecycle work does not require a custom service type:
+Handlers ask only for the values they use. Common extractors include
+`State<T>`, `Sender`, `Group`, `Context<S>`, `MessageContext`, `Messenger`,
+`Dialogue`, and `I18n`:
 
 ```rust
-OxideBot::with_state(state)
+use oxidebot::prelude::*;
+
+#[derive(Clone, Default)]
+struct GreetingService;
+
+#[derive(BotState)]
+struct AppState {
+    #[state]
+    greetings: GreetingService,
+}
+
+#[oxidebot::command("hello")]
+async fn hello(
+    Sender(user): Sender,
+    State(_service): State<GreetingService>,
+    messenger: Messenger,
+) -> HandlerResult<()> {
+    messenger
+        .reply(Message::text(format!("Hello, {}", user.id)))
+        .await?;
+    Ok(())
+}
+```
+
+Returning `String`, `Message`, or `Outcome` is the shortest deferred-reply
+path. Use `Messenger` when the handler needs a `Receipt` before it returns,
+wants to quote the incoming message, or sends to another address. The raw
+`Bot`/`CallApiTrait` extractor is the explicit platform escape hatch; calls
+made through it do not gain authoring middleware.
+
+## Completion
+
+Register a function with `#[oxidebot::completer]` and reference it from an
+argument. `CompletionInput::partial` is a public field:
+
+```rust
+use oxidebot::{
+    commands::prelude::{CompletionInput, CompletionItem, CompletionKind},
+    prelude::*,
+};
+
+#[oxidebot::completer]
+async fn complete_words(
+    _context: Context,
+    input: CompletionInput,
+) -> HandlerResult<Vec<CompletionItem>> {
+    Ok(["hello", "oxidebot", "world"]
+        .into_iter()
+        .filter(|value| value.starts_with(input.partial.as_ref()))
+        .take(input.limit)
+        .map(|value| CompletionItem::new(value, CompletionKind::Choice, input.replace))
+        .collect())
+}
+
+#[oxidebot::command("echo")]
+async fn echo(
+    #[arg(rest, required = true, complete = complete_words)] words: Vec<String>,
+) -> String {
+    words.join(" ")
+}
+```
+
+## Dialogue forms
+
+`DialogueForm` currently supports prompts, retry/error text, confirmation
+fields, static choices, and synchronous validators:
+
+```rust
+use oxidebot::prelude::*;
+
+fn non_empty(value: &str) -> Result<(), &'static str> {
+    (!value.trim().is_empty())
+        .then_some(())
+        .ok_or("Project name cannot be empty.")
+}
+
+#[derive(DialogueForm)]
+struct SetupForm {
+    #[dialogue(
+        prompt = "What is the project name?",
+        attempts = 3,
+        error = "Please enter a non-empty project name.",
+        validate = non_empty
+    )]
+    name: String,
+
+    #[dialogue(
+        prompt = "Choose an environment:",
+        choice = "Development=dev",
+        choice = "Staging=staging",
+        choice = "Production=production"
+    )]
+    environment: String,
+
+    #[dialogue(prompt = "Create this project?", confirm)]
+    confirmed: bool,
+}
+
+#[oxidebot::command("setup")]
+async fn setup(dialogue: Dialogue) -> HandlerResult<Message> {
+    let form = dialogue.named("project-setup").form::<SetupForm>().await?;
+    Ok(Message::text(format!(
+        "{} / {} / {}",
+        form.name, form.environment, form.confirmed
+    )))
+}
+```
+
+Dynamic choices, conditional fields, and nested forms are not part of the
+current `DialogueForm` derive.
+
+## Interactions
+
+Register an exact interaction action ID with `Module::interaction`:
+
+```rust
+use oxidebot::prelude::*;
+
+let interactions = Module::new().interaction("deploy.confirm", || async {
+    Message::text("Deployment confirmed")
+});
+```
+
+For explicit lifecycle control, extract `Responder`. All clones and automatic
+returned messages share one acknowledgement state, so only one initial
+response wins. Near a platform deadline, a still-pending interaction is
+automatically deferred through the high-priority scheduler capacity:
+
+```rust
+use oxidebot::prelude::*;
+
+async fn confirm(responder: Responder) -> HandlerResult<()> {
+    responder.defer().await?;
+    responder.edit_original("Deployment started").await?;
+    responder.follow_up("Tracking is available in /status").await?;
+    Ok(())
+}
+```
+
+`Responder` supports `acknowledge`, `defer`, `respond`, `update`,
+`edit_original`, `follow_up`, and `form_error`. Interactions without a response
+handle cannot extract `Responder`; use the raw platform API only when the
+portable lifecycle does not represent a platform-specific operation.
+
+## Delivery policy and receipts
+
+Messages are planned against adapter capabilities. `FallbackPolicy::Auto` is
+the default. Use `Messenger::fallback` for strict or explicitly lossy
+delivery:
+
+```rust
+use oxidebot::prelude::*;
+
+async fn announce(messenger: Messenger) -> HandlerResult<()> {
+    let receipt = messenger
+        .clone()
+        .fallback(FallbackPolicy::Strict)
+        .send(Message::text("Deployment started"))
+        .await?;
+    receipt.edit("Deployment complete").await?;
+    Ok(())
+}
+```
+
+A logical message can become several physical messages. Use
+`Receipt::references`, `Receipt::ids`, and `Receipt::report` when physical
+message identity matters. `DeliveryReport::items` and
+`PartialDeliveryError::report` retain successful physical message references
+when a later send fails. Receipt bulk operations have `edit_report`,
+`delete_report`, and `react_report` variants for the same partial-success
+model.
+
+Framework sends pass through the bounded per-bot scheduler. Queue budgets,
+priority reserves, attempt/total timeouts, safe idempotent retries, rate-limit
+cooldowns, panic isolation, and outbound metrics therefore apply consistently
+to returned messages, `Messenger`, dialogues, cross-bot sends, receipts,
+interactions, and command-definition publication. Raw `CallApiTrait` calls are
+the intentional escape hatch and bypass authoring middleware.
+
+## Runtime lifecycle
+
+Install adapters and features on `OxideBot`. `Module::help()` installs the
+built-in help command. Long-running background work implements `Service`, so
+the runtime can supervise it and coordinate shutdown:
+
+```rust,no_run
+use oxidebot::prelude::*;
+
+# async fn build(adapter: impl oxidebot::Adapter) -> oxidebot::Result<()> {
+OxideBot::new()
     .adapter(adapter)
-    .add(deploy.guard(can_deploy))
-    .help()
-    .on_startup(initialize)
-    .task(queue_worker)
-    .interval(Duration::from_secs(60), check_jobs)
-    .on_shutdown(save_state)
+    .include(Module::new().help())
     .run()
-    .await?;
+    .await
+# }
 ```
 
-Tasks receive bounded runtime context and shutdown signalling. The lower-level `Service` trait remains available for custom supervision.
+Use `run_to_completion()` for finite scripted adapters and tests.
 
-## Tests
+## Tests and benchmarks
 
-The high-level test scenario supports ordinary messages, button clicks, modal submissions, native commands, autocomplete requests, notices and requests. Expectations include replies, interaction acknowledgements, follow-ups, edits, deletes, reactions, and delivery degradation:
+The high-level `BotTest` API drives ordinary messages and answerable button
+interactions:
 
 ```rust
-BotTest::feature(deploy)
-    .message("/deploy oxidebot")
-    .expect_reply_contains("Confirm")
-    .click("deploy.confirm")
-    .expect_interaction_ack()
-    .expect_edit_contains("started")
+use oxidebot::prelude::*;
+use oxidebot_testkit::BotTest;
+
+#[oxidebot::command("ping")]
+async fn ping() -> &'static str {
+    "pong"
+}
+
+# async fn scenario() -> oxidebot::Result<()> {
+BotTest::feature(ping)
+    .message("/ping")
+    .expect_reply("pong")
     .run()
     .await?;
+# Ok(())
+# }
 ```
 
-Use `ScriptedAdapter` directly only when a test needs protocol-level control.
+Interaction scenarios use `.click(...)`, `.expect_interaction_ack()`,
+`.expect_edit_contains(...)`, and `.expect_followup_contains(...)`.
+
+Use `ScriptedAdapter` directly for protocol-level event control. Criterion is
+used only by `oxidebot-testkit` benchmarks. If Gnuplot is not installed,
+Criterion automatically uses its Plotters backend; that informational message
+does not affect tests or runtime behavior.

@@ -41,7 +41,9 @@ use crate::{
         ConversationMember, ConversationProfile, ConversationRef, InviteLink, InviteLinkOptions,
         MessageRef, MessageTarget, Page, PageRequest, PermissionSet, Thread, ThreadOptions,
     },
-    source::message::{DeliveryPlan, DeliveryReport, FallbackPolicy},
+    source::message::{
+        DeliveryItemResult, DeliveryPlan, DeliveryReport, FallbackPolicy, PartialDeliveryError,
+    },
 };
 use platform::{PlatformApiRequest, PlatformApiResponse, UnsupportedPlatformApiError};
 
@@ -126,20 +128,58 @@ pub trait CallApiTrait: Send + Sync {
         let conversation = target.conversation.clone();
         let mut references = Vec::new();
         let degradations = plan.degradations;
+        let mut items = Vec::with_capacity(plan.messages.len());
 
-        for physical in plan.messages {
-            let (segments, options) = physical.try_into_legacy()?;
-            let responses = self
-                .send_message_with_options(segments, legacy_target.clone(), options)
-                .await?;
-            references.extend(responses.into_iter().map(|response| {
-                MessageRef::new(response.sent_message_id).in_conversation(conversation.clone())
-            }));
+        for (index, physical) in plan.messages.into_iter().enumerate() {
+            let result = match physical.try_into_legacy() {
+                Ok((segments, options)) => self
+                    .send_message_with_options(segments, legacy_target.clone(), options)
+                    .await
+                    .map(|responses| {
+                        responses
+                            .into_iter()
+                            .map(|response| {
+                                MessageRef::new(response.sent_message_id)
+                                    .in_conversation(conversation.clone())
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                Err(error) => Err(error.into()),
+            };
+            match result {
+                Ok(sent) => {
+                    references.extend(sent.iter().cloned());
+                    items.push(DeliveryItemResult {
+                        index,
+                        messages: sent,
+                        error: None,
+                    });
+                }
+                Err(error) => {
+                    if references.is_empty() {
+                        return Err(error);
+                    }
+                    items.push(DeliveryItemResult {
+                        index,
+                        messages: Vec::new(),
+                        error: Some(error.to_string()),
+                    });
+                    return Err(PartialDeliveryError {
+                        report: DeliveryReport {
+                            messages: references,
+                            degradations,
+                            items,
+                        },
+                    }
+                    .into());
+                }
+            }
         }
 
         Ok(DeliveryReport {
             messages: references,
             degradations,
+            items,
         })
     }
 
@@ -873,4 +913,52 @@ fn legacy_reaction_id(reaction: &Reaction) -> Result<String> {
             .into())
         }
     })
+}
+
+#[cfg(test)]
+mod partial_delivery_tests {
+    use super::*;
+    use crate::source::message::Message;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FailSecondApi(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl CallApiTrait for FailSecondApi {
+        async fn send_message(
+            &self,
+            _message: Vec<MessageSegment>,
+            _target: SendMessageTarget,
+        ) -> Result<Vec<crate::api::response::SendMessageResponse>> {
+            let attempt = self.0.fetch_add(1, Ordering::AcqRel);
+            if attempt == 1 {
+                anyhow::bail!("second physical message failed");
+            }
+            Ok(vec![crate::api::response::SendMessageResponse {
+                sent_message_id: format!("message-{attempt}"),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_delivery_error_retains_successful_message_refs() {
+        let api = FailSecondApi::default();
+        let target = MessageTarget::new(ConversationRef::group("room"));
+        let plan = DeliveryPlan {
+            messages: vec![Message::text("first"), Message::text("second")],
+            degradations: Vec::new(),
+        };
+        let error = api
+            .send_delivery_plan(target, plan)
+            .await
+            .expect_err("second physical send fails");
+        let partial = error
+            .downcast::<PartialDeliveryError>()
+            .expect("partial report is retained in the error");
+        assert_eq!(partial.report.messages.len(), 1);
+        assert_eq!(partial.report.items.len(), 2);
+        assert!(partial.report.items[0].succeeded());
+        assert!(!partial.report.items[1].succeeded());
+    }
 }

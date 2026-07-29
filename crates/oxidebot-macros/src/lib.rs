@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream},
@@ -7,6 +8,17 @@ use syn::{
     Attribute, Data, DeriveInput, Expr, Field, Fields, FnArg, GenericArgument, Ident, ItemFn,
     LitChar, LitInt, LitStr, Meta, Pat, Path, PathArguments, Token, Type,
 };
+
+fn oxidebot_crate() -> proc_macro2::TokenStream {
+    match crate_name("oxidebot") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = format_ident!("{}", name.replace('-', "_"));
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::oxidebot),
+    }
+}
 
 /// Turns one state-aware completion function into a statically typed provider.
 ///
@@ -30,6 +42,7 @@ pub fn completer(attribute: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new(
             function.sig.span(),
@@ -110,13 +123,13 @@ fn expand_completer_function(mut function: ItemFn) -> syn::Result<proc_macro2::T
         #visibility struct #provider_ident;
 
         #(#implementation_attributes)*
-        #[::oxidebot::runtime::__private::async_trait]
-        impl ::oxidebot::DynamicCompleter<#state> for #provider_ident {
+        #[#oxidebot::runtime::__private::async_trait]
+        impl #oxidebot::runtime::DynamicCompleter<#state> for #provider_ident {
             async fn complete(
                 &self,
-                context: &::oxidebot::Context<#state>,
-                input: ::oxidebot::CompletionInput,
-            ) -> ::oxidebot::HandlerResult<::std::vec::Vec<::oxidebot::CompletionItem>> {
+                context: &#oxidebot::runtime::Context<#state>,
+                input: #oxidebot::runtime::CompletionInput,
+            ) -> #oxidebot::runtime::HandlerResult<::std::vec::Vec<#oxidebot::runtime::CompletionItem>> {
                 #implementation_ident(context.clone(), input).await
             }
         }
@@ -167,6 +180,7 @@ fn expand_branch_function(
     attribute: BranchAttribute,
     mut function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new(
             function.sig.span(),
@@ -222,7 +236,7 @@ fn expand_branch_function(
     };
 
     let mut wrapper_inputs = Vec::new();
-    let mut wrapper_types = vec![quote! { ::oxidebot::BranchArgs<#path> }];
+    let mut wrapper_types = vec![quote! { #oxidebot::runtime::BranchArgs<#path> }];
     let mut call_arguments = Vec::new();
     if let Some(argument) = branch_argument {
         let span = argument.span();
@@ -246,16 +260,16 @@ fn expand_branch_function(
     }
 
     let branch_input = if unit {
-        quote! { _: ::oxidebot::BranchArgs<#path>, }
+        quote! { _: #oxidebot::runtime::BranchArgs<#path>, }
     } else {
         quote! {
-            ::oxidebot::BranchArgs(__oxidebot_branch_value): ::oxidebot::BranchArgs<#path>,
+            #oxidebot::runtime::BranchArgs(__oxidebot_branch_value): #oxidebot::runtime::BranchArgs<#path>,
         }
     };
     let extractor_bounds = wrapper_types
         .iter()
         .map(|ty| {
-            quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+            quote! { #ty: #oxidebot::runtime::Extract<S> + ::core::marker::Send + 'static }
         })
         .collect::<Vec<_>>();
     let extractor_bounds_for_install = extractor_bounds.clone();
@@ -282,23 +296,23 @@ fn expand_branch_function(
         #(#implementation_attributes)*
         impl #feature_ident {
             #[must_use]
-            #visibility fn feature<S>(self) -> ::oxidebot::Feature<S>
+            #visibility fn feature<S>(self) -> #oxidebot::runtime::Feature<S>
             where
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
                 #(#extractor_bounds,)*
             {
-                ::oxidebot::Feature::command_branch(#path, #handler_ident)
+                #oxidebot::runtime::Feature::command_branch(#path, #handler_ident)
             }
         }
 
         #(#implementation_attributes)*
-        impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
+        impl<S> #oxidebot::runtime::IntoFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#extractor_bounds_for_install,)*
         {
-            fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
-                <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
+            fn install(self, module: #oxidebot::runtime::Module<S>) -> #oxidebot::runtime::Module<S> {
+                <#oxidebot::runtime::Feature<S> as #oxidebot::runtime::IntoFeature<S>>::install(
                     self.feature(),
                     module,
                 )
@@ -306,12 +320,12 @@ fn expand_branch_function(
         }
 
         #(#implementation_attributes)*
-        impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
+        impl<S> #oxidebot::runtime::GeneratedFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#extractor_bounds_for_generated,)*
         {
-            fn into_feature(self) -> ::oxidebot::Feature<S> {
+            fn into_feature(self) -> #oxidebot::runtime::Feature<S> {
                 self.feature()
             }
         }
@@ -330,6 +344,7 @@ fn expand_command_function(
     attribute: TokenStream,
     mut function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new(
             function.sig.span(),
@@ -453,7 +468,7 @@ fn expand_command_function(
             #(#implementation_attributes)*
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
-            #[derive(::oxidebot::CommandArgs)]
+            #[derive(#oxidebot::CommandArgs)]
             #visibility struct #args_ident {
                 #(#command_fields,)*
             }
@@ -462,13 +477,13 @@ fn expand_command_function(
     let args_input = if command_fields.is_empty() {
         quote! {}
     } else {
-        wrapper_types.insert(0, quote! { ::oxidebot::Args<#args_ident> });
-        quote! { ::oxidebot::Args(__oxidebot_args): ::oxidebot::Args<#args_ident>, }
+        wrapper_types.insert(0, quote! { #oxidebot::runtime::Args<#args_ident> });
+        quote! { #oxidebot::runtime::Args(__oxidebot_args): #oxidebot::runtime::Args<#args_ident>, }
     };
     let mut command_builder = if command_fields.is_empty() {
-        quote! { ::oxidebot::command(#command_name) }
+        quote! { #oxidebot::runtime::command(#command_name) }
     } else {
-        quote! { ::oxidebot::command(#command_name).args::<#args_ident>() }
+        quote! { #oxidebot::runtime::command(#command_name).args::<#args_ident>() }
     };
     if let Some(description) = doc_string(&outer_attributes) {
         command_builder = quote! { #command_builder.description(#description) };
@@ -476,14 +491,14 @@ fn expand_command_function(
     let extractor_bounds = wrapper_types
         .iter()
         .map(|ty| {
-            quote! { #ty: ::oxidebot::Extract<S> + ::core::marker::Send + 'static }
+            quote! { #ty: #oxidebot::runtime::Extract<S> + ::core::marker::Send + 'static }
         })
         .collect::<Vec<_>>();
     let extractor_bounds_for_install = extractor_bounds.clone();
     let extractor_bounds_for_generated = extractor_bounds.clone();
     let completer_bounds = completer_providers
         .iter()
-        .map(|provider| quote! { #provider: ::oxidebot::DynamicCompleter<S> })
+        .map(|provider| quote! { #provider: #oxidebot::runtime::DynamicCompleter<S> })
         .collect::<Vec<_>>();
     let completer_bounds_for_install = completer_bounds.clone();
     let completer_bounds_for_generated = completer_bounds.clone();
@@ -511,32 +526,32 @@ fn expand_command_function(
         #(#implementation_attributes)*
         impl #feature_ident {
             #[must_use]
-            #visibility fn command() -> ::oxidebot::Command {
+            #visibility fn command() -> #oxidebot::runtime::Command {
                 #command_builder
             }
 
             #[must_use]
-            #visibility fn feature<S>(self) -> ::oxidebot::Feature<S>
+            #visibility fn feature<S>(self) -> #oxidebot::runtime::Feature<S>
             where
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
                 #(#extractor_bounds,)*
                 #(#completer_bounds,)*
             {
-                let mut feature = ::oxidebot::Feature::command(Self::command(), #handler_ident);
+                let mut feature = #oxidebot::runtime::Feature::command(Self::command(), #handler_ident);
                 #(#completer_bindings)*
                 feature
             }
         }
 
         #(#implementation_attributes)*
-        impl<S> ::oxidebot::IntoFeature<S> for #feature_ident
+        impl<S> #oxidebot::runtime::IntoFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#extractor_bounds_for_install,)*
             #(#completer_bounds_for_install,)*
         {
-            fn install(self, module: ::oxidebot::Module<S>) -> ::oxidebot::Module<S> {
-                <::oxidebot::Feature<S> as ::oxidebot::IntoFeature<S>>::install(
+            fn install(self, module: #oxidebot::runtime::Module<S>) -> #oxidebot::runtime::Module<S> {
+                <#oxidebot::runtime::Feature<S> as #oxidebot::runtime::IntoFeature<S>>::install(
                     self.feature(),
                     module,
                 )
@@ -544,13 +559,13 @@ fn expand_command_function(
         }
 
         #(#implementation_attributes)*
-        impl<S> ::oxidebot::GeneratedFeature<S> for #feature_ident
+        impl<S> #oxidebot::runtime::GeneratedFeature<S> for #feature_ident
         where
             S: ::core::marker::Send + ::core::marker::Sync + 'static,
             #(#extractor_bounds_for_generated,)*
             #(#completer_bounds_for_generated,)*
         {
-            fn into_feature(self) -> ::oxidebot::Feature<S> {
+            fn into_feature(self) -> #oxidebot::runtime::Feature<S> {
                 self.feature()
             }
         }
@@ -558,7 +573,7 @@ fn expand_command_function(
         #(#implementation_attributes)*
         #[deprecated(note = "use Module::add(the_command_feature) or the_command_feature.feature()")]
         #[must_use]
-        #visibility fn #spec_ident() -> ::oxidebot::Command {
+        #visibility fn #spec_ident() -> #oxidebot::runtime::Command {
             #feature_ident::command()
         }
     })
@@ -696,6 +711,7 @@ impl DialogueFieldOptions {
 }
 
 fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
@@ -744,10 +760,10 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                 ));
             }
             let words = options.error.map_or_else(
-                || quote! { ::oxidebot::ConfirmationWords::default() },
+                || quote! { #oxidebot::runtime::ConfirmationWords::default() },
                 |error| {
                     quote! {
-                        ::oxidebot::ConfirmationWords::default().retry_message(#error)
+                        #oxidebot::runtime::ConfirmationWords::default().retry_message(#error)
                     }
                 },
             );
@@ -771,7 +787,7 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                                 (
                                     #labels,
                                     <#ty as ::core::str::FromStr>::from_str(#values)
-                                        .map_err(|_| ::oxidebot::HandlerError::internal(
+                                        .map_err(|_| #oxidebot::runtime::HandlerError::internal(
                                             format!("invalid static dialogue choice for {}", stringify!(#ident)),
                                         ))?,
                                 )
@@ -785,7 +801,7 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             if let Some(validate) = options.validate {
                 quote! {{
                     let value: #ty = #selected;
-                    #validate(&value).map_err(|error| ::oxidebot::HandlerError::user(error.to_string()))?;
+                    #validate(&value).map_err(|error| #oxidebot::runtime::HandlerError::user(error.to_string()))?;
                     value
                 }}
             } else {
@@ -809,8 +825,8 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
     }
 
     Ok(quote! {
-        impl ::oxidebot::DialogueForm for #name {
-            fn collect(dialogue: ::oxidebot::Dialogue) -> ::oxidebot::DialogueFormFuture<Self> {
+        impl #oxidebot::runtime::DialogueForm for #name {
+            fn collect(dialogue: #oxidebot::runtime::Dialogue) -> #oxidebot::runtime::DialogueFormFuture<Self> {
                 ::std::boxed::Box::pin(async move {
                     ::core::result::Result::Ok(Self {
                         #(#initializers,)*
@@ -822,6 +838,7 @@ fn expand_dialogue_form(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
 }
 
 fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
@@ -885,7 +902,7 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             ));
         }
         implementations.push(quote! {
-            impl ::oxidebot::FromState<#name> for #selected_ty
+            impl #oxidebot::runtime::FromState<#name> for #selected_ty
             where
                 #name: ::core::marker::Send + ::core::marker::Sync + 'static,
                 #selected_bound,
@@ -908,6 +925,7 @@ fn expand_bot_state(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 }
 
 fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     let visibility = input.vis.clone();
     let name = input.ident;
     let field_module = format_ident!("{}_fields", ident_to_module_name(&name.to_string()));
@@ -1013,7 +1031,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         field_markers.push(quote! {
             #[derive(Clone, Copy, Debug, Default)]
             #field_visibility struct #marker_ident;
-            impl ::oxidebot::CommandFieldTag for #marker_ident {
+            impl #oxidebot::runtime::CommandFieldTag for #marker_ident {
                 const NAME: &'static str = #argument_name;
             }
         });
@@ -1110,11 +1128,11 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         });
         match &field_kind {
             FieldKind::Plain(ty) if !flag => inferred_bounds.push(syn::parse_quote!(
-                #ty: ::oxidebot::FromCommandValue
+                #ty: #oxidebot::runtime::FromCommandValue
             )),
             FieldKind::Option(ty) | FieldKind::Vec(ty) => {
                 inferred_bounds.push(syn::parse_quote!(
-                    #ty: ::oxidebot::FromCommandValue
+                    #ty: #oxidebot::runtime::FromCommandValue
                 ));
             }
             FieldKind::Plain(_) => {}
@@ -1150,7 +1168,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let action_tokens = argument_action_tokens(options.action.as_deref(), field.span())?;
 
         let mut schema = quote! {
-            ::oxidebot::ArgumentSpec::new(#argument_name)
+            #oxidebot::runtime::ArgumentSpec::new(#argument_name)
                 .required(#required)
                 .multiple(#multiple)
                 .rest(#rest)
@@ -1180,7 +1198,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         }
         for choice in &options.choices {
             schema = quote! {
-                #schema.choice(::oxidebot::ArgumentChoice::new(#choice, #choice))
+                #schema.choice(#oxidebot::runtime::ArgumentChoice::new(#choice, #choice))
             };
         }
         if options.autocomplete {
@@ -1251,7 +1269,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     let completer_bounds = completer_providers
         .iter()
-        .map(|provider| quote! { #provider: ::oxidebot::DynamicCompleter<S> })
+        .map(|provider| quote! { #provider: #oxidebot::runtime::DynamicCompleter<S> })
         .collect::<Vec<_>>();
 
     Ok(quote! {
@@ -1259,16 +1277,16 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             #(#field_markers)*
         }
 
-        impl #impl_generics ::oxidebot::CommandArgs for #name #type_generics #where_clause {
-            fn schema() -> ::oxidebot::CommandSchema {
-                let mut schema = ::oxidebot::CommandSchema::new();
+        impl #impl_generics #oxidebot::runtime::CommandArgs for #name #type_generics #where_clause {
+            fn schema() -> #oxidebot::runtime::CommandSchema {
+                let mut schema = #oxidebot::runtime::CommandSchema::new();
                 #(#schema_fields)*
                 schema
             }
 
             fn from_arguments(
-                arguments: &::oxidebot::ParsedArguments,
-            ) -> ::core::result::Result<Self, ::oxidebot::CommandParseError> {
+                arguments: &#oxidebot::runtime::ParsedArguments,
+            ) -> ::core::result::Result<Self, #oxidebot::runtime::CommandParseError> {
                 ::core::result::Result::Ok(Self {
                     #(#initializers,)*
                 })
@@ -1276,8 +1294,8 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
             fn command(
                 name: impl ::core::convert::Into<::std::sync::Arc<str>>,
-            ) -> ::oxidebot::Command {
-                let command = ::oxidebot::Command::new(name).schema(Self::schema());
+            ) -> #oxidebot::runtime::Command {
+                let command = #oxidebot::runtime::Command::new(name).schema(Self::schema());
                 #command_builder
             }
         }
@@ -1288,14 +1306,14 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             #visibility fn feature<S, H, T>(
                 name: impl ::core::convert::Into<::std::sync::Arc<str>>,
                 handler: H,
-            ) -> ::oxidebot::Feature<S>
+            ) -> #oxidebot::runtime::Feature<S>
             where
                 S: ::core::marker::Send + ::core::marker::Sync + 'static,
-                H: ::oxidebot::IntoHandler<T, S>,
+                H: #oxidebot::runtime::IntoHandler<T, S>,
                 #(#completer_bounds,)*
             {
-                let mut feature = ::oxidebot::Feature::command(
-                    <Self as ::oxidebot::CommandArgs>::command(name),
+                let mut feature = #oxidebot::runtime::Feature::command(
+                    <Self as #oxidebot::runtime::CommandArgs>::command(name),
                     handler,
                 );
                 #(#completer_bindings)*
@@ -1306,6 +1324,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 }
 
 fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
@@ -1360,14 +1379,14 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 branch_markers.push(quote! {
                     #[derive(Clone, Copy, Debug, Default)]
                     #branch_visibility struct #ident;
-                    impl ::oxidebot::CommandBranchTag for #ident {
+                    impl #oxidebot::runtime::CommandBranchTag for #ident {
                         type Command = super::#enum_name;
-                        type Arguments = ::oxidebot::UnitBranch;
+                        type Arguments = #oxidebot::runtime::UnitBranch;
                         const PATH: &'static [&'static str] = &[#branch_name];
                     }
                 });
                 let mut builder = quote! {
-                    let mut branch = ::oxidebot::CommandBranch::new(#branch_name);
+                    let mut branch = #oxidebot::runtime::CommandBranch::new(#branch_name);
                 };
                 if let Some(description) = description {
                     builder.extend(quote! {
@@ -1407,11 +1426,11 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                     _ => quote!(#ty),
                 };
                 if options.subcommand {
-                    inferred_bounds.push(syn::parse_quote!(#ty: ::oxidebot::CommandTree));
+                    inferred_bounds.push(syn::parse_quote!(#ty: #oxidebot::runtime::CommandTree));
                     branch_markers.push(quote! {
                         #[derive(Clone, Copy, Debug, Default)]
                         #branch_visibility struct #ident;
-                        impl ::oxidebot::CommandBranchTag for #ident {
+                        impl #oxidebot::runtime::CommandBranchTag for #ident {
                             type Command = super::#enum_name;
                             type Arguments = #branch_ty;
                             const PATH: &'static [&'static str] = &[#branch_name];
@@ -1420,8 +1439,8 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                         }
                     });
                     let mut builder = quote! {
-                        let nested = <#ty as ::oxidebot::CommandTree>::command();
-                        let mut branch = ::oxidebot::CommandBranch::new(#branch_name);
+                        let nested = <#ty as #oxidebot::runtime::CommandTree>::command();
+                        let mut branch = #oxidebot::runtime::CommandBranch::new(#branch_name);
                         if let ::core::option::Option::Some(schema) = nested.schema_ref() {
                             branch = branch.schema(schema.clone());
                         }
@@ -1446,24 +1465,24 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                         {
                             let nested = result.descend(1);
                             return ::core::result::Result::Ok(Self::#ident(
-                                <#ty as ::oxidebot::FromCommandMatch>::from_match(&nested)?,
+                                <#ty as #oxidebot::runtime::FromCommandMatch>::from_match(&nested)?,
                             ));
                         }
                     });
                 } else {
-                    inferred_bounds.push(syn::parse_quote!(#ty: ::oxidebot::CommandArgs));
+                    inferred_bounds.push(syn::parse_quote!(#ty: #oxidebot::runtime::CommandArgs));
                     branch_markers.push(quote! {
                         #[derive(Clone, Copy, Debug, Default)]
                         #branch_visibility struct #ident;
-                        impl ::oxidebot::CommandBranchTag for #ident {
+                        impl #oxidebot::runtime::CommandBranchTag for #ident {
                             type Command = super::#enum_name;
                             type Arguments = #branch_ty;
                             const PATH: &'static [&'static str] = &[#branch_name];
                         }
                     });
                     let mut builder = quote! {
-                        let mut branch = ::oxidebot::CommandBranch::new(#branch_name)
-                            .schema(<#ty as ::oxidebot::CommandArgs>::schema());
+                        let mut branch = #oxidebot::runtime::CommandBranch::new(#branch_name)
+                            .schema(<#ty as #oxidebot::runtime::CommandArgs>::schema());
                     };
                     if let Some(description) = description {
                         builder.extend(quote! { branch = branch.description(#description); });
@@ -1484,7 +1503,7 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                                 result.parse_active()?
                             };
                             ::core::result::Result::Ok(Self::#ident(
-                                <#ty as ::oxidebot::CommandArgs>::from_arguments(&arguments)?,
+                                <#ty as #oxidebot::runtime::CommandArgs>::from_arguments(&arguments)?,
                             ))
                         },
                     });
@@ -1517,11 +1536,11 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             #(#branch_markers)*
         }
 
-        impl #impl_generics ::oxidebot::FromCommandMatch for #enum_name #type_generics #where_clause {
+        impl #impl_generics #oxidebot::runtime::FromCommandMatch for #enum_name #type_generics #where_clause {
             fn from_match(
-                result: &::oxidebot::CommandMatch,
-            ) -> ::core::result::Result<Self, ::oxidebot::CommandParseError> {
-                let __oxidebot_command = <Self as ::oxidebot::CommandTree>::command();
+                result: &#oxidebot::runtime::CommandMatch,
+            ) -> ::core::result::Result<Self, #oxidebot::runtime::CommandParseError> {
+                let __oxidebot_command = <Self as #oxidebot::runtime::CommandTree>::command();
                 let __oxidebot_selected_branch = result.branch_names().iter().find_map(|actual| {
                     __oxidebot_command.branches().iter().find_map(|branch| {
                         (branch.name().eq_ignore_ascii_case(actual)
@@ -1536,14 +1555,14 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 match __oxidebot_selected_branch {
                     #(#match_arms)*
                     ::core::option::Option::Some(_) => ::core::result::Result::Err(
-                        ::oxidebot::CommandParseError::InvalidValue {
+                        #oxidebot::runtime::CommandParseError::InvalidValue {
                             value: __oxidebot_selected_branch.unwrap_or_default().to_owned(),
                             expected: "known subcommand",
                             reason: "the selected command branch is not represented by this enum".to_owned(),
                         },
                     ),
                     ::core::option::Option::None => ::core::result::Result::Err(
-                        ::oxidebot::CommandParseError::MissingSubcommand {
+                        #oxidebot::runtime::CommandParseError::MissingSubcommand {
                             choices: ::std::sync::Arc::from(""),
                         },
                     ),
@@ -1551,9 +1570,9 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             }
         }
 
-        impl #impl_generics ::oxidebot::CommandTree for #enum_name #type_generics #where_clause {
-            fn command() -> ::oxidebot::Command {
-                let command = ::oxidebot::Command::new(#root_name);
+        impl #impl_generics #oxidebot::runtime::CommandTree for #enum_name #type_generics #where_clause {
+            fn command() -> #oxidebot::runtime::Command {
+                let command = #oxidebot::runtime::Command::new(#root_name);
                 let mut command = #root_builder;
                 #(#branch_builders)*
                 command
@@ -1639,22 +1658,27 @@ fn command_value_kind_tokens(
     ty: &Type,
     explicit: Option<&str>,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
     if let Some(explicit) = explicit {
         let normalized = explicit.trim().to_ascii_lowercase().replace('-', "_");
         let tokens = match normalized.as_str() {
-            "string" | "text" => quote!(::oxidebot::CommandValueKind::String),
-            "integer" | "int" => quote!(::oxidebot::CommandValueKind::Integer),
-            "number" | "float" => quote!(::oxidebot::CommandValueKind::Number),
-            "boolean" | "bool" => quote!(::oxidebot::CommandValueKind::Boolean),
-            "user" => quote!(::oxidebot::CommandValueKind::User),
-            "conversation" | "channel" => quote!(::oxidebot::CommandValueKind::Conversation),
-            "role" => quote!(::oxidebot::CommandValueKind::Role),
-            "mention" | "mentionable" => quote!(::oxidebot::CommandValueKind::Mentionable),
-            "attachment" | "file" => quote!(::oxidebot::CommandValueKind::Attachment),
-            "message_segment" | "segment" => quote!(::oxidebot::CommandValueKind::MessageSegment),
+            "string" | "text" => quote!(#oxidebot::runtime::CommandValueKind::String),
+            "integer" | "int" => quote!(#oxidebot::runtime::CommandValueKind::Integer),
+            "number" | "float" => quote!(#oxidebot::runtime::CommandValueKind::Number),
+            "boolean" | "bool" => quote!(#oxidebot::runtime::CommandValueKind::Boolean),
+            "user" => quote!(#oxidebot::runtime::CommandValueKind::User),
+            "conversation" | "channel" => {
+                quote!(#oxidebot::runtime::CommandValueKind::Conversation)
+            }
+            "role" => quote!(#oxidebot::runtime::CommandValueKind::Role),
+            "mention" | "mentionable" => quote!(#oxidebot::runtime::CommandValueKind::Mentionable),
+            "attachment" | "file" => quote!(#oxidebot::runtime::CommandValueKind::Attachment),
+            "message_segment" | "segment" => {
+                quote!(#oxidebot::runtime::CommandValueKind::MessageSegment)
+            }
             value if value.starts_with("native:") => {
                 let value = value.trim_start_matches("native:").to_owned();
-                quote!(::oxidebot::CommandValueKind::PlatformNative(
+                quote!(#oxidebot::runtime::CommandValueKind::PlatformNative(
                     ::std::sync::Arc::from(#value)
                 ))
             }
@@ -1669,28 +1693,28 @@ fn command_value_kind_tokens(
     }
 
     let tokens = if is_type(ty, "bool") {
-        quote!(::oxidebot::CommandValueKind::Boolean)
+        quote!(#oxidebot::runtime::CommandValueKind::Boolean)
     } else if [
         "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
     ]
     .iter()
     .any(|name| is_type(ty, name))
     {
-        quote!(::oxidebot::CommandValueKind::Integer)
+        quote!(#oxidebot::runtime::CommandValueKind::Integer)
     } else if is_type(ty, "f32") || is_type(ty, "f64") {
-        quote!(::oxidebot::CommandValueKind::Number)
+        quote!(#oxidebot::runtime::CommandValueKind::Number)
     } else if is_type(ty, "User") {
-        quote!(::oxidebot::CommandValueKind::User)
+        quote!(#oxidebot::runtime::CommandValueKind::User)
     } else if is_type(ty, "ConversationRef") || is_type(ty, "MessageTarget") {
-        quote!(::oxidebot::CommandValueKind::Conversation)
+        quote!(#oxidebot::runtime::CommandValueKind::Conversation)
     } else if is_type(ty, "File") {
-        quote!(::oxidebot::CommandValueKind::Attachment)
+        quote!(#oxidebot::runtime::CommandValueKind::Attachment)
     } else if is_type(ty, "Mention") {
-        quote!(::oxidebot::CommandValueKind::Mentionable)
+        quote!(#oxidebot::runtime::CommandValueKind::Mentionable)
     } else if is_type(ty, "MessageSegment") {
-        quote!(::oxidebot::CommandValueKind::MessageSegment)
+        quote!(#oxidebot::runtime::CommandValueKind::MessageSegment)
     } else {
-        quote!(::oxidebot::CommandValueKind::String)
+        quote!(#oxidebot::runtime::CommandValueKind::String)
     };
     Ok(tokens)
 }
@@ -1699,16 +1723,17 @@ fn argument_action_tokens(
     action: Option<&str>,
     span: proc_macro2::Span,
 ) -> syn::Result<Option<proc_macro2::TokenStream>> {
+    let oxidebot = oxidebot_crate();
     let Some(action) = action else {
         return Ok(None);
     };
     let normalized = action.trim().to_ascii_lowercase().replace('-', "_");
     let tokens = match normalized.as_str() {
-        "store" => quote!(::oxidebot::ArgumentAction::Store),
-        "append" => quote!(::oxidebot::ArgumentAction::Append),
-        "count" => quote!(::oxidebot::ArgumentAction::Count),
-        "set_true" | "true" => quote!(::oxidebot::ArgumentAction::SetTrue),
-        "set_false" | "false" => quote!(::oxidebot::ArgumentAction::SetFalse),
+        "store" => quote!(#oxidebot::runtime::ArgumentAction::Store),
+        "append" => quote!(#oxidebot::runtime::ArgumentAction::Append),
+        "count" => quote!(#oxidebot::runtime::ArgumentAction::Count),
+        "set_true" | "true" => quote!(#oxidebot::runtime::ArgumentAction::SetTrue),
+        "set_false" | "false" => quote!(#oxidebot::runtime::ArgumentAction::SetFalse),
         _ => {
             return Err(syn::Error::new(
                 span,

@@ -24,6 +24,36 @@ impl Counter {
     }
 }
 
+#[repr(align(64))]
+#[derive(Default)]
+struct Gauge(AtomicU64);
+
+impl Gauge {
+    #[inline]
+    fn increment(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    }
+
+    #[inline]
+    fn decrement(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            });
+    }
+
+    #[inline]
+    fn update_max(&self, candidate: u64) {
+        self.0.fetch_max(candidate, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Default)]
 pub struct RuntimeMetrics {
     ingress_frames: Counter,
@@ -46,6 +76,23 @@ pub struct RuntimeMetrics {
     commands: Counter,
     cancelled_commands: Counter,
     command_errors: Counter,
+    command_retries: Counter,
+    rate_limits: Counter,
+    delivery_errors: Counter,
+    delivery_panics: Counter,
+    delivery_degradations: Counter,
+    command_queue_wait_nanos: Counter,
+    command_queue_wait_samples: Counter,
+    command_duration_nanos: Counter,
+    command_duration_samples: Counter,
+    outbound_queue_depth: Gauge,
+    outbound_queue_high_water: Gauge,
+    outbound_in_flight: Gauge,
+    active_sessions: Gauge,
+    active_sessions_high_water: Gauge,
+    active_handlers: Gauge,
+    handler_duration_nanos: Counter,
+    handler_duration_samples: Counter,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -70,6 +117,23 @@ pub struct RuntimeMetricsSnapshot {
     pub commands: u64,
     pub cancelled_commands: u64,
     pub command_errors: u64,
+    pub command_retries: u64,
+    pub rate_limits: u64,
+    pub delivery_errors: u64,
+    pub delivery_panics: u64,
+    pub delivery_degradations: u64,
+    pub command_queue_wait_nanos: u64,
+    pub command_queue_wait_samples: u64,
+    pub command_duration_nanos: u64,
+    pub command_duration_samples: u64,
+    pub outbound_queue_depth: u64,
+    pub outbound_queue_high_water: u64,
+    pub outbound_in_flight: u64,
+    pub active_sessions: u64,
+    pub active_sessions_high_water: u64,
+    pub active_handlers: u64,
+    pub handler_duration_nanos: u64,
+    pub handler_duration_samples: u64,
 }
 
 impl RuntimeMetrics {
@@ -129,6 +193,17 @@ impl RuntimeMetrics {
         self.handler_calls.add(1);
     }
 
+    pub(crate) fn handler_started(&self) {
+        self.active_handlers.increment();
+    }
+
+    pub(crate) fn handler_finished(&self, duration: std::time::Duration) {
+        self.active_handlers.decrement();
+        self.handler_duration_nanos
+            .add(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.handler_duration_samples.add(1);
+    }
+
     pub(crate) fn handler_panic(&self) {
         self.handler_panics.add(1);
     }
@@ -151,6 +226,58 @@ impl RuntimeMetrics {
 
     pub(crate) fn command_error(&self) {
         self.command_errors.add(1);
+    }
+
+    pub(crate) fn command_retry(&self) {
+        self.command_retries.add(1);
+    }
+
+    pub(crate) fn rate_limit(&self) {
+        self.rate_limits.add(1);
+    }
+
+    pub(crate) fn delivery_error(&self) {
+        self.delivery_errors.add(1);
+    }
+
+    pub(crate) fn delivery_panic(&self) {
+        self.delivery_panics.add(1);
+    }
+
+    pub(crate) fn delivery_degradation(&self) {
+        self.delivery_degradations.add(1);
+    }
+
+    pub(crate) fn outbound_queued(&self) {
+        let depth = self.outbound_queue_depth.increment();
+        self.outbound_queue_high_water.update_max(depth);
+    }
+
+    pub(crate) fn outbound_dequeued(&self, wait: std::time::Duration) {
+        self.outbound_queue_depth.decrement();
+        self.command_queue_wait_nanos
+            .add(wait.as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.command_queue_wait_samples.add(1);
+    }
+
+    pub(crate) fn command_started(&self) {
+        self.outbound_in_flight.increment();
+    }
+
+    pub(crate) fn command_finished(&self, duration: std::time::Duration) {
+        self.outbound_in_flight.decrement();
+        self.command_duration_nanos
+            .add(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.command_duration_samples.add(1);
+    }
+
+    pub(crate) fn session_opened(&self) {
+        let active = self.active_sessions.increment();
+        self.active_sessions_high_water.update_max(active);
+    }
+
+    pub(crate) fn session_closed(&self) {
+        self.active_sessions.decrement();
     }
 
     #[must_use]
@@ -176,6 +303,23 @@ impl RuntimeMetrics {
             commands: self.commands.load(),
             cancelled_commands: self.cancelled_commands.load(),
             command_errors: self.command_errors.load(),
+            command_retries: self.command_retries.load(),
+            rate_limits: self.rate_limits.load(),
+            delivery_errors: self.delivery_errors.load(),
+            delivery_panics: self.delivery_panics.load(),
+            delivery_degradations: self.delivery_degradations.load(),
+            command_queue_wait_nanos: self.command_queue_wait_nanos.load(),
+            command_queue_wait_samples: self.command_queue_wait_samples.load(),
+            command_duration_nanos: self.command_duration_nanos.load(),
+            command_duration_samples: self.command_duration_samples.load(),
+            outbound_queue_depth: self.outbound_queue_depth.load(),
+            outbound_queue_high_water: self.outbound_queue_high_water.load(),
+            outbound_in_flight: self.outbound_in_flight.load(),
+            active_sessions: self.active_sessions.load(),
+            active_sessions_high_water: self.active_sessions_high_water.load(),
+            active_handlers: self.active_handlers.load(),
+            handler_duration_nanos: self.handler_duration_nanos.load(),
+            handler_duration_samples: self.handler_duration_samples.load(),
         }
     }
 }

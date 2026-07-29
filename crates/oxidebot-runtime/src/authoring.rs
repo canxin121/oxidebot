@@ -4,13 +4,13 @@ use crate::{
     FromCommandMatch, FromCommandValue, Guard, GuardDecision, HandlerError, HandlerResult,
 };
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
+use futures_util::{future::BoxFuture, FutureExt};
 use oxidebot_core::{
     conversation::{ConversationKind, ConversationRef, MessageTarget},
     source::message::{
         DeliveryPlan, DeliveryReport, FallbackPolicy, File, Message, MessageSegment,
     },
-    BotIdentity, BotObject, LocalizedMessage, Media, PlatformId, TemplateValue, TranslationCatalog,
+    BotIdentity, LocalizedMessage, Media, PlatformId, TemplateValue, TranslationCatalog,
 };
 use regex::Regex;
 use std::{
@@ -18,9 +18,16 @@ use std::{
     future::Future,
     marker::PhantomData,
     ops::Deref,
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+
+pub const MAX_SHORTCUT_PATTERN_BYTES: usize = 4 * 1024;
+pub const MAX_SHORTCUT_REPLACEMENT_BYTES: usize = 16 * 1024;
+pub const MAX_SHORTCUT_HUMANIZED_BYTES: usize = 4 * 1024;
+pub const MAX_SHORTCUT_SCAN_PER_MESSAGE: usize = 4_096;
+pub const MAX_REGISTRY_SHORTCUTS: usize = 65_536;
 
 /// One command shortcut compiled at application build time.
 #[derive(Clone, Debug)]
@@ -51,6 +58,11 @@ impl Shortcut {
     }
 
     pub fn regex(pattern: &str, replacement: impl Into<Arc<str>>) -> Result<Self, regex::Error> {
+        if pattern.is_empty() || pattern.len() > MAX_SHORTCUT_PATTERN_BYTES {
+            return Err(regex::Error::Syntax(format!(
+                "shortcut regex must contain 1..={MAX_SHORTCUT_PATTERN_BYTES} bytes"
+            )));
+        }
         Ok(Self {
             pattern: ShortcutPattern::Regex(Arc::new(Regex::new(pattern)?)),
             replacement: replacement.into(),
@@ -136,6 +148,38 @@ impl Shortcut {
                 ))
             }
         }
+    }
+
+    fn validate(&self) -> Result<(), HandlerError> {
+        if self.pattern_text().is_empty() || self.pattern_text().len() > MAX_SHORTCUT_PATTERN_BYTES
+        {
+            return Err(HandlerError::internal(
+                "shortcut pattern byte limit exceeded",
+            ));
+        }
+        if self.replacement.len() > MAX_SHORTCUT_REPLACEMENT_BYTES {
+            return Err(HandlerError::internal(
+                "shortcut replacement byte limit exceeded",
+            ));
+        }
+        if self
+            .humanized
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_SHORTCUT_HUMANIZED_BYTES)
+        {
+            return Err(HandlerError::internal(
+                "shortcut display text byte limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.pattern_text()
+            .len()
+            .saturating_add(self.replacement.len())
+            .saturating_add(self.humanized.as_ref().map_or(0, |value| value.len()))
+            .saturating_add(128)
     }
 }
 
@@ -618,23 +662,43 @@ where
     pub async fn deliver(
         &self,
         context: Option<&Context<S>>,
-        api: &BotObject,
+        bot: &BotHandle,
         target: MessageTarget,
-        message: Message,
+        mut message: Message,
         policy: FallbackPolicy,
     ) -> HandlerResult<DeliveryReport> {
-        let mut plan = api
-            .plan_outgoing_message(&message, policy)
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
-        for middleware in &self.delivery_middleware {
-            plan = middleware.before_delivery(context, &target, plan).await?;
+        if message.options.idempotency_key.is_none()
+            && bot.capabilities().send_idempotency != crate::IdempotencyGuarantee::Unsupported
+        {
+            if let Some(context) = context {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                context.dispatch_envelope().id.hash(&mut hasher);
+                let sequence = context.next_outbound_sequence();
+                message.options.idempotency_key = Some(format!(
+                    "oxidebot-event-{:016x}-{sequence}",
+                    hasher.finish()
+                ));
+            }
         }
-        let mut report = api
+        let mut plan = bot
+            .plan_outgoing_message(&message, policy)
+            .map_err(HandlerError::from)?;
+        for middleware in &self.delivery_middleware {
+            plan = AssertUnwindSafe(middleware.before_delivery(context, &target, plan))
+                .catch_unwind()
+                .await
+                .map_err(|_| HandlerError::DeliveryPanicked)??;
+        }
+        let mut report = bot
             .send_delivery_plan(target.clone(), plan)
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
+            .map_err(HandlerError::from)?;
         for middleware in self.delivery_middleware.iter().rev() {
-            report = middleware.after_delivery(context, &target, report).await?;
+            report = AssertUnwindSafe(middleware.after_delivery(context, &target, report))
+                .catch_unwind()
+                .await
+                .map_err(|_| HandlerError::DeliveryPanicked)??;
         }
         Ok(report)
     }
@@ -644,7 +708,7 @@ where
 pub(crate) trait ErasedDeliveryPipeline: Send + Sync + 'static {
     async fn deliver(
         &self,
-        api: &BotObject,
+        bot: &BotHandle,
         target: MessageTarget,
         message: Message,
         policy: FallbackPolicy,
@@ -666,13 +730,13 @@ where
 {
     async fn deliver(
         &self,
-        api: &BotObject,
+        bot: &BotHandle,
         target: MessageTarget,
         message: Message,
         policy: FallbackPolicy,
     ) -> HandlerResult<DeliveryReport> {
         self.runtime
-            .deliver(Some(&self.context), api, target, message, policy)
+            .deliver(Some(&self.context), bot, target, message, policy)
             .await
     }
 }
@@ -779,12 +843,35 @@ where
 #[derive(Clone, Debug)]
 pub struct CommandRegistry {
     inner: Arc<RwLock<CommandRegistryState>>,
-    publication: Arc<RwLock<Option<(BotDirectory, crate::CommandCatalog)>>>,
+    publication: Arc<RwLock<Option<CommandPublicationState>>>,
+    publication_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone, Debug)]
+struct CommandPublicationState {
+    bots: BotDirectory,
+    catalog: crate::CommandCatalog,
+    published_revision: Option<u64>,
+    pending_revision: Option<u64>,
+    last_error: Option<Arc<str>>,
+}
+
+/// Snapshot of local-to-platform command-definition synchronization.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CommandPublicationStatus {
+    pub desired_revision: u64,
+    pub published_revision: Option<u64>,
+    pub pending_revision: Option<u64>,
+    pub last_error: Option<Arc<str>>,
+    pub attached: bool,
 }
 
 #[derive(Debug)]
 struct CommandRegistryState {
     capacity: usize,
+    max_bytes: usize,
+    retained_bytes: usize,
+    shortcut_count: usize,
     commands: HashMap<CommandId, RuntimeCommandState>,
     order: VecDeque<CommandId>,
     shortcut_order: VecDeque<CommandId>,
@@ -813,9 +900,21 @@ impl Default for CommandRegistry {
 impl CommandRegistry {
     #[must_use]
     pub fn bounded(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        let max_bytes = capacity.saturating_mul(32 * 1024).min(512 * 1024 * 1024);
+        Self::bounded_bytes(capacity, max_bytes)
+    }
+
+    /// Creates a registry bounded by command count, total shortcut count, and
+    /// retained command/shortcut bytes.
+    #[must_use]
+    pub fn bounded_bytes(capacity: usize, max_bytes: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(CommandRegistryState {
                 capacity: capacity.max(1),
+                max_bytes: max_bytes.max(1),
+                retained_bytes: 0,
+                shortcut_count: 0,
                 commands: HashMap::new(),
                 order: VecDeque::new(),
                 shortcut_order: VecDeque::new(),
@@ -824,11 +923,15 @@ impl CommandRegistry {
                 broad_command_matching: false,
             })),
             publication: Arc::new(RwLock::new(None)),
+            publication_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     pub fn register(&self, command: &Command) -> Result<(), HandlerError> {
         let mut state = self.inner.write().expect("command registry lock poisoned");
+        for shortcut in command.shortcuts() {
+            shortcut.validate()?;
+        }
         let schema_fingerprint = command.structural_fingerprint();
         if let Some(existing) = state.commands.get(&command.id()) {
             if existing.name.as_ref() != command.name()
@@ -869,6 +972,27 @@ impl CommandRegistry {
                 }
             }
             if !additions.is_empty() {
+                let additions_len = additions.len();
+                if existing
+                    .static_shortcuts
+                    .len()
+                    .saturating_add(additions.len())
+                    > 256
+                {
+                    return Err(HandlerError::internal("shortcut limit exceeded"));
+                }
+                let added_bytes = additions
+                    .iter()
+                    .map(Shortcut::retained_bytes)
+                    .sum::<usize>();
+                if state.shortcut_count.saturating_add(additions.len()) > MAX_REGISTRY_SHORTCUTS {
+                    return Err(HandlerError::internal("global shortcut capacity exceeded"));
+                }
+                if state.retained_bytes.saturating_add(added_bytes) > state.max_bytes {
+                    return Err(HandlerError::internal(
+                        "command registry byte capacity exceeded",
+                    ));
+                }
                 let had_shortcuts =
                     !existing.static_shortcuts.is_empty() || !existing.shortcuts.is_empty();
                 state
@@ -877,6 +1001,8 @@ impl CommandRegistry {
                     .expect("command existence checked above")
                     .static_shortcuts
                     .extend(additions);
+                state.shortcut_count = state.shortcut_count.saturating_add(additions_len);
+                state.retained_bytes = state.retained_bytes.saturating_add(added_bytes);
                 if !had_shortcuts {
                     state.shortcut_order.push_back(command.id());
                 }
@@ -889,6 +1015,29 @@ impl CommandRegistry {
         }
         if command.shortcuts().len() > 256 {
             return Err(HandlerError::internal("shortcut limit exceeded"));
+        }
+        if state
+            .shortcut_count
+            .saturating_add(command.shortcuts().len())
+            > MAX_REGISTRY_SHORTCUTS
+        {
+            return Err(HandlerError::internal("global shortcut capacity exceeded"));
+        }
+        let added_bytes = command
+            .name()
+            .len()
+            .saturating_add(
+                command
+                    .shortcuts()
+                    .iter()
+                    .map(Shortcut::retained_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(256);
+        if state.retained_bytes.saturating_add(added_bytes) > state.max_bytes {
+            return Err(HandlerError::internal(
+                "command registry byte capacity exceeded",
+            ));
         }
         for shortcut in command.shortcuts() {
             if state.commands.values().any(|registered| {
@@ -920,6 +1069,10 @@ impl CommandRegistry {
                 shortcuts: Vec::new(),
             },
         );
+        state.shortcut_count = state
+            .shortcut_count
+            .saturating_add(command.shortcuts().len());
+        state.retained_bytes = state.retained_bytes.saturating_add(added_bytes);
         state.revision = state.revision.wrapping_add(1);
         Ok(())
     }
@@ -966,6 +1119,7 @@ impl CommandRegistry {
     }
 
     pub fn add_shortcut(&self, id: CommandId, shortcut: Shortcut) -> Result<(), HandlerError> {
+        shortcut.validate()?;
         let mut state = self.inner.write().expect("command registry lock poisoned");
         let command_state = state
             .commands
@@ -976,6 +1130,15 @@ impl CommandRegistry {
             !command_state.static_shortcuts.is_empty() || !command_state.shortcuts.is_empty();
         if existing_count >= 256 {
             return Err(HandlerError::internal("shortcut limit exceeded"));
+        }
+        if state.shortcut_count >= MAX_REGISTRY_SHORTCUTS {
+            return Err(HandlerError::internal("global shortcut capacity exceeded"));
+        }
+        let shortcut_bytes = shortcut.retained_bytes();
+        if state.retained_bytes.saturating_add(shortcut_bytes) > state.max_bytes {
+            return Err(HandlerError::internal(
+                "command registry byte capacity exceeded",
+            ));
         }
         let duplicate = state.commands.iter().any(|(_, command)| {
             command
@@ -1001,24 +1164,40 @@ impl CommandRegistry {
             .expect("command existence checked above")
             .shortcuts
             .push(shortcut);
+        state.shortcut_count = state.shortcut_count.saturating_add(1);
+        state.retained_bytes = state.retained_bytes.saturating_add(shortcut_bytes);
         state.revision = state.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn remove_shortcut(&self, id: CommandId, pattern: &str) -> Result<bool, HandlerError> {
         let mut state = self.inner.write().expect("command registry lock poisoned");
-        let command = state
-            .commands
-            .get_mut(&id)
-            .ok_or_else(|| HandlerError::internal("unknown command id"))?;
-        let before = command.shortcuts.len();
-        command
-            .shortcuts
-            .retain(|shortcut| shortcut.pattern_text() != pattern);
-        let changed = command.shortcuts.len() != before;
-        let has_any_shortcuts =
-            !command.static_shortcuts.is_empty() || !command.shortcuts.is_empty();
+        let (changed, removed, removed_bytes, has_any_shortcuts) = {
+            let command = state
+                .commands
+                .get_mut(&id)
+                .ok_or_else(|| HandlerError::internal("unknown command id"))?;
+            let before = command.shortcuts.len();
+            let removed_bytes = command
+                .shortcuts
+                .iter()
+                .filter(|shortcut| shortcut.pattern_text() == pattern)
+                .map(Shortcut::retained_bytes)
+                .sum::<usize>();
+            command
+                .shortcuts
+                .retain(|shortcut| shortcut.pattern_text() != pattern);
+            let removed = before.saturating_sub(command.shortcuts.len());
+            (
+                removed > 0,
+                removed,
+                removed_bytes,
+                !command.static_shortcuts.is_empty() || !command.shortcuts.is_empty(),
+            )
+        };
         if changed {
+            state.shortcut_count = state.shortcut_count.saturating_sub(removed);
+            state.retained_bytes = state.retained_bytes.saturating_sub(removed_bytes);
             if !has_any_shortcuts {
                 state.shortcut_order.retain(|command_id| *command_id != id);
             }
@@ -1029,22 +1208,39 @@ impl CommandRegistry {
 
     #[must_use]
     pub fn matching_shortcut_commands(&self, input: &str, limit: usize) -> Vec<CommandId> {
-        let state = self.inner.read().expect("command registry lock poisoned");
-        let mut matches = Vec::new();
-        for id in &state.shortcut_order {
-            let Some(command) = state.commands.get(id) else {
-                continue;
-            };
-            if !command.enabled {
-                continue;
+        let candidates = {
+            let state = self.inner.read().expect("command registry lock poisoned");
+            let mut remaining = MAX_SHORTCUT_SCAN_PER_MESSAGE;
+            let mut candidates = Vec::new();
+            for id in &state.shortcut_order {
+                if remaining == 0 {
+                    break;
+                }
+                let Some(command) = state.commands.get(id) else {
+                    continue;
+                };
+                if !command.enabled {
+                    continue;
+                }
+                let shortcuts = command
+                    .static_shortcuts
+                    .iter()
+                    .chain(command.shortcuts.iter())
+                    .take(remaining)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                remaining = remaining.saturating_sub(shortcuts.len());
+                candidates.push((*id, shortcuts));
             }
-            if command
-                .static_shortcuts
+            candidates
+        };
+        let mut matches = Vec::new();
+        for (id, shortcuts) in candidates {
+            if shortcuts
                 .iter()
-                .chain(command.shortcuts.iter())
                 .any(|shortcut| shortcut.rewrite(input).is_some())
             {
-                matches.push(*id);
+                matches.push(id);
                 if matches.len() >= limit {
                     break;
                 }
@@ -1059,9 +1255,16 @@ impl CommandRegistry {
             return 0;
         };
         let removed = command.shortcuts.len();
+        let removed_bytes = command
+            .shortcuts
+            .iter()
+            .map(Shortcut::retained_bytes)
+            .sum::<usize>();
         command.shortcuts.clear();
         let has_static_shortcuts = !command.static_shortcuts.is_empty();
         if removed > 0 {
+            state.shortcut_count = state.shortcut_count.saturating_sub(removed);
+            state.retained_bytes = state.retained_bytes.saturating_sub(removed_bytes);
             if !has_static_shortcuts {
                 state.shortcut_order.retain(|command_id| *command_id != id);
             }
@@ -1128,10 +1331,17 @@ impl CommandRegistry {
     }
 
     pub(crate) fn attach_publication(&self, bots: BotDirectory, catalog: crate::CommandCatalog) {
+        let revision = self.revision();
         *self
             .publication
             .write()
-            .expect("command publication lock poisoned") = Some((bots, catalog));
+            .expect("command publication lock poisoned") = Some(CommandPublicationState {
+            bots,
+            catalog,
+            published_revision: None,
+            pending_revision: Some(revision),
+            last_error: None,
+        });
     }
 
     pub(crate) fn detach_publication(&self) {
@@ -1142,22 +1352,67 @@ impl CommandRegistry {
     }
 
     pub async fn refresh_publication(&self) -> HandlerResult<()> {
+        let _gate = self.publication_gate.lock().await;
+        let desired_revision = self.revision();
+        {
+            let mut publication = self
+                .publication
+                .write()
+                .expect("command publication lock poisoned");
+            if let Some(publication) = publication.as_mut() {
+                if publication.published_revision != Some(desired_revision) {
+                    publication.pending_revision = Some(desired_revision);
+                }
+            }
+        }
         let publication = self
             .publication
             .read()
             .expect("command publication lock poisoned")
             .clone();
-        let Some((bots, catalog)) = publication else {
+        let Some(publication) = publication else {
             return Ok(());
         };
-        crate::app::publish_command_definitions(&bots, &catalog, self)
+        if publication.pending_revision.is_none()
+            && publication.published_revision == Some(desired_revision)
+        {
+            return Ok(());
+        }
+        match crate::app::publish_command_definitions(&publication.bots, &publication.catalog, self)
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+        {
+            Ok(()) => {
+                let current_revision = self.revision();
+                let mut state = self
+                    .publication
+                    .write()
+                    .expect("command publication lock poisoned");
+                if let Some(state) = state.as_mut() {
+                    state.published_revision = Some(desired_revision);
+                    state.last_error = None;
+                    state.pending_revision =
+                        (current_revision != desired_revision).then_some(current_revision);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let message: Arc<str> = Arc::from(error.to_string());
+                let mut state = self
+                    .publication
+                    .write()
+                    .expect("command publication lock poisoned");
+                if let Some(state) = state.as_mut() {
+                    state.pending_revision = Some(self.revision());
+                    state.last_error = Some(Arc::clone(&message));
+                }
+                Err(HandlerError::Api(message.to_string()))
+            }
+        }
     }
 
     pub async fn enable_and_publish(&self, id: CommandId) -> HandlerResult<bool> {
         let changed = self.enable(id);
-        if changed {
+        if changed || self.publication_status().pending_revision.is_some() {
             self.refresh_publication().await?;
         }
         Ok(changed)
@@ -1165,10 +1420,36 @@ impl CommandRegistry {
 
     pub async fn disable_and_publish(&self, id: CommandId) -> HandlerResult<bool> {
         let changed = self.disable(id);
-        if changed {
+        if changed || self.publication_status().pending_revision.is_some() {
             self.refresh_publication().await?;
         }
         Ok(changed)
+    }
+
+    /// Returns whether platform command definitions have converged to the
+    /// registry's current revision and retains the last retryable failure.
+    #[must_use]
+    pub fn publication_status(&self) -> CommandPublicationStatus {
+        let desired_revision = self.revision();
+        let publication = self
+            .publication
+            .read()
+            .expect("command publication lock poisoned");
+        publication.as_ref().map_or(
+            CommandPublicationStatus {
+                desired_revision,
+                ..CommandPublicationStatus::default()
+            },
+            |state| CommandPublicationStatus {
+                desired_revision,
+                published_revision: state.published_revision,
+                pending_revision: state.pending_revision.or_else(|| {
+                    (state.published_revision != Some(desired_revision)).then_some(desired_revision)
+                }),
+                last_error: state.last_error.clone(),
+                attached: true,
+            },
+        )
     }
 
     pub fn snapshot(&self) -> Vec<(CommandId, RuntimeCommandState)> {
@@ -1426,10 +1707,9 @@ impl BotDirectory {
         fallback: FallbackPolicy,
     ) -> Result<DeliveryReport, HandlerError> {
         let bot = self.select(&address.bot)?;
-        bot.api()?
-            .send_outgoing_message_with(address.target, message.into(), fallback)
+        bot.send_outgoing_message_with(address.target, message.into(), fallback)
             .await
-            .map_err(|error| HandlerError::Api(error.to_string()))
+            .map_err(HandlerError::from)
     }
 }
 
@@ -1441,15 +1721,27 @@ pub struct TargetDirectory {
 #[derive(Debug)]
 struct TargetDirectoryState {
     capacity: usize,
+    max_bytes: usize,
+    retained_bytes: usize,
     aliases: BTreeMap<Arc<str>, Address>,
 }
 
 impl TargetDirectory {
     #[must_use]
     pub fn bounded(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self::bounded_bytes(capacity, capacity.saturating_mul(8 * 1024))
+    }
+
+    /// Creates a target directory bounded by aliases and retained address
+    /// bytes.
+    #[must_use]
+    pub fn bounded_bytes(capacity: usize, max_bytes: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TargetDirectoryState {
                 capacity: capacity.max(1),
+                max_bytes: max_bytes.max(1),
+                retained_bytes: 0,
                 aliases: BTreeMap::new(),
             })),
         }
@@ -1458,10 +1750,30 @@ impl TargetDirectory {
     pub fn insert(&self, alias: impl Into<Arc<str>>, address: Address) -> Result<(), HandlerError> {
         let mut state = self.inner.write().expect("target directory lock poisoned");
         let alias = alias.into();
+        if alias.is_empty() || alias.len() > 4 * 1024 {
+            return Err(HandlerError::internal(
+                "target alias must contain 1..=4096 bytes",
+            ));
+        }
         if !state.aliases.contains_key(&alias) && state.aliases.len() >= state.capacity {
             return Err(HandlerError::internal("target directory capacity exceeded"));
         }
+        let entry_bytes = target_entry_bytes(&alias, &address);
+        let previous_bytes = state
+            .aliases
+            .get(&alias)
+            .map_or(0, |previous| target_entry_bytes(&alias, previous));
+        let retained_bytes = state
+            .retained_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(entry_bytes);
+        if retained_bytes > state.max_bytes {
+            return Err(HandlerError::internal(
+                "target directory byte capacity exceeded",
+            ));
+        }
         state.aliases.insert(alias, address);
+        state.retained_bytes = retained_bytes;
         Ok(())
     }
 
@@ -1476,11 +1788,14 @@ impl TargetDirectory {
     }
 
     pub fn remove(&self, alias: &str) -> Option<Address> {
-        self.inner
-            .write()
-            .expect("target directory lock poisoned")
-            .aliases
-            .remove(alias)
+        let mut state = self.inner.write().expect("target directory lock poisoned");
+        let removed = state.aliases.remove(alias);
+        if let Some(address) = &removed {
+            state.retained_bytes = state
+                .retained_bytes
+                .saturating_sub(target_entry_bytes(alias, address));
+        }
+        removed
     }
 
     #[must_use]
@@ -1509,6 +1824,24 @@ impl TargetDirectory {
     }
 }
 
+fn target_entry_bytes(alias: &str, address: &Address) -> usize {
+    let target_bytes = serde_json::to_vec(&address.target).map_or(usize::MAX, |value| value.len());
+    let selection_bytes = match &address.bot {
+        BotSelection::Current => 0,
+        BotSelection::Exact(identity) => identity
+            .platform
+            .as_str()
+            .len()
+            .saturating_add(identity.bot.as_str().len()),
+        BotSelection::Platform(platform) => platform.as_str().len(),
+    };
+    alias
+        .len()
+        .saturating_add(target_bytes)
+        .saturating_add(selection_bytes)
+        .saturating_add(128)
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedMedia {
     pub bytes: Arc<[u8]>,
@@ -1534,19 +1867,23 @@ impl LocalMediaResolver {
     }
 
     async fn read_path(&self, path: PathBuf) -> HandlerResult<ResolvedMedia> {
-        let metadata = tokio::fs::metadata(&path)
+        use tokio::io::AsyncReadExt;
+
+        let file = tokio::fs::File::open(&path)
             .await
             .map_err(|error| HandlerError::Api(error.to_string()))?;
-        let length = usize::try_from(metadata.len())
-            .map_err(|_| HandlerError::Api("media size does not fit in usize".into()))?;
-        if length > self.max_bytes {
+        let limit = u64::try_from(self.max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+        let mut reader = file.take(limit);
+        let mut bytes = Vec::with_capacity(self.max_bytes.min(64 * 1024));
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| HandlerError::Api(error.to_string()))?;
+        if bytes.len() > self.max_bytes {
             return Err(HandlerError::Api(
                 "media exceeds configured byte limit".into(),
             ));
         }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
         let mime = mime_guess::from_path(&path).first_raw().map(Arc::from);
         let name = path
             .file_name()
@@ -1936,5 +2273,166 @@ impl ValuePattern<String> for RegexTextPattern {
 
     fn describe(&self) -> Arc<str> {
         Arc::clone(&self.description)
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use crate::{
+        bot::{CommandWorker, GlobalCommandCapacity},
+        budget::PriorityQueueLimiter,
+        RuntimeConfig, RuntimeMetrics,
+    };
+    use oxidebot_core::{
+        application::CommandDefinition, BotCapabilities, BotId, CallApiTrait, PlatformId,
+        SupportLevel,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct PublicationApi {
+        calls: AtomicUsize,
+        failures: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CallApiTrait for PublicationApi {
+        fn bot_capabilities(&self) -> BotCapabilities {
+            let mut capabilities = BotCapabilities::legacy_message_api();
+            capabilities.application.structured_commands = SupportLevel::Native;
+            capabilities
+        }
+
+        async fn set_command_definitions(
+            &self,
+            _commands: Vec<CommandDefinition>,
+        ) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if self
+                .failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::PlatformError::new(
+                    crate::PlatformErrorKind::Temporary,
+                    "scripted publication failure",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn command_registry_enforces_shortcut_and_byte_limits() {
+        let registry = CommandRegistry::bounded_bytes(2, 512);
+        let command = crate::command("bounded");
+        registry.register(&command).expect("base command fits");
+
+        let error = registry
+            .add_shortcut(
+                command.id(),
+                Shortcut::literal("x".repeat(200), "y".repeat(200)),
+            )
+            .expect_err("shortcut exceeds registry byte budget");
+        assert!(error.to_string().contains("byte capacity"));
+
+        let oversized = crate::command("oversized").shortcut(Shortcut::literal(
+            "x".repeat(MAX_SHORTCUT_PATTERN_BYTES + 1),
+            "/oversized",
+        ));
+        let error = CommandRegistry::bounded(2)
+            .register(&oversized)
+            .expect_err("oversized pattern is rejected");
+        assert!(error.to_string().contains("pattern byte limit"));
+    }
+
+    #[tokio::test]
+    async fn local_media_resolver_reads_only_limit_plus_one_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "oxidebot-media-limit-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, b"123456789").expect("write temporary media");
+        let result = LocalMediaResolver::new(8).read_path(path.clone()).await;
+        let _ = std::fs::remove_file(path);
+        let error = result.expect_err("media larger than the hard limit is rejected");
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[tokio::test]
+    async fn failed_publication_remains_pending_and_a_noop_toggle_retries_it() {
+        let api = Arc::new(PublicationApi::default());
+        let config = RuntimeConfig::default();
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let descriptor = crate::BotDescriptor::new(
+            PlatformId::new("publication-test").expect("static platform id"),
+            BotId::new("bot").expect("static bot id"),
+        );
+        let services = crate::BotServices::new(api.clone());
+        let global_limiter =
+            PriorityQueueLimiter::new(config.global_command, config.max_command_bytes);
+        let global_capacity = GlobalCommandCapacity::new(
+            config.command_in_flight_global,
+            config.command_in_flight_reserved_high_global,
+        );
+        let (handle, worker) = CommandWorker::build(
+            oxidebot_core::BotSlot(0),
+            descriptor,
+            services,
+            global_limiter,
+            global_capacity,
+            config.command,
+            config.max_command_bytes,
+            config.command_overload,
+            config.command_in_flight_per_bot,
+            config.command_in_flight_reserved_high_per_bot,
+            config.command_high_priority_burst,
+            config.command_attempt_timeout,
+            config.command_total_timeout,
+            0,
+            config.command_retry_base,
+            config.command_retry_max,
+            metrics,
+        );
+        let worker_task = tokio::spawn(worker.run());
+        let command = crate::command("publish-test");
+        let registry = CommandRegistry::bounded(4);
+        registry.register(&command).expect("register command");
+        let directory = BotDirectory::new(vec![handle]);
+        registry.attach_publication(
+            directory.clone(),
+            crate::CommandCatalog::new([command.clone()]),
+        );
+        registry
+            .refresh_publication()
+            .await
+            .expect("initial publication succeeds");
+
+        api.failures.store(1, Ordering::Release);
+        registry
+            .disable_and_publish(command.id())
+            .await
+            .expect_err("first dynamic publication fails");
+        assert_eq!(
+            registry.publication_status().pending_revision,
+            Some(registry.revision())
+        );
+
+        let changed = registry
+            .disable_and_publish(command.id())
+            .await
+            .expect("unchanged state retries pending publication");
+        assert!(!changed);
+        assert_eq!(registry.publication_status().pending_revision, None);
+        assert_eq!(api.calls.load(Ordering::Acquire), 3);
+
+        registry.detach_publication();
+        drop(directory);
+        worker_task.await.expect("command worker exits cleanly");
     }
 }

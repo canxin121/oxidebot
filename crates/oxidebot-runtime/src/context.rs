@@ -7,6 +7,7 @@ use oxidebot_core::{
     source::message::{DeliveryReport, FallbackPolicy, Message},
     BotObject, Event,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Clone-cheap context for one matched bot event.
@@ -24,6 +25,8 @@ where
     pub(crate) sessions: SessionRegistry,
     pub(crate) shutdown: ShutdownSignal,
     pub(crate) command: Option<CommandResult>,
+    pub(crate) responder: Option<crate::Responder>,
+    outbound_sequence: Arc<AtomicU64>,
     pub(crate) authoring: Arc<AuthoringRuntime<S>>,
 }
 
@@ -31,6 +34,10 @@ impl<S> Context<S>
 where
     S: Send + Sync + 'static,
 {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal context construction explicitly wires each bounded runtime capability"
+    )]
     pub(crate) fn new(
         envelope: Arc<DispatchEnvelope>,
         state: Arc<S>,
@@ -38,6 +45,7 @@ where
         sessions: SessionRegistry,
         shutdown: ShutdownSignal,
         command: Option<CommandResult>,
+        responder: Option<crate::Responder>,
         authoring: Arc<AuthoringRuntime<S>>,
     ) -> Self {
         Self {
@@ -47,6 +55,8 @@ where
             sessions,
             shutdown,
             command,
+            responder,
+            outbound_sequence: Arc::new(AtomicU64::new(0)),
             authoring,
         }
     }
@@ -103,6 +113,17 @@ where
         self.command.as_ref()
     }
 
+    /// Returns the shared interaction responder when the current event has an
+    /// answerable response handle.
+    #[must_use]
+    pub fn responder(&self) -> Option<&crate::Responder> {
+        self.responder.as_ref()
+    }
+
+    pub(crate) fn next_outbound_sequence(&self) -> u64 {
+        self.outbound_sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Sends one canonical message to an explicit address through the current
     /// handler's delivery middleware and capability planner.
     pub async fn send_to(
@@ -122,11 +143,14 @@ where
                 ));
             }
         }
-        let api = self
-            .bot()
-            .map_err(|error| HandlerError::Api(error.to_string()))?;
         self.authoring
-            .deliver(Some(self), &api, address.target, message.into(), fallback)
+            .deliver(
+                Some(self),
+                &self.bot,
+                address.target,
+                message.into(),
+                fallback,
+            )
             .await
     }
 
@@ -170,6 +194,8 @@ where
             sessions: self.sessions.clone(),
             shutdown: self.shutdown.clone(),
             command: self.command.clone(),
+            responder: self.responder.clone(),
+            outbound_sequence: Arc::clone(&self.outbound_sequence),
             authoring: Arc::clone(&self.authoring),
         }
     }

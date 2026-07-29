@@ -219,6 +219,7 @@ impl SessionRegistry {
             workers.push(SessionWorker {
                 receiver,
                 interest: interest.clone(),
+                metrics: Arc::clone(&metrics),
             });
         }
         (
@@ -380,11 +381,21 @@ struct SessionEntry {
     event_sender: oneshot::Sender<Result<SessionEvent, SessionError>>,
     _capacity: OwnedSemaphorePermit,
     deadline: DelayKey,
+    _active: ActiveSessionGuard,
+}
+
+struct ActiveSessionGuard(MetricsHandle);
+
+impl Drop for ActiveSessionGuard {
+    fn drop(&mut self) {
+        self.0.session_closed();
+    }
 }
 
 pub(crate) struct SessionWorker {
     receiver: mpsc::Receiver<SessionCommand>,
     interest: SessionInterest,
+    metrics: MetricsHandle,
 }
 
 impl SessionWorker {
@@ -400,6 +411,7 @@ impl SessionWorker {
                             &mut entries,
                             &mut deadlines,
                             &self.interest,
+                            &self.metrics,
                         ),
                         None => {
                             close_all(&mut entries, &self.interest);
@@ -431,6 +443,7 @@ fn handle_command(
     entries: &mut HashMap<ScopeKey, SessionEntry>,
     deadlines: &mut DelayQueue<ScopeKey>,
     interest: &SessionInterest,
+    metrics: &MetricsHandle,
 ) {
     match command {
         SessionCommand::Register {
@@ -453,6 +466,7 @@ fn handle_command(
                 return;
             }
             let deadline = deadlines.insert(scope.clone(), timeout);
+            metrics.session_opened();
             entries.insert(
                 scope.clone(),
                 SessionEntry {
@@ -463,6 +477,7 @@ fn handle_command(
                     event_sender,
                     _capacity: capacity,
                     deadline,
+                    _active: ActiveSessionGuard(Arc::clone(metrics)),
                 },
             );
             interest.insert(scope.clone());

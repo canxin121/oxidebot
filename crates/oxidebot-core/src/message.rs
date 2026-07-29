@@ -10,8 +10,9 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub use crate::source::message::{
-    DeliveryDegradation, DeliveryPlan, DeliveryPlanningError, DeliveryReport, FallbackPolicy,
-    Message as OutgoingMessage, MessageOptions, MessageSegment as MessageContent, SegmentKind,
+    DeliveryDegradation, DeliveryItemResult, DeliveryPlan, DeliveryPlanningError, DeliveryReport,
+    FallbackPolicy, Message as OutgoingMessage, MessageOptions, MessageSegment as MessageContent,
+    PartialDeliveryError, SegmentKind,
 };
 
 pub const MAX_METADATA_ENTRIES: usize = 64;

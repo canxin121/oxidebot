@@ -151,15 +151,15 @@ impl EventContext<tags::Message> {
             .unwrap_or_else(|| {
                 MessageTarget::new(ConversationRef::direct(self.event().sender.id.clone()))
             });
-        let api = self.bot()?;
         if let Some(pipeline) = &self.pipeline {
             pipeline
-                .deliver(&api, target, message.into(), FallbackPolicy::Auto)
+                .deliver(&self.bot, target, message.into(), FallbackPolicy::Auto)
                 .await
         } else {
-            api.send_outgoing_message_with(target, message.into(), FallbackPolicy::Auto)
+            self.bot
+                .send_outgoing_message_with(target, message.into(), FallbackPolicy::Auto)
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))
+                .map_err(HandlerError::from)
         }
     }
 
@@ -313,6 +313,7 @@ where
     pub(crate) shutdown: ShutdownSignal,
     pub(crate) authoring: Arc<crate::authoring::AuthoringRuntime<S>>,
     pub(crate) command_input: Option<Arc<tokio::sync::OnceCell<crate::RewriteInput>>>,
+    pub(crate) responder: Option<crate::Responder>,
 }
 
 #[doc(hidden)]

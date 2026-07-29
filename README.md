@@ -432,11 +432,18 @@ async fn generate_report(messenger: Messenger) -> HandlerResult<()> {
 }
 ```
 
-`Reply` remains the smaller current-conversation primitive and low-level
-escape hatch. A `Receipt` is produced only by a send operation. It tracks every physical
+`Reply` remains the smaller current-conversation primitive. Framework sends
+from `Reply`, `Messenger`, dialogues, deferred handler results, receipts,
+interactions, cross-bot addresses, and command publication all pass through the
+same bounded outbound scheduler. Raw `Bot`/`CallApiTrait` access is the explicit
+platform escape hatch.
+
+A `Receipt` is produced only by a send operation. It tracks every physical
 message ID returned for one logical send and can edit, delete, react to, or
-delay-delete all of them. It is not used as an ambiguous handle for the
-incoming message.
+delay-delete all of them. `DeliveryReport::items` and the receipt
+`*_report` methods retain partial success when a later physical operation
+fails, so callers can retry or compensate without duplicating prior sends. A
+receipt is not used as an ambiguous handle for the incoming message.
 
 ## Bounded dialogues and typed forms
 
@@ -857,8 +864,9 @@ See [the domain-native Alconna design notes](docs/ALCONNA-DESIGN.md).
 
 ## Concise deterministic tests
 
-The high-level test DSL covers ordinary commands and multi-turn dialogues while
-remaining backed by the same finite `ScriptedAdapter`:
+The high-level test DSL covers ordinary commands, multi-turn dialogues, and
+answerable interactions while remaining backed by the same finite
+`ScriptedAdapter`:
 
 ```rust
 use oxidebot_testkit::BotTest;
@@ -877,6 +885,15 @@ BotTest::empty()
     .expect_reply("Which project?")
     .message("oxidebot")
     .expect_reply_contains("deployment started")
+    .run()
+    .await?;
+```
+
+```rust
+BotTest::new(interactions)
+    .click("deploy.confirm")
+    .expect_interaction_ack()
+    .expect_edit_contains("started")
     .run()
     .await?;
 ```
@@ -978,6 +995,11 @@ The smaller authoring API still compiles into the existing bounded runtime:
 - candidate merging in registration order without a temporary candidate list;
 - synchronous, on-demand extraction after matching;
 - bounded ingress, executor, session, and API command queues;
+- scheduler-backed send/edit/delete/reaction/interaction/publication calls with
+  byte admission, priority reserves, deadlines, safe idempotent retries,
+  rate-limit cooldowns, and panic isolation;
+- observable queue depth/high-water marks, queue and handler latency totals,
+  retries, delivery failures/degradations, active handlers, and active sessions;
 - per-conversation virtual-actor ordering;
 - broad message matching only for commands that request custom prefixes,
   no-prefix matching, case-insensitive matching, or application-wide message

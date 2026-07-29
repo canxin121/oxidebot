@@ -304,7 +304,7 @@ where
     S: Send + Sync + 'static,
 {
     fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
-        let api = context.bot().map_err(|_| {
+        context.bot().map_err(|_| {
             ExtractError::new("the current adapter does not expose the OxideBot API")
         })?;
         let target = reply_target(context.event())
@@ -315,7 +315,12 @@ where
                 runtime: context.authoring_arc(),
                 context: context.clone(),
             });
-        Ok(Self::new(api, target, reply_to, Some(pipeline)))
+        Ok(Self::new(
+            context.bot.clone(),
+            target,
+            reply_to,
+            Some(pipeline),
+        ))
     }
 }
 
@@ -329,6 +334,17 @@ where
             context.bot_identity().clone(),
             context.authoring().bots(),
         ))
+    }
+}
+
+impl<S> Extract<S> for crate::Responder
+where
+    S: Send + Sync + 'static,
+{
+    fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
+        context.responder().cloned().ok_or_else(|| {
+            ExtractError::new("this handler requires an answerable interaction event")
+        })
     }
 }
 
@@ -430,11 +446,11 @@ where
         .ok_or_else(|| ExtractError::new("this event has no actor scope"))?;
     let target = reply_target(context.event())
         .ok_or_else(|| ExtractError::new("this event has no natural reply target"))?;
-    let api = context
+    context
         .bot()
         .map_err(|_| ExtractError::new("the current adapter does not expose the OxideBot API"))?;
     Ok(Dialogue::new(
-        api,
+        context.bot.clone(),
         context.sessions.clone(),
         conversation,
         actor,

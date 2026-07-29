@@ -1,20 +1,20 @@
 use crate::{
-    authoring::ErasedDeliveryPipeline, AskOptions, HandlerError, SessionKey, SessionPolicy,
-    SessionRegistry,
+    authoring::ErasedDeliveryPipeline, AskOptions, BotHandle, HandlerError, SessionKey,
+    SessionPolicy, SessionRegistry,
 };
 use futures_util::future::BoxFuture;
 use oxidebot_core::{
     conversation::MessageTarget,
     event::Event,
     source::message::{Message, MessageSegment},
-    BotObject, ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
+    ConversationKey, FallbackPolicy, SessionNamespace, UserKey,
 };
 use std::{fmt::Display, future::IntoFuture, str::FromStr, sync::Arc, time::Duration};
 
 /// A bounded one-user dialogue scoped to the current conversation and actor.
 #[derive(Clone)]
 pub struct Dialogue {
-    api: BotObject,
+    bot: BotHandle,
     sessions: SessionRegistry,
     conversation: ConversationKey,
     actor: UserKey,
@@ -25,7 +25,7 @@ pub struct Dialogue {
 
 impl Dialogue {
     pub(crate) fn new(
-        api: BotObject,
+        bot: BotHandle,
         sessions: SessionRegistry,
         conversation: ConversationKey,
         actor: UserKey,
@@ -33,7 +33,7 @@ impl Dialogue {
         pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
     ) -> Self {
         Self {
-            api,
+            bot,
             sessions,
             conversation,
             actor,
@@ -113,13 +113,13 @@ impl Dialogue {
         let prompt = prompt.into();
         if let Some(pipeline) = &self.pipeline {
             pipeline
-                .deliver(&self.api, self.target.clone(), prompt, FallbackPolicy::Auto)
+                .deliver(&self.bot, self.target.clone(), prompt, FallbackPolicy::Auto)
                 .await?;
         } else {
-            self.api
+            self.bot
                 .send_outgoing_message_with(self.target.clone(), prompt, FallbackPolicy::Auto)
                 .await
-                .map_err(|error| HandlerError::Api(error.to_string()))?;
+                .map_err(HandlerError::from)?;
         }
         Ok(waiter.wait().await?)
     }

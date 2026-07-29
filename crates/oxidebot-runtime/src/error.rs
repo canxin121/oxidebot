@@ -1,5 +1,6 @@
 use oxidebot_core::event::kernel::DispatchValidationError;
 use oxidebot_core::message::ModelError;
+use oxidebot_core::PartialDeliveryError;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
@@ -131,6 +132,8 @@ pub enum CommandError {
     ApiUnsupported,
     #[error("platform service panicked")]
     ServicePanicked,
+    #[error(transparent)]
+    PartialDelivery(#[from] PartialDeliveryError),
     #[error("command target belongs to another bot")]
     WrongBot,
     #[error("platform-native command data belongs to another platform")]
@@ -199,6 +202,10 @@ pub enum HandlerError {
     Internal(String),
     #[error("handler timed out")]
     Timeout,
+    #[error("delivery middleware panicked")]
+    DeliveryPanicked,
+    #[error(transparent)]
+    PartialMutation(#[from] crate::PartialMutationError),
 }
 
 impl HandlerError {

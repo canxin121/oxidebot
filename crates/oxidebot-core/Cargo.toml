@@ -20,3 +20,6 @@ thiserror.workspace = true
 
 mime_guess.workspace = true
 tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
