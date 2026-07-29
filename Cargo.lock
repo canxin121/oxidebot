@@ -696,10 +696,10 @@ dependencies = [
 name = "oxidebot-adapter-console"
 version = "1.0.0-alpha.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "oxidebot-core",
  "oxidebot-runtime",
+ "oxidebot-testkit",
  "tokio",
 ]
 

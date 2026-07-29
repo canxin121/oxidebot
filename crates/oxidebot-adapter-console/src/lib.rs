@@ -5,12 +5,15 @@
 //! the same bounded runtime, command IR, delivery planner, and receipts as a
 //! network adapter.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use oxidebot_core::{
-    source::message::{DeliveryPlan, DeliveryReport},
+    event::MessageEvent,
+    source::{
+        message::{DeliveryPlan, DeliveryReport, Message},
+        user::User,
+    },
     BotCapabilities, BotId, CallApiTrait, CallResult, ConversationRef, DeliveryReportBuilder,
-    EventId, MessageRef, MessageTarget, PlatformId, SupportLevel,
+    Event, EventId, MessageRef, MessageTarget, PlatformId, SupportLevel,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -130,7 +133,7 @@ pub struct ConsoleAdapter {
 
 impl ConsoleAdapter {
     /// Creates a console adapter after validating the configured identifiers.
-    pub fn new(config: ConsoleConfig) -> Result<Self, oxidebot_core::InvalidId> {
+    pub fn new(config: ConsoleConfig) -> std::result::Result<Self, oxidebot_core::InvalidId> {
         Ok(Self {
             platform: PlatformId::new("console")?,
             bot: BotId::new(config.bot_id.clone())?,
@@ -145,7 +148,7 @@ impl ConsoleAdapter {
     }
 
     /// Creates a development adapter with one explicit bot identity.
-    pub fn named(bot_id: impl Into<String>) -> Result<Self, oxidebot_core::InvalidId> {
+    pub fn named(bot_id: impl Into<String>) -> std::result::Result<Self, oxidebot_core::InvalidId> {
         Self::new(ConsoleConfig::new().bot_id(bot_id))
     }
 }
@@ -192,16 +195,52 @@ impl Adapter for ConsoleAdapter {
                     sequence = sequence.saturating_add(1);
                     let event_id = EventId::new(format!("console-event-{sequence}"))
                         .map_err(|error| AdapterError::new(error.to_string()))?;
-                    context.submit_text(
+                    let mut message = Message::text(line);
+                    message.id = format!("console-message-{sequence}");
+                    context.submit_event(
                         event_id,
-                        ConversationRef::direct(self.config.conversation_id.clone()),
-                        self.config.user_id.clone(),
-                        format!("console-message-{sequence}"),
-                        line,
+                        Event::Message(MessageEvent {
+                            id: message.id.clone(),
+                            time: None,
+                            sender: User {
+                                id: self.config.user_id.clone(),
+                                ..User::default()
+                            },
+                            conversation: ConversationRef::direct(
+                                self.config.conversation_id.clone(),
+                            ),
+                            message,
+                        }),
                     ).await?;
                 }
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delivery_reports_every_console_message() {
+        let api = ConsoleApi::default();
+        let target = MessageTarget::new(ConversationRef::direct("console-user"));
+        let plan = DeliveryPlan {
+            messages: vec![Message::text("one"), Message::text("two")],
+            degradations: Vec::new(),
+        };
+
+        let report = api
+            .send_delivery_plan(target, plan.clone())
+            .await
+            .expect("console delivery succeeds");
+
+        oxidebot_testkit::adapter_contract::assert_complete(&plan, &report)
+            .expect("console report satisfies the adapter delivery contract");
+        assert_eq!(report.messages.len(), 2);
+        assert_eq!(report.messages[0].id, "console-1");
+        assert_eq!(report.messages[1].id, "console-2");
     }
 }
