@@ -23,27 +23,32 @@ pub enum GuardDecision {
 }
 
 impl GuardDecision {
+    /// Creates a decision that permits the matched handler to run.
     #[must_use]
     pub const fn allow() -> Self {
         Self::Allow
     }
 
+    /// Creates a decision that skips this handler and continues matching.
     #[must_use]
     pub const fn skip() -> Self {
         Self::Skip
     }
 
+    /// Creates a stopping denial that replies with `message`.
     #[must_use]
     pub fn deny(message: impl Into<Message>) -> Self {
         Self::Deny(Outcome::stop().reply(message))
     }
 
+    /// Creates a stopping denial with no reply effects.
     #[must_use]
     pub const fn deny_silently() -> Self {
         Self::Deny(Outcome::stop())
     }
 }
 
+/// Result returned by a guard check.
 pub type GuardResult = HandlerResult<GuardDecision>;
 
 #[doc(hidden)]
@@ -76,6 +81,7 @@ pub trait Guard<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Evaluates whether a matched handler may run for `context`.
     fn check(&self, context: Context<S>) -> BoxFuture<'static, GuardResult>;
 }
 
@@ -121,6 +127,7 @@ pub trait Before<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Executes before handler argument extraction and invocation.
     fn call(&self, context: Context<S>) -> BoxFuture<'static, HandlerResult<()>>;
 }
 
@@ -166,6 +173,7 @@ pub trait After<S>: Send + Sync + 'static
 where
     S: Send + Sync + 'static,
 {
+    /// Observes or transforms the effects produced by a matched handler.
     fn call(
         &self,
         context: Context<S>,

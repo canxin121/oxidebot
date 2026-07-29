@@ -59,12 +59,14 @@ where
         })
     }
 
+    /// Returns the typed canonical event payload.
     #[must_use]
     pub fn event(&self) -> &T::Event {
         T::get(self.envelope.event())
             .expect("compiled handler and event tag must describe the same event")
     }
 
+    /// Returns the stable ID assigned to the current event.
     #[must_use]
     pub fn event_id(&self) -> &EventId {
         &self.envelope.id
@@ -75,11 +77,13 @@ where
         self.bot.api().map_err(HandlerError::from)
     }
 
+    /// Returns the identity of the bot processing this event.
     #[must_use]
     pub fn bot_identity(&self) -> &BotIdentity {
         self.bot.identity()
     }
 
+    /// Returns the runtime shutdown signal.
     #[must_use]
     pub fn shutdown(&self) -> &ShutdownSignal {
         &self.shutdown
@@ -137,11 +141,13 @@ where
 pub type MessageContext = EventContext<tags::Message>;
 
 impl EventContext<tags::Message> {
+    /// Returns the message's plain-text representation.
     #[must_use]
     pub fn text(&self) -> String {
         self.event().message.get_raw_text()
     }
 
+    /// Sends a message to the current message's conversation.
     pub async fn send(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
         let target = MessageTarget::new(self.event().conversation.clone());
         if let Some(pipeline) = &self.pipeline {
@@ -156,11 +162,13 @@ impl EventContext<tags::Message> {
         }
     }
 
+    /// Sends a reply to the current message.
     pub async fn reply(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
         self.send(message.into().reply_to(self.event().message.id.clone()))
             .await
     }
 
+    /// Prompts the sender, waits for their next session-scoped message, and parses it as `T`.
     pub async fn ask_parse<T>(
         &self,
         prompt: Vec<MessageSegment>,

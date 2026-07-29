@@ -23,11 +23,13 @@ impl Messenger {
         }
     }
 
+    /// Returns the identity of the current bot.
     #[must_use]
     pub fn identity(&self) -> &BotIdentity {
         &self.identity
     }
 
+    /// Returns the current event's natural delivery target.
     #[must_use]
     pub fn target(&self) -> &MessageTarget {
         self.reply.target()
@@ -105,17 +107,20 @@ pub struct BoundMessenger {
 }
 
 impl BoundMessenger {
+    /// Returns the target selected for this bound messenger.
     #[must_use]
     pub fn target(&self) -> &MessageTarget {
         self.reply.target()
     }
 
+    /// Overrides capability fallback for sends through this bound messenger.
     #[must_use]
     pub fn fallback(mut self, fallback: FallbackPolicy) -> Self {
         self.reply = self.reply.fallback(fallback);
         self
     }
 
+    /// Sends a message to the bound target.
     pub async fn send(&self, message: impl Into<Message>) -> HandlerResult<Receipt> {
         self.reply.send(message).await
     }

@@ -61,16 +61,19 @@ where
         }
     }
 
+    /// Returns the canonical event currently being handled.
     #[must_use]
     pub fn event(&self) -> &Event {
         self.envelope.event()
     }
 
+    /// Returns the canonical type of the current event.
     #[must_use]
     pub fn event_type(&self) -> EventType {
         self.envelope.index.event_type
     }
 
+    /// Returns the event as a message event when it is one.
     #[must_use]
     pub fn message(&self) -> Option<&MessageEvent> {
         match self.event() {
@@ -79,35 +82,42 @@ where
         }
     }
 
+    /// Borrows the application state.
     #[must_use]
     pub fn state(&self) -> &S {
         self.state.as_ref()
     }
 
+    /// Clones the shared application-state handle.
     #[must_use]
     pub fn state_arc(&self) -> Arc<S> {
         Arc::clone(&self.state)
     }
 
+    /// Returns the handle for the bot processing this event.
     #[must_use]
     pub fn bot_handle(&self) -> &BotHandle {
         &self.bot
     }
 
+    /// Returns the current bot's unified API object, when it provides one.
     pub fn bot(&self) -> Result<BotObject, crate::CommandError> {
         self.bot.api()
     }
 
+    /// Returns the identity of the bot processing this event.
     #[must_use]
     pub fn bot_identity(&self) -> &oxidebot_core::BotIdentity {
         self.bot.identity()
     }
 
+    /// Returns the runtime shutdown signal.
     #[must_use]
     pub fn shutdown(&self) -> &ShutdownSignal {
         &self.shutdown
     }
 
+    /// Returns parsed command metadata when the current event matched a command.
     #[must_use]
     pub fn command(&self) -> Option<&CommandMatch> {
         self.command.as_ref()
