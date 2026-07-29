@@ -494,6 +494,10 @@ impl Message {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// Boxing `Media` would break the stable public construction API. The enum only
+// crosses Clippy's default variant-size threshold on Windows, where `PathBuf`
+// and related platform values make the existing media representation larger.
+#[allow(clippy::large_enum_variant)]
 pub enum MessageSegment {
     // Stable 0.1.8 variants.
     Text {
