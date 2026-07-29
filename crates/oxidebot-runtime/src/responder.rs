@@ -19,10 +19,15 @@ const EXPIRED: u8 = 4;
 /// Observable lifecycle state of an answerable interaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InteractionStatus {
+    /// No initial response has claimed the interaction.
     Pending,
+    /// One task is currently sending the initial response.
     Responding,
+    /// The interaction has received its initial acknowledgement or response.
     Acknowledged,
+    /// The interaction was deferred for a later response.
     Deferred,
+    /// The platform acknowledgement deadline elapsed.
     Expired,
 }
 

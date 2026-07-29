@@ -40,6 +40,7 @@ impl fmt::Debug for Outcome {
 
 impl Outcome {
     /// Uses the matched handler's normal propagation policy.
+    /// Appends a portable reply message.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -50,6 +51,7 @@ impl Outcome {
     }
 
     /// Explicitly allows later matching handlers to run.
+    /// Appends a one-segment plain-text reply.
     #[must_use]
     pub const fn continue_() -> Self {
         Self {
@@ -69,27 +71,32 @@ impl Outcome {
         }
     }
 
+    /// Appends a portable reply message.
     #[must_use]
     pub fn reply(mut self, message: impl Into<Message>) -> Self {
         self.replies.push(message.into());
         self
     }
 
+    /// Appends a one-segment plain-text reply.
     #[must_use]
     pub fn text(self, text: impl Into<String>) -> Self {
         self.reply(Message::text(text))
     }
 
+    /// Returns the outcome propagation decision.
     #[must_use]
     pub const fn propagation(&self) -> Propagation {
         self.propagation
     }
 
+    /// Returns whether the outcome contains no replies.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.replies.is_empty()
     }
 
+    /// Iterates reply messages in delivery order.
     #[must_use]
     pub fn replies(&self) -> impl ExactSizeIterator<Item = &Message> {
         self.replies.iter()
@@ -109,6 +116,7 @@ impl Outcome {
         self
     }
 
+    /// Replaces the propagation decision.
     #[must_use]
     pub const fn with_propagation(mut self, propagation: Propagation) -> Self {
         self.propagation = propagation;
@@ -149,6 +157,7 @@ impl Outcome {
 /// returns `Result<T, E>`, `T` implements `IntoOutcome`, and `E` explicitly
 /// converts into [`crate::HandlerError`].
 pub trait IntoOutcome {
+    /// Converts this successful handler value into an outcome.
     fn into_outcome(self) -> Outcome;
 }
 
