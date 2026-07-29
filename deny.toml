@@ -8,6 +8,9 @@ yanked = "warn"
 confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "MIT",
     "Unicode-3.0",
 ]
@@ -17,6 +20,7 @@ multiple-versions = "warn"
 wildcards = "deny"
 skip = [
     { name = "syn", version = "2", reason = "proc-macro ecosystem still spans syn 2 and syn 3" },
+    { name = "windows-sys", version = "0.52", reason = "ring's target-specific Windows dependency coexists with Tokio's current Windows bindings" },
 ]
 
 [sources]
