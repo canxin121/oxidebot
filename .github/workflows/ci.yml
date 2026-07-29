@@ -107,9 +107,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-          fallback: none
       - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +nightly fuzz build command_parser
