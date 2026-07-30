@@ -1,5 +1,10 @@
 //! Deterministic platform fixtures for runtime integration tests.
 
+pub mod adapter_contract;
+mod command;
+
+pub use command::{command_test, command_tree_test, CommandTest};
+
 use async_trait::async_trait;
 use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex};
 use oxidebot_core::{
@@ -19,12 +24,10 @@ use oxidebot_core::{
     ConversationKey, EventId, InteractionVisibility, PlatformId, SupportLevel, UserKey,
 };
 use oxidebot_runtime::{
-    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, Command,
-    CommandArgs, CommandParseError, CommandTree, DecodeError, FrameIndex, FromCommandMatch,
-    IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
+    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, DecodeError,
+    FrameIndex, IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
 };
 use std::{
-    marker::PhantomData,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -1024,135 +1027,5 @@ where
             interactions,
             attempts: api.attempts(),
         })
-    }
-}
-
-/// Focused parser harness that exercises the same immutable command IR without
-/// starting adapters, queues, or the executor.
-pub struct CommandTest<T> {
-    command: Command,
-    _value: PhantomData<fn() -> T>,
-}
-
-impl<T> CommandTest<T>
-where
-    T: FromCommandMatch,
-{
-    /// Builds a parser harness for one immutable command definition.
-    #[must_use]
-    pub fn new(command: Command) -> Self {
-        Self {
-            command,
-            _value: PhantomData,
-        }
-    }
-
-    /// Parses input with the same command IR used by the runtime.
-    pub fn parse(&self, input: impl Into<String>) -> Result<T, CommandParseError> {
-        let matched = self.command.parse_message(&Message::text(input.into()))?;
-        T::from_match(&matched)
-    }
-
-    /// Returns the command definition exercised by this harness.
-    #[must_use]
-    pub fn command(&self) -> &Command {
-        &self.command
-    }
-}
-
-/// Builds a focused parser harness for one flat `CommandArgs` type.
-#[must_use]
-pub fn command_test<T>(name: impl Into<Arc<str>>) -> CommandTest<T>
-where
-    T: CommandArgs,
-{
-    CommandTest::new(T::command(name))
-}
-
-/// Builds a focused parser harness for one derived command tree.
-#[must_use]
-pub fn command_tree_test<T>() -> CommandTest<T>
-where
-    T: CommandTree,
-{
-    CommandTest::new(T::command())
-}
-
-/// Reusable assertions for adapter delivery implementations.
-///
-/// Adapter crates can run these checks against their own `DeliveryPlan` and
-/// result without starting an OxideBot runtime. They enforce the portable
-/// report contract: one ordered item per planned physical message, preserved
-/// degradation details, and only successful message references in the summary.
-pub mod adapter_contract {
-    use oxidebot_core::{CallError, DeliveryPlan, DeliveryReport};
-
-    /// Verifies a fully successful delivery report.
-    pub fn assert_complete(plan: &DeliveryPlan, report: &DeliveryReport) -> Result<(), String> {
-        if report.degradations != plan.degradations {
-            return Err("delivery report did not preserve planner degradations".into());
-        }
-        if report.items.len() != plan.messages.len() {
-            return Err(format!(
-                "delivery report contains {} items for {} planned messages",
-                report.items.len(),
-                plan.messages.len()
-            ));
-        }
-        for (index, item) in report.items.iter().enumerate() {
-            if item.index != index {
-                return Err(format!(
-                    "delivery report item at position {index} claims index {}",
-                    item.index
-                ));
-            }
-            if item.error.is_some() {
-                return Err(format!("delivery report item {index} unexpectedly failed"));
-            }
-        }
-        let item_messages = report
-            .items
-            .iter()
-            .flat_map(|item| item.messages.iter())
-            .collect::<Vec<_>>();
-        if report.messages.len() != item_messages.len()
-            || !report
-                .messages
-                .iter()
-                .zip(item_messages)
-                .all(|(a, b)| a == b)
-        {
-            return Err("delivery report summary differs from successful item references".into());
-        }
-        Ok(())
-    }
-
-    /// Verifies the structured report carried by a partial-delivery error.
-    pub fn assert_partial(plan: &DeliveryPlan, error: &CallError) -> Result<(), String> {
-        let CallError::PartialDelivery(partial) = error else {
-            return Err("expected CallError::PartialDelivery".into());
-        };
-        let report = &partial.report;
-        if report.degradations != plan.degradations {
-            return Err("partial report did not preserve planner degradations".into());
-        }
-        let Some(failed) = report.items.last() else {
-            return Err("partial report has no failed item".into());
-        };
-        if failed.error.is_none() || !failed.messages.is_empty() {
-            return Err("partial report terminal item must fail without message references".into());
-        }
-        if report.items.len() > plan.messages.len() {
-            return Err("partial report has more items than the delivery plan".into());
-        }
-        for (index, item) in report.items.iter().enumerate() {
-            if item.index != index {
-                return Err(format!(
-                    "partial report item at position {index} claims index {}",
-                    item.index
-                ));
-            }
-        }
-        Ok(())
     }
 }
