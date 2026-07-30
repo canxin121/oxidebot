@@ -57,8 +57,8 @@ jobs:
                | select(.manifest_path | contains("/crates/"))
                | select(.publish != [])
                | .version] | all(. == $version)' >/dev/null
-          grep -Fqx "## [$version]" CHANGELOG.md || {
-            echo "CHANGELOG.md needs a ## [$version] section before release" >&2
+          grep -Eq "^## \[$version\]( - .+)?$" CHANGELOG.md || {
+            echo "CHANGELOG.md needs a ## [$version] or ## [$version] - <date> section before release" >&2
             exit 1
           }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
