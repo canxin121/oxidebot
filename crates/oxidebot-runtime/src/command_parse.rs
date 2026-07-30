@@ -1,7 +1,7 @@
 //! Text and segment tokenization for command invocations.
 
 use super::{
-    form_value_label, ArgumentAction, ArgumentSpec, CommandBranch, CommandParseError,
+    form_value_label, value_kind, ArgumentAction, ArgumentSpec, CommandBranch, CommandParseError,
     CommandSchema, CommandValue, CompletionSuggestion, ParsedArguments,
 };
 use oxidebot_core::{application::CommandInvocation, source::message::MessageSegment, FormValue};
@@ -106,6 +106,140 @@ pub(super) fn parse_native_arguments(
         }
     }
     output.validate(schema, invocation.locale.as_deref())?;
+    Ok(output)
+}
+
+pub(super) fn parse_arguments(
+    schema: &CommandSchema,
+    values: &[CommandValue],
+    locale: Option<&str>,
+) -> Result<ParsedArguments, CommandParseError> {
+    let mut output = ParsedArguments::default();
+    let mut positional = Vec::new();
+    let mut options_enabled = true;
+    let mut index = 0;
+    while index < values.len() {
+        let value = &values[index];
+        let text = value.as_text();
+        if options_enabled && text == Some("--") {
+            options_enabled = false;
+            index += 1;
+            continue;
+        }
+        if options_enabled {
+            if let Some(text) = text {
+                if let Some(option) = text.strip_prefix("--").filter(|value| !value.is_empty()) {
+                    let (name, attached) = option
+                        .split_once('=')
+                        .map_or((option, None), |(name, value)| (name, Some(value)));
+                    let spec = schema
+                        .arguments
+                        .iter()
+                        .find(|argument| argument.long.as_deref() == Some(name))
+                        .ok_or_else(|| unknown_option(schema, format!("--{name}")))?;
+                    if spec.flag {
+                        if attached.is_some() {
+                            return Err(CommandParseError::ExtraArgument {
+                                value: Arc::from(text),
+                            });
+                        }
+                        apply_flag_action(&mut output, spec);
+                    } else {
+                        let option_value = if let Some(attached) = attached {
+                            CommandValue::Text(attached.to_owned())
+                        } else {
+                            index += 1;
+                            values.get(index).cloned().ok_or_else(|| {
+                                CommandParseError::MissingOptionValue {
+                                    option: Arc::from(format!("--{name}")),
+                                }
+                            })?
+                        };
+                        if !spec.is_multiple() && output.contains(spec.name()) {
+                            return Err(CommandParseError::DuplicateOption {
+                                option: Arc::from(format!("--{name}")),
+                            });
+                        }
+                        output.insert_value(spec, option_value);
+                    }
+                    index += 1;
+                    continue;
+                }
+                let negative_number =
+                    text.starts_with('-') && text.len() > 1 && text.parse::<f64>().is_ok();
+                if !negative_number {
+                    if let Some(shorts) = text.strip_prefix('-').filter(|value| !value.is_empty()) {
+                        let chars = shorts.chars().collect::<Vec<_>>();
+                        let mut short_index = 0;
+                        while short_index < chars.len() {
+                            let short = chars[short_index];
+                            let spec = schema
+                                .arguments
+                                .iter()
+                                .find(|argument| argument.short == Some(short))
+                                .ok_or_else(|| unknown_option(schema, format!("-{short}")))?;
+                            if spec.flag {
+                                apply_flag_action(&mut output, spec);
+                                short_index += 1;
+                                continue;
+                            }
+                            let remainder = chars[short_index + 1..].iter().collect::<String>();
+                            let option_value = if remainder.is_empty() {
+                                index += 1;
+                                values.get(index).cloned().ok_or_else(|| {
+                                    CommandParseError::MissingOptionValue {
+                                        option: Arc::from(format!("-{short}")),
+                                    }
+                                })?
+                            } else {
+                                CommandValue::Text(remainder)
+                            };
+                            if !spec.is_multiple() && output.contains(spec.name()) {
+                                return Err(CommandParseError::DuplicateOption {
+                                    option: Arc::from(format!("-{short}")),
+                                });
+                            }
+                            output.insert_value(spec, option_value);
+                            break;
+                        }
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        positional.push(value.clone());
+        index += 1;
+    }
+    let positional_specs = schema
+        .arguments
+        .iter()
+        .filter(|argument| argument.is_positional())
+        .collect::<Vec<_>>();
+    let mut value_index = 0;
+    for spec in positional_specs {
+        if spec.rest || spec.multiple {
+            if value_index < positional.len() {
+                for value in &positional[value_index..] {
+                    output.insert_value(spec, value.clone());
+                }
+                value_index = positional.len();
+            }
+        } else if let Some(value) = positional.get(value_index) {
+            output.insert_value(spec, value.clone());
+            value_index += 1;
+        }
+    }
+    if let Some(value) = positional.get(value_index) {
+        return Err(CommandParseError::ExtraArgument {
+            value: Arc::from(
+                value
+                    .as_text()
+                    .map_or_else(|| value_kind(value).to_owned(), ToOwned::to_owned),
+            ),
+        });
+    }
+    output.validate(schema, locale)?;
     Ok(output)
 }
 
