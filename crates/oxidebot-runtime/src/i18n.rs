@@ -10,7 +10,7 @@ use oxidebot_core::{source::message::Message, LocalizedMessage, TemplateValue};
 use std::sync::Arc;
 
 /// Handler-local localization facade backed by the application's bounded
-/// [`TranslationCatalog`] and locale resolver.
+/// translation catalog and locale resolver.
 #[derive(Clone)]
 pub struct I18n {
     inner: Arc<dyn ErasedI18n>,
