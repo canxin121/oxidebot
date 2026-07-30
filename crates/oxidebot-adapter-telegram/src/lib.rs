@@ -7,26 +7,29 @@
 //! visible through `BotCapabilities` and `CallError::Unsupported` rather than
 //! being silently approximated.
 
+mod render;
+mod wire;
+
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use oxidebot_core::{
-    content::{RichText, TextStyle},
-    conversation::{ConversationKind, ConversationRef, MessageRef, MessageTarget},
-    event::MessageEvent,
-    source::{
-        message::{DeliveryPlan, DeliveryReport, Message, MessageSegment},
-        user::{User, UserProfile},
-    },
-    BotCapabilities, BotId, CallApiTrait, CallError, CallResult, DeliveryReportBuilder, Event,
-    EventId, PlatformId, SupportLevel,
+    conversation::{MessageRef, MessageTarget},
+    source::message::{DeliveryPlan, DeliveryReport},
+    BotCapabilities, BotId, CallApiTrait, CallError, CallResult, DeliveryReportBuilder, PlatformId,
+    SupportLevel,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, BotDescriptor, BotServices, IdempotencyGuarantee,
 };
-use reqwest::{Client, StatusCode, Url};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use reqwest::{Client, Url};
+use serde::{de::DeserializeOwned, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
+#[cfg(test)]
+use wire::TelegramErrorParameters;
+use wire::{
+    map_telegram_error, GetUpdatesRequest, SendMessageRequest, TelegramEnvelope,
+    TelegramSentMessage, TelegramUpdate,
+};
 
 const TELEGRAM_PLATFORM: &str = "telegram";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
@@ -325,7 +328,7 @@ impl CallApiTrait for TelegramApi {
         let mut report = DeliveryReportBuilder::new(&plan);
         let mut delivered_any = false;
         for message in plan.messages {
-            let (text, parse_mode) = telegram_text(&message);
+            let (text, parse_mode) = render::telegram_text(&message);
             if text.is_empty() {
                 let error = CallError::invalid_request(
                     "Telegram cannot send an empty portable text message",
@@ -366,163 +369,6 @@ impl CallApiTrait for TelegramApi {
     }
 }
 
-fn telegram_text(message: &Message) -> (String, Option<&'static str>) {
-    let needs_markdown = message.segments.iter().any(
-        |segment| matches!(segment, MessageSegment::RichText(value) if !value.spans.is_empty()),
-    );
-    if !needs_markdown {
-        return (message.get_raw_text(), None);
-    }
-    let mut output = String::new();
-    for segment in &message.segments {
-        match segment {
-            MessageSegment::Text { content } => output.push_str(&escape_markdown_v2(content)),
-            MessageSegment::RichText(value) => output.push_str(&render_rich_text_markdown(value)),
-            _ => {
-                if let Some(text) = segment.fallback_text() {
-                    output.push_str(&escape_markdown_v2(&text));
-                }
-            }
-        }
-    }
-    (output, Some("MarkdownV2"))
-}
-
-fn render_rich_text_markdown(value: &RichText) -> String {
-    let spans = value
-        .spans
-        .iter()
-        .filter(|span| {
-            span.range.start < span.range.end
-                && span.range.end <= value.text.len()
-                && value.text.is_char_boundary(span.range.start)
-                && value.text.is_char_boundary(span.range.end)
-        })
-        .collect::<Vec<_>>();
-    if spans.is_empty() {
-        return escape_markdown_v2(&value.text);
-    }
-    let mut boundaries = vec![0, value.text.len()];
-    for span in &spans {
-        boundaries.push(span.range.start);
-        boundaries.push(span.range.end);
-    }
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    let mut output = String::new();
-    for range in boundaries.windows(2) {
-        let start = range[0];
-        let end = range[1];
-        if start == end {
-            continue;
-        }
-        let styles = spans
-            .iter()
-            .flat_map(|span| {
-                (span.range.start <= start && end <= span.range.end)
-                    .then_some(span.styles.as_slice())
-                    .into_iter()
-                    .flatten()
-            })
-            .collect::<Vec<_>>();
-        output.push_str(&render_markdown_chunk(&value.text[start..end], &styles));
-    }
-    output
-}
-
-fn render_markdown_chunk(text: &str, styles: &[&TextStyle]) -> String {
-    let preformatted = styles.iter().find_map(|style| match style {
-        TextStyle::Preformatted { language } => Some(language.as_deref()),
-        _ => None,
-    });
-    let code = styles.iter().any(|style| matches!(style, TextStyle::Code));
-    let mut output = if let Some(language) = preformatted {
-        let language = language.unwrap_or_default();
-        format!("```{language}\n{}\n```", escape_markdown_code(text))
-    } else if code {
-        format!("`{}`", escape_markdown_code(text))
-    } else {
-        escape_markdown_v2(text)
-    };
-    if preformatted.is_some() || code {
-        return output;
-    }
-    if styles.iter().any(|style| matches!(style, TextStyle::Bold)) {
-        output = format!("*{output}*");
-    }
-    if styles
-        .iter()
-        .any(|style| matches!(style, TextStyle::Italic))
-    {
-        output = format!("_{output}_");
-    }
-    if styles
-        .iter()
-        .any(|style| matches!(style, TextStyle::Underline))
-    {
-        output = format!("__{output}__");
-    }
-    if styles
-        .iter()
-        .any(|style| matches!(style, TextStyle::Strikethrough))
-    {
-        output = format!("~{output}~");
-    }
-    if styles
-        .iter()
-        .any(|style| matches!(style, TextStyle::Spoiler))
-    {
-        output = format!("||{output}||");
-    }
-    if let Some(url) = styles.iter().find_map(|style| match style {
-        TextStyle::Link { url } => Some(url),
-        _ => None,
-    }) {
-        output = format!("[{output}]({})", escape_markdown_link(url));
-    }
-    output
-}
-
-fn escape_markdown_v2(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    for character in text.chars() {
-        if matches!(
-            character,
-            '_' | '*'
-                | '['
-                | ']'
-                | '('
-                | ')'
-                | '~'
-                | '`'
-                | '>'
-                | '#'
-                | '+'
-                | '-'
-                | '='
-                | '|'
-                | '{'
-                | '}'
-                | '.'
-                | '!'
-                | '\\'
-        ) {
-            output.push('\\');
-        }
-        output.push(character);
-    }
-    output
-}
-
-fn escape_markdown_code(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('`', "\\`")
-}
-
-fn escape_markdown_link(url: &str) -> String {
-    url.replace('\\', "\\\\").replace(')', "\\)")
-}
-
 fn map_transport_error(error: reqwest::Error) -> CallError {
     if error.is_timeout() {
         CallError::timeout(error.to_string())
@@ -533,134 +379,16 @@ fn map_transport_error(error: reqwest::Error) -> CallError {
     }
 }
 
-fn map_telegram_error<T>(status: StatusCode, envelope: TelegramEnvelope<T>) -> CallError {
-    let message = envelope
-        .description
-        .unwrap_or_else(|| format!("Telegram API HTTP {status}"));
-    if status == StatusCode::TOO_MANY_REQUESTS || envelope.error_code == Some(429) {
-        return CallError::rate_limited(
-            message,
-            envelope
-                .parameters
-                .and_then(|parameters| parameters.retry_after)
-                .map(Duration::from_secs),
-        );
-    }
-    match envelope.error_code.unwrap_or(status.as_u16()) {
-        400 => CallError::invalid_request(message),
-        401 | 403 => CallError::permanent(message),
-        404 => CallError::not_found(message),
-        value if value >= 500 => CallError::temporary(message),
-        _ => CallError::permanent(message),
-    }
-}
-
-#[derive(Deserialize)]
-struct TelegramEnvelope<T> {
-    ok: bool,
-    result: Option<T>,
-    error_code: Option<u16>,
-    description: Option<String>,
-    parameters: Option<TelegramErrorParameters>,
-}
-
-#[derive(Deserialize)]
-struct TelegramErrorParameters {
-    retry_after: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct GetUpdatesRequest {
-    offset: Option<i64>,
-    timeout: u16,
-    limit: u8,
-}
-
-#[derive(Serialize)]
-struct SendMessageRequest<'a> {
-    chat_id: &'a str,
-    text: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parse_mode: Option<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct TelegramSentMessage {
-    message_id: i64,
-}
-
-#[derive(Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    message: Option<TelegramMessage>,
-}
-
-impl TelegramUpdate {
-    fn into_event(self) -> Option<(EventId, Event)> {
-        let message = self.message?;
-        let text = message.text?;
-        let from = message.from?;
-        let conversation = match message.chat.kind.as_deref() {
-            Some("private") => ConversationRef::direct(message.chat.id.to_string()),
-            Some("channel") => {
-                ConversationRef::new(message.chat.id.to_string(), ConversationKind::Channel)
-            }
-            _ => ConversationRef::new(message.chat.id.to_string(), ConversationKind::Group),
-        };
-        let event = Event::Message(MessageEvent {
-            id: message.message_id.to_string(),
-            time: DateTime::<Utc>::from_timestamp(message.date, 0),
-            sender: User {
-                id: from.id.into(),
-                profile: Some(UserProfile {
-                    display_name: telegram_display_name(&from),
-                    ..UserProfile::default()
-                }),
-            },
-            conversation,
-            message: Message::text(text),
-        });
-        let id = EventId::new(format!("telegram:update:{}", self.update_id)).ok()?;
-        Some((id, event))
-    }
-}
-
-fn telegram_display_name(user: &TelegramUser) -> Option<String> {
-    let value = [Some(user.first_name.as_str()), user.last_name.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!value.is_empty()).then_some(value)
-}
-
-#[derive(Deserialize)]
-struct TelegramMessage {
-    message_id: i64,
-    date: i64,
-    from: Option<TelegramUser>,
-    chat: TelegramChat,
-    text: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TelegramUser {
-    id: i64,
-    first_name: String,
-    last_name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TelegramChat {
-    id: i64,
-    #[serde(rename = "type")]
-    kind: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxidebot_core::conversation::ConversationRef;
+    use oxidebot_core::{
+        content::{RichText, TextStyle},
+        conversation::{ConversationKind, ConversationRef},
+        source::message::Message,
+        Event,
+    };
+    use reqwest::StatusCode;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
