@@ -1,0 +1,300 @@
+//! Root command-tree construction, validation, matching, and publication.
+
+use super::*;
+
+/// Declares one user-facing command.
+#[derive(Clone, Debug)]
+pub struct Command {
+    pub(in crate::command) id: CommandId,
+    pub(in crate::command) name: Arc<str>,
+    pub(in crate::command) description: LocalizedText,
+    pub(in crate::command) aliases: Vec<Arc<str>>,
+    pub(in crate::command) prefixes: Vec<Arc<str>>,
+    pub(in crate::command) category: Option<Arc<str>>,
+    pub(in crate::command) examples: Vec<Arc<str>>,
+    pub(in crate::command) case_sensitive: bool,
+    pub(in crate::command) hidden: bool,
+    pub(in crate::command) global_schema: Option<CommandSchema>,
+    pub(in crate::command) schema: Option<CommandSchema>,
+    pub(in crate::command) branches: Vec<CommandBranch>,
+    pub(in crate::command) completion: Option<CompletionConfig>,
+    pub(in crate::command) shortcuts: Vec<Shortcut>,
+}
+
+/// Creates a command using `/` as its prefix.
+#[must_use]
+pub fn command(name: impl Into<Arc<str>>) -> Command {
+    Command::new(name)
+}
+
+impl Command {
+    /// Creates a command with the default `/` prefix.
+    #[must_use]
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
+        let name = name.into();
+        Self {
+            id: CommandId(stable_hash(name.as_bytes())),
+            name,
+            description: LocalizedText::default(),
+            aliases: Vec::new(),
+            prefixes: vec![Arc::from("/")],
+            category: None,
+            examples: Vec::new(),
+            case_sensitive: true,
+            hidden: false,
+            global_schema: None,
+            schema: None,
+            branches: Vec::new(),
+            completion: None,
+            shortcuts: Vec::new(),
+        }
+    }
+
+    /// Sets the default localized command description.
+    #[must_use]
+    pub fn description(mut self, description: impl Into<LocalizedText>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// Adds a locale-specific command description.
+    #[must_use]
+    pub fn description_translation(
+        mut self,
+        locale: impl Into<Arc<str>>,
+        description: impl Into<Arc<str>>,
+    ) -> Self {
+        self.description = self.description.translation(locale, description);
+        self
+    }
+
+    /// Adds a parseable command alias.
+    #[must_use]
+    pub fn alias(mut self, alias: impl Into<Arc<str>>) -> Self {
+        self.aliases.push(alias.into());
+        self
+    }
+
+    /// Adds several parseable command aliases.
+    #[must_use]
+    pub fn aliases<I, T>(mut self, aliases: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<str>>,
+    {
+        self.aliases.extend(aliases.into_iter().map(Into::into));
+        self
+    }
+
+    /// Replaces the accepted prefixes. An empty string enables natural-language
+    /// commands without a prefix.
+    #[must_use]
+    pub fn prefixes<I, T>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<str>>,
+    {
+        self.prefixes = prefixes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Replaces accepted prefixes with one prefix.
+    #[must_use]
+    pub fn prefix(self, prefix: impl Into<Arc<str>>) -> Self {
+        self.prefixes([prefix])
+    }
+
+    /// Enables matching command text without a prefix.
+    #[must_use]
+    pub fn no_prefix(self) -> Self {
+        self.prefix(Arc::<str>::from(""))
+    }
+
+    /// Enables case-insensitive matching for names and aliases.
+    #[must_use]
+    pub const fn case_insensitive(mut self) -> Self {
+        self.case_sensitive = false;
+        self
+    }
+
+    /// Hides this command from help and completion while retaining parsing.
+    #[must_use]
+    pub const fn hidden(mut self) -> Self {
+        self.hidden = true;
+        self
+    }
+
+    /// Assigns a presentation category to the command.
+    #[must_use]
+    pub fn category(mut self, category: impl Into<Arc<str>>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Adds one usage example for help renderers.
+    #[must_use]
+    pub fn example(mut self, example: impl Into<Arc<str>>) -> Self {
+        self.examples.push(example.into());
+        self
+    }
+
+    /// Attaches an argument schema to the root command.
+    #[must_use]
+    pub fn schema(mut self, mut schema: CommandSchema) -> Self {
+        schema.rebase(&self.name);
+        self.schema = Some(schema);
+        self
+    }
+
+    /// Attaches arguments inherited by every selected subcommand branch.
+    ///
+    /// Global arguments are deliberately separate from root arguments: a
+    /// command tree can have global options and subcommands, while a leaf
+    /// command continues to use [`Self::schema`].
+    #[must_use]
+    pub fn global_schema(mut self, mut schema: CommandSchema) -> Self {
+        schema.rebase(&format!("{}.__global", self.name));
+        self.global_schema = Some(schema);
+        self
+    }
+
+    /// Attaches global arguments generated by [`CommandArgs`].
+    #[must_use]
+    pub fn global_args<T>(self) -> Self
+    where
+        T: CommandArgs,
+    {
+        self.global_schema(T::schema())
+    }
+
+    /// Attaches the schema generated by `CommandArgs`.
+    #[must_use]
+    pub fn args<T>(self) -> Self
+    where
+        T: CommandArgs,
+    {
+        self.schema(T::schema())
+    }
+
+    /// Enables interactive recovery for missing required root arguments.
+    #[must_use]
+    pub fn completion(mut self, completion: CompletionConfig) -> Self {
+        self.completion = Some(completion);
+        self
+    }
+
+    /// Adds a static shortcut that expands to this command.
+    #[must_use]
+    pub fn shortcut(mut self, shortcut: Shortcut) -> Self {
+        self.shortcuts.push(shortcut);
+        self
+    }
+
+    /// Returns static shortcuts declared for this command.
+    #[must_use]
+    pub fn shortcuts(&self) -> &[Shortcut] {
+        &self.shortcuts
+    }
+
+    /// Adds a user-visible subcommand branch.
+    #[must_use]
+    pub fn subcommand(mut self, mut branch: CommandBranch) -> Self {
+        branch.rebase(&format!("{}.{}", self.name, branch.name));
+        self.branches.push(branch);
+        self
+    }
+
+    /// Adds a subcommand branch with schema generated by `CommandArgs`.
+    #[must_use]
+    pub fn subcommand_args<T>(self, name: impl Into<Arc<str>>) -> Self
+    where
+        T: CommandArgs,
+    {
+        self.subcommand(CommandBranch::new(name).schema(T::schema()))
+    }
+
+    /// Returns this command's stable deterministic ID.
+    #[must_use]
+    pub const fn id(&self) -> CommandId {
+        self.id
+    }
+
+    /// Returns the canonical root command name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the default command description.
+    #[must_use]
+    pub fn description_text(&self) -> &str {
+        self.description.resolve(None)
+    }
+
+    /// Resolves the command description for `locale`.
+    #[must_use]
+    pub fn localized_description(&self, locale: Option<&str>) -> &str {
+        self.description.resolve(locale)
+    }
+
+    /// Returns all parseable aliases.
+    #[must_use]
+    pub fn aliases_list(&self) -> &[Arc<str>] {
+        &self.aliases
+    }
+
+    /// Returns all accepted command prefixes.
+    #[must_use]
+    pub fn prefixes_list(&self) -> &[Arc<str>] {
+        &self.prefixes
+    }
+
+    /// Returns the root argument schema, if any.
+    #[must_use]
+    pub fn schema_ref(&self) -> Option<&CommandSchema> {
+        self.schema.as_ref()
+    }
+
+    /// Returns arguments inherited by every subcommand branch, if configured.
+    #[must_use]
+    pub fn global_schema_ref(&self) -> Option<&CommandSchema> {
+        self.global_schema.as_ref()
+    }
+
+    /// Returns direct user-visible subcommand branches.
+    #[must_use]
+    pub fn branches(&self) -> &[CommandBranch] {
+        &self.branches
+    }
+
+    /// Returns the root interactive recovery policy, if configured.
+    #[must_use]
+    pub fn completion_ref(&self) -> Option<&CompletionConfig> {
+        self.completion.as_ref()
+    }
+
+    /// Resolves a deterministic field ID from the same command tree used by
+    /// parsing, help, completion, and platform-native publication.
+    #[must_use]
+    pub fn field_id(&self, branch: &[&str], field: &str) -> Option<CommandFieldId> {
+        let branch_names = branch
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>();
+        self.schema_for_branch_names(&branch_names)
+            .find(field)
+            .map(ArgumentSpec::id)
+    }
+
+    /// Returns whether this command is hidden from discovery surfaces.
+    #[must_use]
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Returns the display name formed from the first prefix and canonical name.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        let prefix = self.prefixes.first().map_or("", AsRef::as_ref);
+        format!("{prefix}{}", self.name)
+    }
+}
