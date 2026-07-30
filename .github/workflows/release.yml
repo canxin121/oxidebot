@@ -33,6 +33,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # A manual release must validate the exact existing tag, not the
+          # workflow's default branch revision.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -155,8 +158,8 @@ jobs:
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          awk -v heading="## [$VERSION]" '
-            $0 == heading { printing=1; next }
+          awk -v version="$VERSION" '
+            $0 ~ ("^## \\[" version "\\]( - .+)?$") { printing=1; next }
             printing && /^## / { exit }
             printing { print }
           ' CHANGELOG.md > RELEASE_NOTES.md
