@@ -1,6 +1,6 @@
 # OxideBot
 
-> **Release status:** `1.0.0` stable. The public API is covered by the
+> **Public API:** The `1.0` line is covered by the
 > [stability policy](STABILITY.md); see [the changelog](CHANGELOG.md),
 > [the 0.1 migration guide](MIGRATING_FROM_0_1.md), and
 > [the stability policy](STABILITY.md).

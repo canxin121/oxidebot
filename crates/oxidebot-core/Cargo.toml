@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Canonical OxideBot event and API model"
+readme = "README.md"
+documentation = "https://docs.rs/oxidebot-core"
+keywords = ["bot", "chatbot", "event", "message", "oxidebot"]
+categories = ["asynchronous", "data-structures"]
 
 [dependencies]
 chrono.workspace = true

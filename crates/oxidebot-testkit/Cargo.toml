@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Deterministic adapter and API fixtures for OxideBot"
+readme = "README.md"
+documentation = "https://docs.rs/oxidebot-testkit"
+keywords = ["bot", "chatbot", "testing", "fixtures", "oxidebot"]
+categories = ["asynchronous", "development-tools::testing"]
 
 [dependencies]
 async-trait.workspace = true

@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Bounded, structured-concurrency runtime for OxideBot"
+readme = "README.md"
+documentation = "https://docs.rs/oxidebot-runtime"
+keywords = ["bot", "chatbot", "runtime", "async", "oxidebot"]
+categories = ["asynchronous"]
 
 [features]
 default = ["signal"]

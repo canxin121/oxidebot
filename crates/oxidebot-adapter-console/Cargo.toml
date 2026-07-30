@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Runnable stdin/stdout adapter for OxideBot examples, local bots, and development"
+documentation = "https://docs.rs/oxidebot-adapter-console"
+keywords = ["bot", "chatbot", "console", "terminal", "oxidebot"]
+categories = ["asynchronous", "command-line-utilities"]
 
 [dependencies]
 async-trait.workspace = true

@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "A high-performance, platform-neutral chatbot framework"
 readme = "../../README.md"
+documentation = "https://docs.rs/oxidebot"
 keywords = ["bot", "chatbot", "async", "framework"]
 categories = ["asynchronous", "api-bindings"]
 

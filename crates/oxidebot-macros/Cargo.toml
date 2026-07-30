@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Derive macros for OxideBot's ergonomic command API"
+readme = "README.md"
+documentation = "https://docs.rs/oxidebot-macros"
+keywords = ["bot", "chatbot", "commands", "proc-macro", "oxidebot"]
+categories = ["asynchronous", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

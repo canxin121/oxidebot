@@ -54,6 +54,11 @@ jobs:
             echo "tag $tag does not match facade version $version" >&2
             exit 1
           }
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "release tag $tag must point to a commit reachable from main" >&2
+            exit 1
+          }
           cargo metadata --no-deps --format-version=1 |
             jq -e --arg version "$version" '
               [.packages[]
@@ -66,7 +71,7 @@ jobs:
           }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - run: cargo +stable fmt --all -- --check
+      - run: cargo +stable fmt --all --check
       - run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo +stable test --workspace --all-targets --all-features --locked
       - name: Require documentation for every published API
@@ -87,6 +92,13 @@ jobs:
           # that same package validation in dependency order after each member
           # exists; this root check proves archive construction independently.
           cargo +stable package -p oxidebot-core --locked
+      - name: Inspect every publishable source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in oxidebot-core oxidebot-macros oxidebot-runtime oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
+            cargo +stable package -p "$package" --list --locked
+          done
       - name: Inspect the root package manifest and sources
         run: |
           set -euo pipefail
@@ -108,6 +120,10 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN" || {
+            echo "CARGO_REGISTRY_TOKEN is not configured for the crates-io-release environment" >&2
+            exit 1
+          }
           for package in oxidebot-core oxidebot-runtime oxidebot-macros oxidebot oxidebot-testkit oxidebot-adapter-console oxidebot-adapter-telegram; do
             cargo +stable publish -p "$package" --locked
           done
