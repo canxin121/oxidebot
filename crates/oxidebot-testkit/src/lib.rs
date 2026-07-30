@@ -2,169 +2,32 @@
 
 pub mod adapter_contract;
 mod command;
+mod frame;
 
 pub use command::{command_test, command_tree_test, CommandTest};
+pub use frame::{DecodeCounter, InteractionFrame, TestFrame};
 
 use async_trait::async_trait;
-use oxidebot_core::event::kernel::{DispatchBatch, DispatchDraft, DispatchIndex};
 use oxidebot_core::{
     conversation::{ConversationRef, MessageRef, MessageTarget},
-    event::{Event, EventType, MessageEvent},
-    interaction::{
-        InteractionEvent, InteractionKind, InteractionResponse, InteractionResponseHandle,
+    interaction::{InteractionResponse, InteractionResponseHandle},
+    source::message::{
+        DeliveryItemResult, DeliveryPlan, DeliveryReport, Message, PartialDeliveryError,
     },
-    source::{
-        message::{
-            DeliveryItemResult, DeliveryPlan, DeliveryReport, Message, MessageSegment,
-            PartialDeliveryError,
-        },
-        user::User,
-    },
-    BotCapabilities, BotId, BotSlot, CallApiTrait, CallError, CallResult, CompactId,
-    ConversationKey, EventId, InteractionVisibility, PlatformId, SupportLevel, UserKey,
+    BotCapabilities, BotId, CallApiTrait, CallError, CallResult, EventId, InteractionVisibility,
+    PlatformId, SupportLevel,
 };
 use oxidebot_runtime::{
-    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices, DecodeError,
-    FrameIndex, IdempotencyGuarantee, InboundFrame, PlatformError, PlatformErrorKind,
+    Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
+    IdempotencyGuarantee, PlatformError, PlatformErrorKind,
 };
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
-
-/// Observable decode counter shared with a [`TestFrame`].
-#[derive(Clone, Debug, Default)]
-pub struct DecodeCounter(Arc<AtomicUsize>);
-
-impl DecodeCounter {
-    /// Returns how many times the associated frame has been fully decoded.
-    #[must_use]
-    pub fn get(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// One deterministic incoming message frame.
-pub struct TestFrame {
-    id: EventId,
-    conversation: CompactId,
-    actor: CompactId,
-    message_id: CompactId,
-    text: Arc<str>,
-    decodes: DecodeCounter,
-}
-
-impl TestFrame {
-    /// Builds one deterministic incoming text-message frame.
-    #[must_use]
-    pub fn message(
-        id: EventId,
-        conversation: impl Into<CompactId>,
-        actor: impl Into<CompactId>,
-        message_id: impl Into<CompactId>,
-        text: impl Into<Arc<str>>,
-    ) -> Self {
-        Self {
-            id,
-            conversation: conversation.into(),
-            actor: actor.into(),
-            message_id: message_id.into(),
-            text: text.into(),
-            decodes: DecodeCounter::default(),
-        }
-    }
-
-    /// Returns the shared full-decode counter for this frame.
-    #[must_use]
-    pub fn decode_counter(&self) -> DecodeCounter {
-        self.decodes.clone()
-    }
-
-    fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
-        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Message);
-        index.conversation = Some(ConversationKey::new(bot, self.conversation.clone()));
-        index.actor = Some(UserKey::new(bot, self.actor.clone()));
-        index.command = self
-            .text
-            .strip_prefix('/')
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.split('@').next())
-            .filter(|value| !value.is_empty())
-            .map(Arc::from);
-        index
-    }
-
-    /// Conservative charge for the decoded public event and its routing keys.
-    fn retained_event_bytes(&self) -> usize {
-        self.id
-            .estimated_bytes()
-            .saturating_add(self.conversation.estimated_bytes())
-            .saturating_add(self.actor.estimated_bytes())
-            .saturating_add(self.message_id.estimated_bytes())
-            .saturating_add(self.text.len())
-            // Covers owned strings, the message-segment vector, enum storage,
-            // and the adapter's receive-time metadata.
-            .saturating_add(2_048)
-    }
-
-    /// Includes the dispatch envelope and one-element batch-vector overhead.
-    fn frame_estimate_bytes(&self) -> usize {
-        self.retained_event_bytes().saturating_add(2_048)
-    }
-}
-
-impl InboundFrame for TestFrame {
-    fn index(&self, bot: BotSlot, platform: &PlatformId) -> Result<FrameIndex, DecodeError> {
-        Ok(FrameIndex::one(
-            self.event_index(bot, platform),
-            self.frame_estimate_bytes(),
-        ))
-    }
-
-    fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<DispatchBatch, DecodeError> {
-        let index = FrameIndex::one(self.event_index(bot, platform), 0);
-        self.decode_indexed(bot, platform, &index)
-    }
-
-    fn decode_indexed(
-        self,
-        _bot: BotSlot,
-        _platform: &PlatformId,
-        indexed: &FrameIndex,
-    ) -> Result<DispatchBatch, DecodeError> {
-        self.decodes.0.fetch_add(1, Ordering::Relaxed);
-        let index = indexed
-            .events
-            .first()
-            .cloned()
-            .ok_or_else(|| DecodeError::new("test frame index is empty"))?;
-        index
-            .conversation
-            .as_ref()
-            .ok_or_else(|| DecodeError::new("test message has no conversation"))?;
-        let retained_event_bytes = self.retained_event_bytes();
-        let message_id = self.message_id.to_string();
-        let actor_id = self.actor.to_string();
-        let text = self.text.to_string();
-        let event = Event::Message(MessageEvent {
-            id: self.id.as_str().to_owned(),
-            time: None,
-            sender: User::new(actor_id),
-            conversation: ConversationRef::direct(self.conversation.to_string()),
-            message: Message {
-                id: Some(message_id.into()),
-                segments: vec![MessageSegment::text(text)],
-                options: Default::default(),
-            },
-        });
-        let mut draft = DispatchDraft::new(self.id, index, event, retained_event_bytes);
-        draft.occurred_at = Some(SystemTime::now());
-        Ok(DispatchBatch::new([draft]))
-    }
-}
 
 /// One scripted transport action.
 pub enum ScriptStep {
@@ -190,106 +53,6 @@ pub enum ScriptStep {
         /// Maximum wall-clock wait for interaction effects.
         timeout: Duration,
     },
-}
-
-/// Deterministic answerable interaction frame used by high-level scenarios.
-pub struct InteractionFrame {
-    id: EventId,
-    conversation: CompactId,
-    actor: CompactId,
-    action_id: Arc<str>,
-    response_id: Arc<str>,
-    deadline_after: Duration,
-}
-
-impl InteractionFrame {
-    /// Builds an answerable button-click event with the default five-second deadline.
-    #[must_use]
-    pub fn click(
-        id: EventId,
-        conversation: impl Into<CompactId>,
-        actor: impl Into<CompactId>,
-        action_id: impl Into<Arc<str>>,
-    ) -> Self {
-        let response_id: Arc<str> = Arc::from(format!("interaction-response-{}", id.as_str()));
-        Self {
-            id,
-            conversation: conversation.into(),
-            actor: actor.into(),
-            action_id: action_id.into(),
-            response_id,
-            deadline_after: Duration::from_secs(5),
-        }
-    }
-
-    /// Replaces the platform acknowledgement deadline for this interaction.
-    #[must_use]
-    pub const fn deadline_after(mut self, deadline_after: Duration) -> Self {
-        self.deadline_after = deadline_after;
-        self
-    }
-
-    fn event_index(&self, bot: BotSlot, platform: &PlatformId) -> DispatchIndex {
-        let mut index = DispatchIndex::event(bot, platform.clone(), EventType::Interaction);
-        index.conversation = Some(ConversationKey::new(bot, self.conversation.clone()));
-        index.actor = Some(UserKey::new(bot, self.actor.clone()));
-        index.interaction = Some(Arc::clone(&self.action_id));
-        index
-    }
-
-    fn retained_event_bytes(&self) -> usize {
-        self.id
-            .estimated_bytes()
-            .saturating_add(self.conversation.estimated_bytes())
-            .saturating_add(self.actor.estimated_bytes())
-            .saturating_add(self.action_id.len())
-            .saturating_add(self.response_id.len())
-            .saturating_add(2_048)
-    }
-}
-
-impl InboundFrame for InteractionFrame {
-    fn index(&self, bot: BotSlot, platform: &PlatformId) -> Result<FrameIndex, DecodeError> {
-        Ok(FrameIndex::one(
-            self.event_index(bot, platform),
-            self.retained_event_bytes().saturating_add(2_048),
-        ))
-    }
-
-    fn decode(self, bot: BotSlot, platform: &PlatformId) -> Result<DispatchBatch, DecodeError> {
-        let index = self.event_index(bot, platform);
-        let retained_event_bytes = self.retained_event_bytes();
-        let actor_id = self.actor.to_string();
-        let event = Event::Interaction(InteractionEvent {
-            id: self.id.as_str().to_owned(),
-            kind: InteractionKind::Button,
-            action_id: Some(self.action_id.to_string()),
-            values: Vec::new(),
-            user: User::new(actor_id),
-            conversation: Some(ConversationRef::direct(self.conversation.to_string())),
-            message: None,
-            context_id: Some(self.conversation.to_string()),
-            response: Some(InteractionResponseHandle {
-                id: self.response_id.to_string(),
-                deadline: Some(
-                    chrono::Utc::now()
-                        + chrono::Duration::from_std(self.deadline_after)
-                            .unwrap_or(chrono::Duration::MAX),
-                ),
-                ack_required: true,
-                followups_supported: true,
-                platform_data: None,
-            }),
-            fields: Default::default(),
-            command: None,
-            locale: None,
-            permissions: Default::default(),
-            data: serde_json::Value::Null,
-        });
-        let mut draft = DispatchDraft::new(self.id, index, event, retained_event_bytes);
-        draft.occurred_at = Some(SystemTime::now());
-        Ok(DispatchBatch::new([draft]))
-    }
 }
 
 /// Successfully sent message recorded by the scripted API.
