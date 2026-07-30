@@ -30,6 +30,7 @@ mod responder;
 mod router;
 mod service;
 mod session;
+mod shortcut;
 mod standard;
 
 pub use adapter::*;
@@ -62,6 +63,7 @@ pub use reply::*;
 pub use responder::*;
 pub use service::*;
 pub use session::{AskOptions, SessionEvent, SessionKey, SessionPolicy, SessionRegistry};
+pub use shortcut::*;
 pub use standard::*;
 
 /// Implementation details used by the facade macros.
