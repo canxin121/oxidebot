@@ -23,7 +23,7 @@ use oxidebot_core::{
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, BotDescriptor, BotServices, IdempotencyGuarantee,
 };
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
@@ -41,6 +41,9 @@ pub enum TelegramConfigError {
     /// The Bot API base URL is empty or cannot be parsed by the HTTP client.
     #[error("Telegram Bot API base URL must not be empty")]
     EmptyApiBase,
+    /// The Bot API base URL is not an absolute HTTP(S) URL.
+    #[error("Telegram Bot API base URL must be an absolute HTTP(S) URL")]
+    InvalidApiBase,
     /// The polling timeout exceeds Telegram's Bot API limit.
     #[error("Telegram long-poll timeout must be between 1 and {MAX_LONG_POLL_SECONDS} seconds")]
     InvalidPollTimeout,
@@ -60,7 +63,7 @@ pub enum TelegramConfigError {
 pub struct TelegramConfig {
     token: Arc<str>,
     bot_id: BotId,
-    api_base: Arc<str>,
+    api_base: Url,
     poll_timeout: u16,
     update_limit: u8,
 }
@@ -91,19 +94,29 @@ impl TelegramConfig {
         Ok(Self {
             token,
             bot_id: BotId::new(bot_id)?,
-            api_base: Arc::from(DEFAULT_API_BASE),
+            api_base: Url::parse(DEFAULT_API_BASE)
+                .expect("the static Telegram Bot API base URL is valid"),
             poll_timeout: MAX_LONG_POLL_SECONDS,
             update_limit: 100,
         })
     }
 
     /// Replaces the Bot API base URL for a compatible server or test fixture.
-    pub fn api_base(mut self, value: impl Into<Arc<str>>) -> Result<Self, TelegramConfigError> {
-        let value = value.into();
+    pub fn api_base(mut self, value: impl AsRef<str>) -> Result<Self, TelegramConfigError> {
+        let value = value.as_ref();
         if value.trim().is_empty() {
             return Err(TelegramConfigError::EmptyApiBase);
         }
-        self.api_base = Arc::from(value.trim_end_matches('/'));
+        let mut api_base =
+            Url::parse(value.trim()).map_err(|_| TelegramConfigError::InvalidApiBase)?;
+        if !matches!(api_base.scheme(), "http" | "https") || api_base.host().is_none() {
+            return Err(TelegramConfigError::InvalidApiBase);
+        }
+        if !api_base.path().ends_with('/') {
+            let path = format!("{}/", api_base.path());
+            api_base.set_path(&path);
+        }
+        self.api_base = api_base;
         Ok(self)
     }
 
@@ -207,7 +220,7 @@ impl Adapter for TelegramAdapter {
 pub struct TelegramApi {
     client: Client,
     token: Arc<str>,
-    api_base: Arc<str>,
+    api_base: Url,
 }
 
 impl TelegramApi {
@@ -240,12 +253,14 @@ impl TelegramApi {
         Ok(Self {
             client,
             token: Arc::clone(&config.token),
-            api_base: Arc::clone(&config.api_base),
+            api_base: config.api_base.clone(),
         })
     }
 
-    fn method_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{method}", self.api_base, self.token)
+    fn method_url(&self, method: &str) -> Url {
+        self.api_base
+            .join(&format!("./bot{}/{method}", self.token))
+            .expect("configured Telegram API base URL can resolve a static method path")
     }
 
     async fn call<T, P>(&self, method: &str, payload: &P) -> CallResult<T>
@@ -321,11 +336,12 @@ impl CallApiTrait for TelegramApi {
                     Err(error)
                 };
             }
+            let chat_id = target.conversation.id.to_string();
             let response = self
                 .call::<TelegramSentMessage, _>(
                     "sendMessage",
                     &SendMessageRequest {
-                        chat_id: &target.conversation.id,
+                        chat_id: &chat_id,
                         text: &text,
                         parse_mode,
                     },
@@ -595,7 +611,7 @@ impl TelegramUpdate {
             id: message.message_id.to_string(),
             time: DateTime::<Utc>::from_timestamp(message.date, 0),
             sender: User {
-                id: from.id.to_string(),
+                id: from.id.into(),
                 profile: Some(UserProfile {
                     display_name: telegram_display_name(&from),
                     ..UserProfile::default()
@@ -667,7 +683,7 @@ mod tests {
             panic!("expected a canonical message event");
         };
         assert_eq!(id.as_str(), "telegram:update:42");
-        assert_eq!(event.sender.id, "99");
+        assert_eq!(event.sender.id, 99_u64.into());
         assert_eq!(event.conversation.kind, ConversationKind::Direct);
         assert_eq!(event.message.get_raw_text(), "/ping");
     }
@@ -709,6 +725,19 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-token"));
+    }
+
+    #[test]
+    fn config_rejects_non_http_api_bases_before_startup() {
+        let config = TelegramConfig::new("123:secret-token", "bot")
+            .expect("valid config")
+            .api_base("not a URL");
+        assert_eq!(config, Err(TelegramConfigError::InvalidApiBase));
+
+        let config = TelegramConfig::new("123:secret-token", "bot")
+            .expect("valid config")
+            .api_base("ftp://fixture.example");
+        assert_eq!(config, Err(TelegramConfigError::InvalidApiBase));
     }
 
     #[tokio::test]
@@ -785,7 +814,7 @@ mod tests {
             .expect("fixture accepts Telegram delivery");
         fixture.await.expect("fixture task completes");
         assert_eq!(report.messages.len(), 1);
-        assert_eq!(report.messages[0].id, "77");
+        assert_eq!(report.messages[0].id, "77".into());
         oxidebot_testkit::adapter_contract::assert_complete(
             &DeliveryPlan {
                 messages: vec![Message::rich_text(

@@ -1717,40 +1717,40 @@ impl From<MessageTarget> for Address {
 impl Address {
     /// Selects a direct-message conversation for `user_id`.
     #[must_use]
-    pub fn direct(user_id: impl Into<String>) -> Self {
+    pub fn direct(user_id: impl Into<oxidebot_core::UserId>) -> Self {
         Self {
-            target: MessageTarget::new(ConversationRef::direct(user_id.into())),
+            target: MessageTarget::new(ConversationRef::direct_user(user_id)),
             bot: BotSelection::Current,
         }
     }
 
     /// Selects a group conversation for `group_id`.
     #[must_use]
-    pub fn group(group_id: impl Into<String>) -> Self {
+    pub fn group(group_id: impl Into<oxidebot_core::ConversationId>) -> Self {
         Self {
-            target: MessageTarget::new(ConversationRef::group(group_id.into())),
+            target: MessageTarget::new(ConversationRef::group(group_id)),
             bot: BotSelection::Current,
         }
     }
 
     /// Selects a channel conversation for `channel_id`.
     #[must_use]
-    pub fn channel(channel_id: impl Into<String>) -> Self {
+    pub fn channel(channel_id: impl Into<oxidebot_core::ConversationId>) -> Self {
         Self {
-            target: MessageTarget::new(ConversationRef::new(
-                channel_id.into(),
-                ConversationKind::Channel,
-            )),
+            target: MessageTarget::new(ConversationRef::new(channel_id, ConversationKind::Channel)),
             bot: BotSelection::Current,
         }
     }
 
     /// Selects a thread conversation beneath `parent`.
     #[must_use]
-    pub fn thread(thread_id: impl Into<String>, parent: ConversationRef) -> Self {
+    pub fn thread(
+        thread_id: impl Into<oxidebot_core::ConversationId>,
+        parent: ConversationRef,
+    ) -> Self {
         Self {
             target: MessageTarget::new(
-                ConversationRef::new(thread_id.into(), ConversationKind::Thread).child_of(parent),
+                ConversationRef::new(thread_id, ConversationKind::Thread).child_of(parent),
             ),
             bot: BotSelection::Current,
         }
@@ -1758,7 +1758,10 @@ impl Address {
 
     /// Adds explicit recipient IDs to this target.
     #[must_use]
-    pub fn recipients(mut self, recipients: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn recipients(
+        mut self,
+        recipients: impl IntoIterator<Item = impl Into<oxidebot_core::UserId>>,
+    ) -> Self {
         self.target = self.target.recipients(recipients);
         self
     }

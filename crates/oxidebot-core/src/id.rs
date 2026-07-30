@@ -98,6 +98,106 @@ string_id!(
     "Logical namespace used to identify and cancel a dialogue session."
 );
 
+macro_rules! compact_id {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(CompactId);
+
+        impl $name {
+            /// Creates a validated platform identifier.
+            pub fn new(value: impl Into<CompactId>) -> Result<Self, InvalidId> {
+                let value = value.into();
+                value.validate()?;
+                Ok(Self(value))
+            }
+
+            /// Revalidates an identifier after crossing an untrusted boundary.
+            pub fn validate(&self) -> Result<(), InvalidId> {
+                self.0.validate()
+            }
+
+            /// Returns the lossless platform identifier.
+            #[must_use]
+            pub const fn as_compact(&self) -> &CompactId {
+                &self.0
+            }
+
+            /// Approximate retained bytes.
+            #[must_use]
+            pub fn estimated_bytes(&self) -> usize {
+                self.0.estimated_bytes()
+            }
+        }
+
+        impl From<CompactId> for $name {
+            fn from(value: CompactId) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for CompactId {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl From<u32> for $name {
+            fn from(value: u32) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl From<i64> for $name {
+            fn from(value: i64) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl From<i32> for $name {
+            fn from(value: i32) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(CompactId::from(value))
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+
+        impl RetainedSize for $name {
+            fn retained_bytes(&self) -> usize {
+                self.0.retained_bytes()
+            }
+        }
+    };
+}
+
+compact_id!(ConversationId, "Platform-local conversation identifier.");
+compact_id!(MessageId, "Platform-local message identifier.");
+compact_id!(RoleId, "Platform-local role identifier.");
+compact_id!(UserId, "Platform-local user identifier.");
+
 /// Stable identity of one bot connection without lossy string concatenation.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct BotIdentity {
@@ -383,6 +483,21 @@ mod tests {
         assert_ne!(CompactId::from(42_u64), CompactId::from("42"));
         assert_eq!(CompactId::from(-42_i64).to_string(), "-42");
         assert_eq!(CompactId::from("room").estimated_bytes(), 4);
+    }
+
+    #[test]
+    fn typed_platform_ids_preserve_numeric_wire_values() {
+        let user = UserId::from(42_u64);
+        let conversation = ConversationId::from(-100_i64);
+        let message = MessageId::from("opaque-message");
+
+        assert_eq!(serde_json::to_value(user).expect("user ID serializes"), 42);
+        assert_eq!(
+            serde_json::to_value(conversation).expect("conversation ID serializes"),
+            -100
+        );
+        assert_eq!(message.to_string(), "opaque-message");
+        assert_eq!(MessageId::new(CompactId::from("")).unwrap_err(), InvalidId);
     }
 
     #[test]

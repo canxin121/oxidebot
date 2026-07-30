@@ -62,3 +62,31 @@ target-specific plan from the planner when necessary.
 An adapter is `Persistent` by default. A file importer, replay fixture, or
 bounded webhook batch must return `AdapterMode::Finite`; only finite adapters
 can be used with `run_to_completion`.
+
+## Identity types at the adapter boundary
+
+Do not flatten platform identities into unrelated `String` values. The
+canonical model distinguishes `UserId`, `ConversationId`, `MessageId`, and
+`RoleId`; each is a transparent wrapper around a lossless `CompactId`, so a
+numeric Telegram ID stays numeric when serialized. This makes accidental use
+of a user ID as a message ID a compile-time error.
+
+Construct an ID from a trusted adapter value with `Into` and let the canonical
+event fields determine its type:
+
+```rust,no_run
+use oxidebot::{Message, MessageId, UserId};
+use oxidebot::core::{ConversationRef, User};
+
+let sender = User::new(UserId::from(42_u64));
+let conversation = ConversationRef::direct_user(sender.id.clone());
+let mut message = Message::text("hello");
+message.id = Some(MessageId::from(7_u64));
+```
+
+`Message::id` is `Option<MessageId>`: a freshly authored outgoing message has
+no platform ID until delivery succeeds. For a handler extractor, use
+`IncomingMessageId`; the facade-level `MessageId` is the canonical identity
+value used by outbound APIs and message references. Command `Mention` values
+and template mentions likewise carry `UserId`, rather than a bare user-ID
+string.

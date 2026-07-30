@@ -17,6 +17,7 @@ use crate::{
     },
     conversation::MessageRef,
     interaction::{ActionRow, Button, InlineKeyboard, MessageComponents, PlatformNativeData},
+    ConversationId, MessageId, RoleId, UserId,
 };
 
 /// The single cross-platform message intermediate representation used for
@@ -24,10 +25,10 @@ use crate::{
 /// planning, and adapter export.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Message {
-    /// Platform message id for an inbound or already-sent message. It is empty
+    /// Platform message ID for an inbound or already-sent message. It is absent
     /// for a newly constructed outgoing message.
     #[serde(default)]
-    pub id: String,
+    pub id: Option<MessageId>,
     /// Ordered, lossless message segments.
     #[serde(default)]
     pub segments: Vec<MessageSegment>,
@@ -47,7 +48,7 @@ impl Message {
     #[must_use]
     pub fn text(content: impl Into<String>) -> Self {
         Self {
-            id: String::new(),
+            id: None,
             segments: vec![MessageSegment::text(content)],
             options: MessageOptions::default(),
         }
@@ -159,13 +160,13 @@ impl Message {
 
     /// Appends a user mention.
     #[must_use]
-    pub fn at(self, user_id: impl Into<String>) -> Self {
+    pub fn at(self, user_id: impl Into<UserId>) -> Self {
         self.then(MessageSegment::at(user_id))
     }
 
     /// Appends a role mention.
     #[must_use]
-    pub fn at_role(self, role_id: impl Into<String>) -> Self {
+    pub fn at_role(self, role_id: impl Into<RoleId>) -> Self {
         self.then(MessageSegment::AtRole {
             role_id: role_id.into(),
         })
@@ -173,7 +174,7 @@ impl Message {
 
     /// Appends a channel mention.
     #[must_use]
-    pub fn at_channel(self, channel_id: impl Into<String>) -> Self {
+    pub fn at_channel(self, channel_id: impl Into<ConversationId>) -> Self {
         self.then(MessageSegment::AtChannel {
             channel_id: channel_id.into(),
         })
@@ -187,14 +188,14 @@ impl Message {
 
     /// Sets a reply target by platform message identifier.
     #[must_use]
-    pub fn reply_to(mut self, message_id: impl Into<String>) -> Self {
-        self.options.reply = Some(ReplyOptions::new(MessageRef::new(message_id.into())));
+    pub fn reply_to(mut self, message_id: impl Into<MessageId>) -> Self {
+        self.options.reply = Some(ReplyOptions::new(MessageRef::new(message_id)));
         self
     }
 
     /// Appends a reference to another message.
     #[must_use]
-    pub fn reference(self, message_id: impl Into<String>) -> Self {
+    pub fn reference(self, message_id: impl Into<MessageId>) -> Self {
         self.then(MessageSegment::reference(message_id))
     }
 
@@ -272,19 +273,16 @@ impl Message {
     }
 
     /// Iterates explicitly mentioned user identifiers in segment order.
-    pub fn mentioned_users(&self) -> impl DoubleEndedIterator<Item = &str> {
+    pub fn mentioned_users(&self) -> impl DoubleEndedIterator<Item = &UserId> {
         self.segments.iter().filter_map(|segment| match segment {
-            MessageSegment::At { user_id } => Some(user_id.as_str()),
+            MessageSegment::At { user_id } => Some(user_id),
             _ => None,
         })
     }
 
     /// Iterates configured reply target identifiers.
-    pub fn reply_ids(&self) -> impl DoubleEndedIterator<Item = &str> {
-        self.options
-            .reply
-            .iter()
-            .map(|reply| reply.message.id.as_str())
+    pub fn reply_ids(&self) -> impl DoubleEndedIterator<Item = &MessageId> {
+        self.options.reply.iter().map(|reply| &reply.message.id)
     }
 
     /// Consumes the message and returns its normalized segments.
@@ -423,7 +421,7 @@ impl Message {
 
     /// Returns whether the message explicitly mentions `user_id`.
     #[must_use]
-    pub fn is_related_to_user(&self, user_id: &str) -> bool {
+    pub fn is_related_to_user(&self, user_id: &UserId) -> bool {
         self.segments.iter().any(|segment| match segment {
             MessageSegment::At { user_id: id } => id == user_id,
             _ => false,
@@ -438,7 +436,7 @@ impl Message {
         policy: FallbackPolicy,
     ) -> Result<DeliveryPlan, DeliveryPlanningError> {
         let mut message = Self {
-            id: String::new(),
+            id: None,
             segments: Vec::with_capacity(self.segments.len()),
             options: self.options.clone(),
         };
@@ -488,7 +486,8 @@ impl Message {
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         self.id
-            .len()
+            .as_ref()
+            .map_or(0, MessageId::estimated_bytes)
             .saturating_add(
                 self.segments
                     .iter()
@@ -517,24 +516,24 @@ pub enum MessageSegment {
     /// Mention of a user identifier.
     At {
         /// Platform-local user identifier.
-        user_id: String,
+        user_id: UserId,
     },
     /// Mention of a role identifier.
     AtRole {
         /// Platform-local role identifier.
-        role_id: String,
+        role_id: RoleId,
     },
     /// Mention of a channel identifier.
     AtChannel {
         /// Platform-local channel identifier.
-        channel_id: String,
+        channel_id: ConversationId,
     },
     /// Mention of all conversation members.
     AtAll,
     /// Reference to an existing platform message.
     Reference {
         /// Referenced platform message identifier.
-        message_id: String,
+        message_id: MessageId,
     },
     /// Share-card content.
     Share {
@@ -550,7 +549,7 @@ pub enum MessageSegment {
     /// Reference to a forwarded platform message.
     ForwardNode {
         /// Referenced platform message identifier.
-        message_id: String,
+        message_id: MessageId,
     },
     /// Fully modeled forwarded content.
     ForwardCustomNode {
@@ -727,7 +726,7 @@ impl MessageSegment {
 
     /// Creates a user-mention segment.
     #[must_use]
-    pub fn at(user_id: impl Into<String>) -> Self {
+    pub fn at(user_id: impl Into<UserId>) -> Self {
         Self::At {
             user_id: user_id.into(),
         }
@@ -741,7 +740,7 @@ impl MessageSegment {
 
     /// Creates an existing-message reference segment.
     #[must_use]
-    pub fn reference(message_id: impl Into<String>) -> Self {
+    pub fn reference(message_id: impl Into<MessageId>) -> Self {
         Self::Reference {
             message_id: message_id.into(),
         }
@@ -794,7 +793,7 @@ impl MessageSegment {
 
     /// Creates a forwarded-message reference segment.
     #[must_use]
-    pub fn forward_node(message_id: impl Into<String>) -> Self {
+    pub fn forward_node(message_id: impl Into<MessageId>) -> Self {
         Self::ForwardNode {
             message_id: message_id.into(),
         }
@@ -936,17 +935,12 @@ impl MessageSegment {
                     .len()
                     .saturating_mul(std::mem::size_of::<crate::content::TextSpan>()),
             ),
-            Self::Reference { message_id }
-            | Self::ForwardNode { message_id }
-            | Self::At {
-                user_id: message_id,
+            Self::Reference { message_id } | Self::ForwardNode { message_id } => {
+                message_id.estimated_bytes()
             }
-            | Self::AtRole {
-                role_id: message_id,
-            }
-            | Self::AtChannel {
-                channel_id: message_id,
-            } => message_id.len(),
+            Self::At { user_id } => user_id.estimated_bytes(),
+            Self::AtRole { role_id } => role_id.estimated_bytes(),
+            Self::AtChannel { channel_id } => channel_id.estimated_bytes(),
             Self::AtAll => 0,
             Self::Share {
                 title,
@@ -960,7 +954,7 @@ impl MessageSegment {
                 .saturating_add(image.as_ref().map_or(0, File::estimated_bytes)),
             Self::ForwardCustomNode { user, message } => user
                 .as_ref()
-                .map_or(0, |user| user.id.len())
+                .map_or(0, |user| user.id.estimated_bytes())
                 .saturating_add(message.estimated_bytes()),
             Self::Media { media, .. } => media.file.estimated_bytes().saturating_add(
                 media

@@ -452,13 +452,10 @@ mod tests {
                 Event::Message(MessageEvent {
                     id: "wake-up".to_owned(),
                     time: None,
-                    sender: User {
-                        id: "user".to_owned(),
-                        ..User::default()
-                    },
+                    sender: User::new("user"),
                     conversation: ConversationRef::direct("room"),
                     message: Message {
-                        id: "1".to_owned(),
+                        id: Some("1".into()),
                         segments: vec![MessageSegment::text("hello")],
                         options: Default::default(),
                     },

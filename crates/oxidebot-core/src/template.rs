@@ -1,6 +1,6 @@
 //! Structure-preserving message templates and typed segment selectors.
 
-use crate::{File, Message, MessageSegment, SegmentKind};
+use crate::{File, Message, MessageSegment, SegmentKind, UserId};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
@@ -165,7 +165,7 @@ pub enum TemplateValue {
     /// One portable segment.
     Segment(Box<MessageSegment>),
     /// User identifier rendered as a mention.
-    Mention(String),
+    Mention(UserId),
     /// File rendered as an attachment.
     File(File),
 }
@@ -173,7 +173,7 @@ pub enum TemplateValue {
 impl TemplateValue {
     /// Creates a mention value.
     #[must_use]
-    pub fn mention(user_id: impl Into<String>) -> Self {
+    pub fn mention(user_id: impl Into<UserId>) -> Self {
         Self::Mention(user_id.into())
     }
 
@@ -380,7 +380,7 @@ fn render_value(
         }
         (TemplateKind::Text, value) => output.push(match value {
             TemplateValue::Text(value) => value.clone(),
-            TemplateValue::Mention(value) => value.clone(),
+            TemplateValue::Mention(value) => value.to_string(),
             TemplateValue::File(value) => value.name.clone(),
             TemplateValue::Segment(value) => value.fallback_text().unwrap_or_default(),
             TemplateValue::Message(value) => value.extract_plain_text(),

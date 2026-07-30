@@ -389,7 +389,7 @@ impl MessageFrame {
             id,
             conversation,
             actor: actor.into(),
-            sender: User::default(),
+            sender: User::new(CompactId::from("pending-actor")),
             message,
             occurred_at: Some(SystemTime::now()),
         }
@@ -402,11 +402,11 @@ impl MessageFrame {
         id: EventId,
         conversation: ConversationRef,
         actor: impl Into<CompactId>,
-        message_id: impl Into<String>,
+        message_id: impl Into<oxidebot_core::MessageId>,
         text: impl Into<String>,
     ) -> Self {
         let mut message = Message::text(text);
-        message.id = message_id.into();
+        message.id = Some(message_id.into());
         Self::new(id, conversation, actor, message)
     }
 
@@ -427,7 +427,7 @@ impl MessageFrame {
     }
 
     fn with_default_sender(mut self) -> Self {
-        self.sender.id = self.actor.to_string();
+        self.sender.id = self.actor.clone().into();
         self
     }
 
@@ -470,7 +470,7 @@ fn optional_string_bytes(value: &Option<String>) -> usize {
 }
 
 fn user_retained_bytes(user: &User) -> usize {
-    let mut bytes = user.id.capacity().saturating_add(64);
+    let mut bytes = user.id.estimated_bytes().saturating_add(64);
     if let Some(profile) = &user.profile {
         bytes = bytes
             .saturating_add(optional_string_bytes(&profile.display_name))
@@ -487,7 +487,7 @@ fn user_retained_bytes(user: &User) -> usize {
 fn conversation_retained_bytes(conversation: &ConversationRef) -> usize {
     conversation
         .id
-        .capacity()
+        .estimated_bytes()
         .saturating_add(
             conversation
                 .parent
@@ -509,20 +509,19 @@ impl InboundFrame for MessageFrame {
         self.id
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid message event id: {error}")))?;
-        CompactId::from(self.conversation.id.clone())
+        self.conversation
+            .id
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid conversation id: {error}")))?;
         self.actor
             .validate()
             .map_err(|error| DecodeError::new(format!("invalid actor id: {error}")))?;
         if let Some(parent) = &self.conversation.parent {
-            CompactId::from(parent.id.clone())
-                .validate()
-                .map_err(|error| {
-                    DecodeError::new(format!("invalid parent conversation id: {error}"))
-                })?;
+            parent.id.validate().map_err(|error| {
+                DecodeError::new(format!("invalid parent conversation id: {error}"))
+            })?;
         }
-        if self.message.id.is_empty() {
+        if self.message.id.is_none() {
             return Err(DecodeError::new("message id must not be empty"));
         }
         Ok(FrameIndex::one(
@@ -929,7 +928,7 @@ impl AdapterContext {
         id: EventId,
         conversation: ConversationRef,
         actor: impl Into<CompactId>,
-        message_id: impl Into<String>,
+        message_id: impl Into<oxidebot_core::MessageId>,
         text: impl Into<String>,
     ) -> std::result::Result<Submission, AdapterError> {
         self.submit(MessageFrame::text(
@@ -1160,10 +1159,7 @@ mod retained_size_tests {
         let event = Event::Message(MessageEvent {
             id: "message-1".into(),
             time: None,
-            sender: User {
-                id: "alice".into(),
-                ..User::default()
-            },
+            sender: User::new("alice"),
             conversation: ConversationRef::group("room"),
             message: Message::text("/ping one"),
         });
@@ -1194,10 +1190,7 @@ mod retained_size_tests {
             kind: oxidebot_core::interaction::InteractionKind::Button,
             action_id: Some("approve".into()),
             values: Vec::new(),
-            user: User {
-                id: "alice".into(),
-                ..User::default()
-            },
+            user: User::new("alice"),
             conversation: None,
             message: None,
             context_id: None,

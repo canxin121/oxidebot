@@ -118,7 +118,7 @@ impl std::fmt::Debug for Bot {
 pub struct Reply {
     bot: BotHandle,
     target: MessageTarget,
-    reply_to: Option<String>,
+    reply_to: Option<oxidebot_core::MessageId>,
     fallback: FallbackPolicy,
     pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
 }
@@ -127,7 +127,7 @@ impl Reply {
     pub(crate) fn new(
         bot: BotHandle,
         target: MessageTarget,
-        reply_to: Option<String>,
+        reply_to: Option<oxidebot_core::MessageId>,
         pipeline: Option<Arc<dyn ErasedDeliveryPipeline>>,
     ) -> Self {
         Self {
@@ -247,11 +247,8 @@ impl Receipt {
     }
 
     /// Iterates over the identifiers of every delivered physical message.
-    pub fn ids(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.report
-            .messages
-            .iter()
-            .map(|message| message.id.as_str())
+    pub fn ids(&self) -> impl ExactSizeIterator<Item = &oxidebot_core::MessageId> {
+        self.report.messages.iter().map(|message| &message.id)
     }
 
     /// Returns whether capability fallback degraded this delivery.

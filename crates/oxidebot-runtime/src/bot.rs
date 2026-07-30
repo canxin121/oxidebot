@@ -839,13 +839,13 @@ fn append_public_conversation_key(conversation: &PublicConversationRef, output: 
         ConversationKind::Unknown => "unknown:",
         ConversationKind::PlatformNative(_) => "native:",
     });
-    output.push_str(&conversation.id);
+    output.push_str(&conversation.id.to_string());
 }
 
 fn public_conversation_bytes(conversation: &PublicConversationRef) -> usize {
     conversation
         .id
-        .len()
+        .estimated_bytes()
         .saturating_add(
             conversation
                 .parent
@@ -858,8 +858,14 @@ fn public_conversation_bytes(conversation: &PublicConversationRef) -> usize {
 
 fn public_target_bytes(target: &PublicMessageTarget) -> usize {
     public_conversation_bytes(&target.conversation)
-        .saturating_add(target.recipients.iter().map(String::len).sum::<usize>())
-        .saturating_add(target.recipients.capacity() * std::mem::size_of::<String>())
+        .saturating_add(
+            target
+                .recipients
+                .iter()
+                .map(oxidebot_core::UserId::estimated_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(target.recipients.capacity() * std::mem::size_of::<oxidebot_core::UserId>())
         .saturating_add(serialized_size(&target.platform_data))
         .saturating_add(64)
 }
@@ -867,7 +873,7 @@ fn public_target_bytes(target: &PublicMessageTarget) -> usize {
 fn public_message_ref_bytes(message: &PublicMessageRef) -> usize {
     message
         .id
-        .len()
+        .estimated_bytes()
         .saturating_add(
             message
                 .conversation

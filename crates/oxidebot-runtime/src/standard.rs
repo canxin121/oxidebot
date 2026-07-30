@@ -153,9 +153,9 @@ where
 #[async_trait]
 pub trait LocaleStorage: Send + Sync + 'static {
     /// Persists `locale` as the preferred locale for `user_id`.
-    async fn set_locale(&self, user_id: &str, locale: &str) -> HandlerResult<()>;
+    async fn set_locale(&self, user_id: &oxidebot_core::UserId, locale: &str) -> HandlerResult<()>;
     /// Loads the preferred locale for `user_id`, if one has been stored.
-    async fn get_locale(&self, user_id: &str) -> HandlerResult<Option<Arc<str>>>;
+    async fn get_locale(&self, user_id: &oxidebot_core::UserId) -> HandlerResult<Option<Arc<str>>>;
 }
 
 /// Locale resolver that first consults [`LocaleStorage`] in application state.
@@ -169,8 +169,8 @@ where
 {
     async fn resolve(&self, context: &Context<S>) -> Option<Arc<str>> {
         let user_id = match context.event() {
-            oxidebot_core::Event::Message(event) => Some(event.sender.id.as_str()),
-            oxidebot_core::Event::Interaction(event) => Some(event.user.id.as_str()),
+            oxidebot_core::Event::Message(event) => Some(&event.sender.id),
+            oxidebot_core::Event::Interaction(event) => Some(&event.user.id),
             _ => None,
         };
         if let Some(locale) = match user_id {

@@ -117,7 +117,7 @@ Segments
 Sender
 Conversation
 MaybeConversation
-MessageId
+IncomingMessageId
 Target
 State<S>
 Bot

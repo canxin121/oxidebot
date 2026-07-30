@@ -63,8 +63,8 @@ async fn handlers_receive_the_canonical_event_model() {
     let features = Module::new().on(
         tags::Message,
         |context: EventContext<tags::Message>| async move {
-            assert_eq!(context.event().sender.id, "user");
-            assert_eq!(context.event().conversation.id, "room");
+            assert_eq!(context.event().sender.id, "user".into());
+            assert_eq!(context.event().conversation.id, "room".into());
             assert_eq!(context.event().message.get_raw_text(), "hello");
             Outcome::continue_()
         },

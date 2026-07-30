@@ -164,8 +164,10 @@ impl EventContext<tags::Message> {
 
     /// Sends a reply to the current message.
     pub async fn reply(&self, message: impl Into<Message>) -> Result<DeliveryReport, HandlerError> {
-        self.send(message.into().reply_to(self.event().message.id.clone()))
-            .await
+        let message_id = self.event().message.id.clone().ok_or_else(|| {
+            HandlerError::internal("the current message has no platform message ID")
+        })?;
+        self.send(message.into().reply_to(message_id)).await
     }
 
     /// Prompts the sender, waits for their next session-scoped message, and parses it as `T`.

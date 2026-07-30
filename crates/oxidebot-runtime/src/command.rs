@@ -2817,7 +2817,7 @@ pub enum CommandValue {
     /// Text token from command input.
     Text(String),
     /// Mention token retaining its user ID.
-    Mention(String),
+    Mention(oxidebot_core::UserId),
     /// File token retaining its portable descriptor.
     File(File),
     /// Rich message segment supplied as a command token.
@@ -2876,7 +2876,7 @@ fn form_value_label(value: &FormValue) -> String {
         FormValue::Time(value) => value.to_string(),
         FormValue::DateTime(value) => value.to_rfc3339(),
         FormValue::User(value) => format!("@{}", value.id),
-        FormValue::Conversation(value) => value.id.clone(),
+        FormValue::Conversation(value) => value.id.to_string(),
         FormValue::File(value) => {
             if value.name.is_empty() {
                 "[file]".to_owned()
@@ -2911,7 +2911,7 @@ impl FromCommandValue for FormValue {
         match value {
             CommandValue::Form(value) => Ok(value),
             CommandValue::Text(value) => Ok(Self::Text(value)),
-            CommandValue::Mention(user_id) => Ok(Self::Text(user_id)),
+            CommandValue::Mention(user_id) => Ok(Self::Text(user_id.to_string())),
             CommandValue::File(file) => Ok(Self::File(file)),
             CommandValue::Segment(segment) => Ok(Self::Text(format!("{segment:?}"))),
         }
@@ -2945,13 +2945,13 @@ impl FromCommandValue for File {
 
 /// A typed `@user` command argument.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Mention(pub String);
+pub struct Mention(pub oxidebot_core::UserId);
 
 impl FromCommandValue for Mention {
     fn from_command_value(value: CommandValue) -> Result<Self, CommandParseError> {
         match value {
-            CommandValue::Mention(user_id)
-            | CommandValue::Segment(MessageSegment::At { user_id }) => Ok(Self(user_id)),
+            CommandValue::Mention(user_id) => Ok(Self(user_id)),
+            CommandValue::Segment(MessageSegment::At { user_id }) => Ok(Self(user_id)),
             CommandValue::Form(FormValue::User(user)) => Ok(Self(user.id)),
             other => Err(CommandParseError::UnexpectedValue {
                 expected: "mention",
@@ -4241,7 +4241,9 @@ pub fn tokenize_segments(
                         .map(CommandValue::Text),
                 );
             }
-            MessageSegment::At { user_id } => output.push(CommandValue::Mention(user_id.clone())),
+            MessageSegment::At { user_id } => {
+                output.push(CommandValue::Mention(user_id.clone()));
+            }
             MessageSegment::Media { media, .. } => {
                 output.push(CommandValue::File(media.file.clone()));
             }

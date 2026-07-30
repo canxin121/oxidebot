@@ -1,12 +1,32 @@
 use serde::{Deserialize, Serialize};
 
+use crate::UserId;
+
 /// A platform user and optional profile data.
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
     /// Platform-local stable user identifier.
-    pub id: String,
+    pub id: UserId,
     /// Profile details exposed by the platform.
     pub profile: Option<UserProfile>,
+}
+
+impl User {
+    /// Creates a platform user with no optional profile data.
+    #[must_use]
+    pub fn new(id: impl Into<UserId>) -> Self {
+        Self {
+            id: id.into(),
+            profile: None,
+        }
+    }
+
+    /// Attaches profile data reported by the platform.
+    #[must_use]
+    pub fn profile(mut self, profile: UserProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
 }
 
 /// Optional gender value exposed by a platform profile.

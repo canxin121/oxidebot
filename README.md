@@ -149,7 +149,7 @@ async fn greet(
 
 Built-in extractors include:
 
-- `Text`, `Segments`, `Sender`, `Conversation`, `MaybeConversation`, `MessageId`, and
+- `Text`, `Segments`, `Sender`, `Conversation`, `MaybeConversation`, `IncomingMessageId`, and
   `Target`;
 - root `State<S>` and the common `Context<S>`;
 - typed command `Args<T>` and raw `CommandMatch`;

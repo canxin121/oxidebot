@@ -12,8 +12,9 @@ use oxidebot_core::{
         message::{DeliveryPlan, DeliveryReport, Message},
         user::User,
     },
-    BotCapabilities, BotId, CallApiTrait, CallResult, ConversationRef, DeliveryReportBuilder,
-    Event, EventId, MessageRef, MessageTarget, PlatformId, SupportLevel,
+    BotCapabilities, BotId, CallApiTrait, CallResult, ConversationId, ConversationRef,
+    DeliveryReportBuilder, Event, EventId, MessageRef, MessageTarget, PlatformId, SupportLevel,
+    UserId,
 };
 use oxidebot_runtime::{
     Adapter, AdapterContext, AdapterError, AdapterMode, BotDescriptor, BotServices,
@@ -29,11 +30,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 /// Configuration for the finite stdin/stdout development adapter.
 pub struct ConsoleConfig {
     /// Platform-owned identity used for the console bot.
-    pub bot_id: String,
+    pub bot_id: BotId,
     /// Identity assigned to each line read from standard input.
-    pub user_id: String,
+    pub user_id: UserId,
     /// Direct-conversation identity assigned to console input.
-    pub conversation_id: String,
+    pub conversation_id: ConversationId,
     /// Whether startup guidance is printed before the adapter reads input.
     pub prompt: bool,
 }
@@ -41,9 +42,9 @@ pub struct ConsoleConfig {
 impl Default for ConsoleConfig {
     fn default() -> Self {
         Self {
-            bot_id: "console-bot".to_owned(),
-            user_id: "console-user".to_owned(),
-            conversation_id: "console".to_owned(),
+            bot_id: BotId::new("console-bot").expect("static console bot ID is valid"),
+            user_id: UserId::from("console-user"),
+            conversation_id: ConversationId::from("console"),
             prompt: true,
         }
     }
@@ -58,22 +59,22 @@ impl ConsoleConfig {
 
     #[must_use]
     /// Replaces the console bot identity.
-    pub fn bot_id(mut self, value: impl Into<String>) -> Self {
-        self.bot_id = value.into();
+    pub fn bot_id(mut self, value: BotId) -> Self {
+        self.bot_id = value;
         self
     }
 
     #[must_use]
     /// Replaces the simulated input-user identity.
-    pub fn user_id(mut self, value: impl Into<String>) -> Self {
-        self.user_id = value.into();
+    pub fn user_id(mut self, value: UserId) -> Self {
+        self.user_id = value;
         self
     }
 
     #[must_use]
     /// Replaces the simulated direct-conversation identity.
-    pub fn conversation_id(mut self, value: impl Into<String>) -> Self {
-        self.conversation_id = value.into();
+    pub fn conversation_id(mut self, value: ConversationId) -> Self {
+        self.conversation_id = value;
         self
     }
 
@@ -136,7 +137,7 @@ impl ConsoleAdapter {
     pub fn new(config: ConsoleConfig) -> std::result::Result<Self, oxidebot_core::InvalidId> {
         Ok(Self {
             platform: PlatformId::new("console")?,
-            bot: BotId::new(config.bot_id.clone())?,
+            bot: config.bot_id.clone(),
             config,
             api: ConsoleApi::default(),
         })
@@ -149,7 +150,7 @@ impl ConsoleAdapter {
 
     /// Creates a development adapter with one explicit bot identity.
     pub fn named(bot_id: impl Into<String>) -> std::result::Result<Self, oxidebot_core::InvalidId> {
-        Self::new(ConsoleConfig::new().bot_id(bot_id))
+        Self::new(ConsoleConfig::new().bot_id(BotId::new(bot_id.into())?))
     }
 }
 
@@ -195,17 +196,15 @@ impl Adapter for ConsoleAdapter {
                     sequence = sequence.saturating_add(1);
                     let event_id = EventId::new(format!("console-event-{sequence}"))
                         .map_err(|error| AdapterError::new(error.to_string()))?;
+                    let message_id = format!("console-message-{sequence}");
                     let mut message = Message::text(line);
-                    message.id = format!("console-message-{sequence}");
+                    message.id = Some(message_id.clone().into());
                     context.submit_event(
                         event_id,
                         Event::Message(MessageEvent {
-                            id: message.id.clone(),
+                            id: message_id,
                             time: None,
-                            sender: User {
-                                id: self.config.user_id.clone(),
-                                ..User::default()
-                            },
+                            sender: User::new(self.config.user_id.clone()),
                             conversation: ConversationRef::direct(
                                 self.config.conversation_id.clone(),
                             ),
@@ -240,7 +239,7 @@ mod tests {
         oxidebot_testkit::adapter_contract::assert_complete(&plan, &report)
             .expect("console report satisfies the adapter delivery contract");
         assert_eq!(report.messages.len(), 2);
-        assert_eq!(report.messages[0].id, "console-1");
-        assert_eq!(report.messages[1].id, "console-2");
+        assert_eq!(report.messages[0].id, "console-1".into());
+        assert_eq!(report.messages[1].id, "console-2".into());
     }
 }

@@ -123,12 +123,12 @@ impl Deref for MaybeConversation {
     }
 }
 
-/// Extracted platform message identifier.
+/// Extracted identifier of the current inbound platform message.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MessageId(pub String);
+pub struct IncomingMessageId(pub oxidebot_core::MessageId);
 
-impl Deref for MessageId {
-    type Target = str;
+impl Deref for IncomingMessageId {
+    type Target = oxidebot_core::MessageId;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -265,14 +265,14 @@ where
     }
 }
 
-impl<S> Extract<S> for MessageId
+impl<S> Extract<S> for IncomingMessageId
 where
     S: Send + Sync + 'static,
 {
     fn extract(context: &Context<S>) -> Result<Self, ExtractError> {
         context
             .message()
-            .map(|event| Self(event.message.id.clone()))
+            .and_then(|event| event.message.id.clone().map(Self))
             .ok_or_else(|| ExtractError::new("this event has no message id"))
     }
 }
@@ -320,7 +320,7 @@ where
         })?;
         let target = reply_target(context.event())
             .ok_or_else(|| ExtractError::new("this event has no natural reply target"))?;
-        let reply_to = context.message().map(|event| event.message.id.clone());
+        let reply_to = context.message().and_then(|event| event.message.id.clone());
         let pipeline: Arc<dyn crate::authoring::ErasedDeliveryPipeline> =
             Arc::new(crate::authoring::BoundDeliveryPipeline {
                 runtime: context.authoring_arc(),

@@ -204,8 +204,8 @@ pub(crate) fn reply_target(event: &Event) -> Option<MessageTarget> {
         MessageTarget::new(conversation.clone())
     }
 
-    fn direct(id: &str) -> MessageTarget {
-        MessageTarget::new(ConversationRef::direct(id.to_owned()))
+    fn direct(id: &oxidebot_core::UserId) -> MessageTarget {
+        MessageTarget::new(ConversationRef::direct_user(id.clone()))
     }
 
     match event {

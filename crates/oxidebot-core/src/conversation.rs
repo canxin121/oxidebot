@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     interaction::PlatformNativeData,
     source::{message::File, user::User},
+    ConversationId, MessageId, RoleId, UserId,
 };
 
 /// Portable kind of a conversation address.
@@ -37,7 +38,7 @@ pub enum ConversationKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationRef {
     /// Platform-local conversation identifier.
-    pub id: String,
+    pub id: ConversationId,
     /// Portable conversation kind.
     pub kind: ConversationKind,
     /// Parent conversation for threads or topics.
@@ -48,7 +49,7 @@ pub struct ConversationRef {
 
 impl ConversationRef {
     /// Creates a root conversation address.
-    pub fn new(id: impl Into<String>, kind: ConversationKind) -> Self {
+    pub fn new(id: impl Into<ConversationId>, kind: ConversationKind) -> Self {
         Self {
             id: id.into(),
             kind,
@@ -58,12 +59,20 @@ impl ConversationRef {
     }
 
     /// Creates a direct conversation address.
-    pub fn direct(id: impl Into<String>) -> Self {
+    pub fn direct(id: impl Into<ConversationId>) -> Self {
         Self::new(id, ConversationKind::Direct)
     }
 
+    /// Creates a direct conversation addressed by a platform user ID without
+    /// losing whether that platform ID was numeric or textual.
+    #[must_use]
+    pub fn direct_user(user_id: impl Into<UserId>) -> Self {
+        let user_id = user_id.into();
+        Self::direct(ConversationId::from(user_id.as_compact().clone()))
+    }
+
     /// Creates a group conversation address.
-    pub fn group(id: impl Into<String>) -> Self {
+    pub fn group(id: impl Into<ConversationId>) -> Self {
         Self::new(id, ConversationKind::Group)
     }
 
@@ -84,7 +93,7 @@ impl ConversationRef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageRef {
     /// Platform-local message identifier.
-    pub id: String,
+    pub id: MessageId,
     /// Conversation containing the message, if known.
     pub conversation: Option<ConversationRef>,
     /// Lossless platform-specific message-reference metadata.
@@ -93,7 +102,7 @@ pub struct MessageRef {
 
 impl MessageRef {
     /// Creates an unscoped message reference.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<MessageId>) -> Self {
         Self {
             id: id.into(),
             conversation: None,
@@ -115,7 +124,7 @@ pub struct MessageTarget {
     pub conversation: ConversationRef,
     /// Optional recipients for platforms that address multiple users inside a
     /// conversation or support a fan-out request.
-    pub recipients: Vec<String>,
+    pub recipients: Vec<UserId>,
     /// Lossless platform-specific targeting metadata.
     pub platform_data: Option<PlatformNativeData>,
 }
@@ -131,7 +140,7 @@ impl MessageTarget {
     }
 
     /// Replaces explicit recipient identifiers.
-    pub fn recipients(mut self, recipients: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn recipients(mut self, recipients: impl IntoIterator<Item = impl Into<UserId>>) -> Self {
         self.recipients = recipients.into_iter().map(Into::into).collect();
         self
     }
@@ -225,7 +234,7 @@ pub struct PermissionSet {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRef {
     /// Platform role identifier.
-    pub id: String,
+    pub id: RoleId,
     /// Optional user-visible role name.
     pub name: Option<String>,
     /// Permissions granted by the role.

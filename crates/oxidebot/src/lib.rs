@@ -12,17 +12,18 @@ pub use oxidebot_runtime as runtime;
 // additions in core/runtime from silently becoming facade-level SemVer
 // commitments.
 pub use oxidebot_core::{
-    event, BotId, BotIdentity, CallApiTrait, CallError, CallResult, DeliveryReportBuilder, Event,
-    EventId, Message, PlatformId,
+    event, BotId, BotIdentity, CallApiTrait, CallError, CallResult, ConversationId,
+    DeliveryReportBuilder, Event, EventId, Message, MessageId, PlatformId, RoleId, UserId,
 };
 pub use oxidebot_runtime::{
     command, Adapter, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandEnum,
     CommandTree, CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue,
     DialogueForm, DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt,
-    FromState, GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
-    MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, PluginBundle,
-    PluginMetadata, Propagation, Receipt, Reply, Responder, Result, ResultExt, RuntimeMetrics,
-    RuntimeProfile, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
+    FromState, GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, IncomingMessageId,
+    MaybeConversation, MessageContext, Messenger, Module, OptionExt, Outcome, OxideBot,
+    PluginBundle, PluginMetadata, Propagation, Receipt, Reply, Responder, Result, ResultExt,
+    RuntimeMetrics, RuntimeProfile, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target,
+    Text,
 };
 
 /// Derives a strongly typed command schema and parser.
@@ -32,13 +33,13 @@ pub use oxidebot_macros::{
 
 /// Typed values that ordinary handler functions may request.
 pub mod extract {
-    pub use oxidebot_core::{BotIdentity, EventId};
+    pub use oxidebot_core::{BotIdentity, EventId, MessageId};
     pub use oxidebot_runtime::{
         Args, Bot, BranchArgs, CommandRegistry, ConfirmationWords, Context, Conversation, Dialogue,
         DialogueForm, DialogueFormFuture, DialogueQuestion, EventContext, Extract, ExtractError,
-        FromState, I18n, I18nMessage, MaybeConversation, MessageContext, MessageId, Messenger,
-        OptionExt, Reply, Resolve, Responder, ResultExt, Segments, Sender, ShutdownSignal, State,
-        Target, Text,
+        FromState, I18n, I18nMessage, IncomingMessageId, MaybeConversation, MessageContext,
+        Messenger, OptionExt, Reply, Resolve, Responder, ResultExt, Segments, Sender,
+        ShutdownSignal, State, Target, Text,
     };
 }
 
@@ -186,8 +187,8 @@ pub mod prelude {
             message::{File, Message, MessageOptions, MessageSegment, SegmentKind},
             user::User,
         },
-        BotId, BotIdentity, CallApiTrait, CallError, CallResult, ConversationRef, EventId,
-        PlatformId,
+        BotId, BotIdentity, CallApiTrait, CallError, CallResult, ConversationId, ConversationRef,
+        EventId, MessageId, PlatformId, RoleId, UserId,
     };
     pub use oxidebot_macros::{
         branch, command, completer, BotCommand, BotState, CommandArgs, CommandEnum, DialogueForm,
@@ -197,9 +198,9 @@ pub mod prelude {
         CommandTree, CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue,
         DialogueForm, DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt,
         FromState, GuardDecision, GuardResult, HandlerError, HandlerResult, I18n,
-        MaybeConversation, MessageContext, MessageId, Messenger, Module, OptionExt, Outcome,
-        OxideBot, PluginBundle, Propagation, Receipt, Reply, Responder, ResultExt, Segments,
-        Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
+        IncomingMessageId, MaybeConversation, MessageContext, Messenger, Module, OptionExt,
+        Outcome, OxideBot, PluginBundle, Propagation, Receipt, Reply, Responder, ResultExt,
+        Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
     };
 }
 

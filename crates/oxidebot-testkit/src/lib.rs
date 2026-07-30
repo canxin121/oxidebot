@@ -149,13 +149,10 @@ impl InboundFrame for TestFrame {
         let event = Event::Message(MessageEvent {
             id: self.id.as_str().to_owned(),
             time: None,
-            sender: User {
-                id: actor_id,
-                ..User::default()
-            },
+            sender: User::new(actor_id),
             conversation: ConversationRef::direct(self.conversation.to_string()),
             message: Message {
-                id: message_id,
+                id: Some(message_id.into()),
                 segments: vec![MessageSegment::text(text)],
                 options: Default::default(),
             },
@@ -265,10 +262,7 @@ impl InboundFrame for InteractionFrame {
             kind: InteractionKind::Button,
             action_id: Some(self.action_id.to_string()),
             values: Vec::new(),
-            user: User {
-                id: actor_id,
-                ..User::default()
-            },
+            user: User::new(actor_id),
             conversation: Some(ConversationRef::direct(self.conversation.to_string())),
             message: None,
             context_id: Some(self.conversation.to_string()),
