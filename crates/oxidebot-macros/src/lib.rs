@@ -634,6 +634,105 @@ pub fn derive_command_args(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives a finite, strongly typed command choice enum.
+#[proc_macro_derive(CommandEnum, attributes(choice))]
+pub fn derive_command_enum(input: TokenStream) -> TokenStream {
+    match expand_command_enum(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn expand_command_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let oxidebot = oxidebot_crate();
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "CommandEnum does not support generic enums",
+        ));
+    }
+    let name = input.ident;
+    let Data::Enum(data) = input.data else {
+        return Err(syn::Error::new(
+            name.span(),
+            "CommandEnum can only be derived for an enum",
+        ));
+    };
+    let mut choice_builders = Vec::new();
+    let mut matches = Vec::new();
+    let mut accepted = Vec::new();
+    for variant in data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new(
+                variant.fields.span(),
+                "CommandEnum variants must be unit variants",
+            ));
+        }
+        let variant_name = variant.ident;
+        let mut value = ident_to_command_name(&variant_name.to_string());
+        let mut display = value.clone();
+        let mut aliases = Vec::new();
+        for attribute in variant
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("choice"))
+        {
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("value") {
+                    value = meta.value()?.parse::<LitStr>()?.value();
+                } else if meta.path.is_ident("name") {
+                    display = meta.value()?.parse::<LitStr>()?.value();
+                } else if meta.path.is_ident("alias") {
+                    aliases.push(meta.value()?.parse::<LitStr>()?.value());
+                } else {
+                    return Err(meta.error("unknown #[choice(...)] option"));
+                }
+                Ok(())
+            })?;
+        }
+        let mut builder = quote! {
+            #oxidebot::runtime::ArgumentChoice::new(#display, #value)
+        };
+        for alias in &aliases {
+            builder = quote! { #builder.alias(#alias) };
+        }
+        choice_builders.push(builder);
+        let mut patterns = vec![quote! { #value }];
+        patterns.extend(aliases.iter().map(|alias| quote! { #alias }));
+        matches.push(quote! { #(#patterns)|* => ::core::result::Result::Ok(Self::#variant_name), });
+        accepted.push(value);
+    }
+    Ok(quote! {
+        impl #oxidebot::runtime::CommandEnum for #name {
+            fn choices() -> ::std::vec::Vec<#oxidebot::runtime::ArgumentChoice> {
+                ::std::vec![#(#choice_builders),*]
+            }
+        }
+
+        impl #oxidebot::runtime::FromCommandValue for #name {
+            fn from_command_value(
+                value: #oxidebot::runtime::CommandValue,
+            ) -> ::core::result::Result<Self, #oxidebot::runtime::CommandParseError> {
+                let value = value.as_text().map(|value| value.to_owned()).ok_or(
+                    #oxidebot::runtime::CommandParseError::UnexpectedValue {
+                        expected: "text choice",
+                        actual: "non-text command value",
+                    },
+                )?;
+                match value.as_str() {
+                    #(#matches)*
+                    _ => ::core::result::Result::Err(
+                        #oxidebot::runtime::CommandParseError::InvalidChoice {
+                            argument: ::std::sync::Arc::from("value"),
+                            choices: ::std::sync::Arc::from([#(#accepted),*].join(", ")),
+                        },
+                    ),
+                }
+            }
+        }
+    })
+}
+
 /// Derives efficient `FromState` projections for an application state type.
 #[proc_macro_derive(BotState, attributes(state))]
 pub fn derive_bot_state(input: TokenStream) -> TokenStream {
@@ -955,6 +1054,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         command_options.description = doc_string(&input.attrs);
     }
     let mut schema_fields = Vec::new();
+    let mut grouped_fields = Vec::<(String, String)>::new();
     let mut initializers = Vec::new();
     let mut field_markers = Vec::new();
     let mut completer_bindings = Vec::new();
@@ -969,6 +1069,9 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             .ok_or_else(|| syn::Error::new(field.span(), "expected a named field"))?;
         let rust_name = ident.to_string().trim_start_matches("r#").to_owned();
         let argument_name = options.name.clone().unwrap_or_else(|| rust_name.clone());
+        for group in &options.groups {
+            grouped_fields.push((group.clone(), argument_name.clone()));
+        }
         let field_kind = FieldKind::of(&field.ty);
         let value_ty = match &field_kind {
             FieldKind::Plain(ty) | FieldKind::Option(ty) | FieldKind::Vec(ty) => *ty,
@@ -985,6 +1088,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let action_is_append = action_name.as_deref() == Some("append");
         let action_is_set_true = matches!(action_name.as_deref(), Some("set_true" | "true"));
         let action_is_set_false = matches!(action_name.as_deref(), Some("set_false" | "false"));
+        let value_enum = options.value_enum;
         let flag = options.flag
             || action_is_count
             || action_is_set_true
@@ -995,6 +1099,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         if options.skip {
             let has_conflicting_option = options.name.is_some()
                 || options.help.is_some()
+                || options.heading.is_some()
                 || options.prompt.is_some()
                 || options.value_name.is_some()
                 || options.long.is_some()
@@ -1004,6 +1109,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 || options.multiple
                 || options.rest
                 || options.flag
+                || options.hidden
                 || options.kind.is_some()
                 || options.action.is_some()
                 || !options.choices.is_empty()
@@ -1014,7 +1120,9 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 || options.min_length.is_some()
                 || options.max_length.is_some()
                 || !options.requires.is_empty()
-                || !options.conflicts.is_empty();
+                || !options.conflicts.is_empty()
+                || !options.groups.is_empty()
+                || options.validate.is_some();
             if has_conflicting_option {
                 return Err(syn::Error::new(
                     field.span(),
@@ -1063,6 +1171,18 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             return Err(syn::Error::new(
                 field.ty.span(),
                 "#[arg(action = \"append\")] requires Vec<T>",
+            ));
+        }
+        if value_enum && !options.choices.is_empty() {
+            return Err(syn::Error::new(
+                field.span(),
+                "#[arg(value_enum)] cannot be combined with explicit #[arg(choice = ...)] values",
+            ));
+        }
+        if options.validate.is_some() && (is_option || is_vec || flag) {
+            return Err(syn::Error::new(
+                field.span(),
+                "#[arg(validate = ...)] currently supports one non-flag field; validate Option<T> or Vec<T> in the handler",
             ));
         }
         if flag && !is_bool && !action_is_count {
@@ -1140,6 +1260,11 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             }
             FieldKind::Plain(_) => {}
         }
+        if value_enum {
+            inferred_bounds.push(syn::parse_quote!(
+                #value_ty: #oxidebot::runtime::CommandEnum
+            ));
+        }
         if options.default_uses_default {
             let ty = &field.ty;
             inferred_bounds.push(syn::parse_quote!(
@@ -1184,6 +1309,12 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         if !help.is_empty() {
             schema = quote! { #schema.help(#help) };
         }
+        if let Some(heading) = &options.heading {
+            schema = quote! { #schema.heading(#heading) };
+        }
+        if options.hidden {
+            schema = quote! { #schema.hidden() };
+        }
         if let Some(prompt) = prompt {
             schema = quote! { #schema.prompt(#prompt) };
         }
@@ -1203,6 +1334,12 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             schema = quote! {
                 #schema.choice(#oxidebot::runtime::ArgumentChoice::new(#choice, #choice))
             };
+        }
+        if value_enum {
+            schema = quote! { #schema.with_choices(<#value_ty as #oxidebot::runtime::CommandEnum>::choices()) };
+        }
+        if let Some(validator) = &options.validate {
+            schema = quote! { #schema.validate::<#value_ty, _, _>(#validator) };
         }
         if options.autocomplete {
             schema = quote! { #schema.autocomplete(true) };
@@ -1264,6 +1401,50 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         initializers.push(quote! { #ident: #initializer });
     }
 
+    let mut schema_groups = Vec::new();
+    let mut configured_group_names = ::std::collections::HashSet::new();
+    for group in &command_options.groups {
+        if group.name.trim().is_empty() || !configured_group_names.insert(group.name.clone()) {
+            return Err(syn::Error::new(
+                name.span(),
+                "command argument groups need unique, non-empty names",
+            ));
+        }
+        let members = grouped_fields
+            .iter()
+            .filter(|(name, _)| name == &group.name)
+            .map(|(_, field)| field)
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return Err(syn::Error::new(
+                name.span(),
+                format!(
+                    "command group `{}` does not contain any #[arg(group = ...)] fields",
+                    group.name
+                ),
+            ));
+        }
+        let group_name = &group.name;
+        let required = group.required;
+        let multiple = group.multiple;
+        schema_groups.push(quote! {
+            schema = schema.group(
+                #oxidebot::runtime::ArgumentGroup::new(#group_name)
+                    .arguments([#(#members),*])
+                    .required(#required)
+                    .multiple(#multiple),
+            );
+        });
+    }
+    for (group, _) in &grouped_fields {
+        if !configured_group_names.contains(group) {
+            return Err(syn::Error::new(
+                name.span(),
+                format!("field group `{group}` needs #[command(group(name = \"{group}\", ...))]",),
+            ));
+        }
+    }
+
     let command_builder = command_options.builder_tokens();
     let mut generics = input.generics;
     let predicates = &mut generics.make_where_clause().predicates;
@@ -1284,6 +1465,7 @@ fn expand_command_args(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             fn schema() -> #oxidebot::runtime::CommandSchema {
                 let mut schema = #oxidebot::runtime::CommandSchema::new();
                 #(#schema_fields)*
+                #(#schema_groups)*
                 schema
             }
 
@@ -1356,11 +1538,20 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         .name
         .clone()
         .unwrap_or_else(|| ident_to_command_name(&enum_name.to_string()));
+    let global_args = root_options.global_args.clone();
     let root_builder = root_options.builder_tokens();
+    let global_builder = global_args.as_ref().map(|global_args| {
+        quote! {
+            command = command.global_args::<#global_args>();
+        }
+    });
     let mut branch_builders = Vec::new();
     let mut match_arms = Vec::new();
     let mut nested_match_arms = Vec::new();
     let mut inferred_bounds = Vec::<syn::WherePredicate>::new();
+    if let Some(global_args) = &global_args {
+        inferred_bounds.push(syn::parse_quote!(#global_args: #oxidebot::runtime::CommandArgs));
+    }
     let mut branch_markers = Vec::new();
 
     for variant in data.variants {
@@ -1577,6 +1768,7 @@ fn expand_bot_command(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             fn command() -> #oxidebot::runtime::Command {
                 let command = #oxidebot::runtime::Command::new(#root_name);
                 let mut command = #root_builder;
+                #global_builder
                 #(#branch_builders)*
                 command
             }
@@ -1759,6 +1951,7 @@ fn is_integer_type(ty: &Type) -> bool {
 struct FieldOptions {
     name: Option<String>,
     help: Option<String>,
+    heading: Option<String>,
     prompt: Option<String>,
     value_name: Option<String>,
     long: Option<Option<String>>,
@@ -1769,11 +1962,13 @@ struct FieldOptions {
     multiple: bool,
     rest: bool,
     flag: bool,
+    hidden: bool,
     skip: bool,
     kind: Option<String>,
     action: Option<String>,
     choices: Vec<String>,
     autocomplete: bool,
+    value_enum: bool,
     complete: Option<Path>,
     min_value: Option<Expr>,
     max_value: Option<Expr>,
@@ -1781,6 +1976,8 @@ struct FieldOptions {
     max_length: Option<Expr>,
     requires: Vec<String>,
     conflicts: Vec<String>,
+    groups: Vec<String>,
+    validate: Option<Path>,
 }
 
 impl FieldOptions {
@@ -1796,6 +1993,8 @@ impl FieldOptions {
                     output.name = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.path.is_ident("help") {
                     output.help = Some(meta.value()?.parse::<LitStr>()?.value());
+                } else if meta.path.is_ident("heading") {
+                    output.heading = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.path.is_ident("prompt") {
                     output.prompt = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else if meta.path.is_ident("value_name") {
@@ -1828,6 +2027,8 @@ impl FieldOptions {
                     output.rest = true;
                 } else if meta.path.is_ident("flag") {
                     output.flag = true;
+                } else if meta.path.is_ident("hidden") {
+                    output.hidden = true;
                 } else if meta.path.is_ident("skip") {
                     output.skip = true;
                 } else if meta.path.is_ident("kind") {
@@ -1841,6 +2042,12 @@ impl FieldOptions {
                 } else if meta.path.is_ident("autocomplete") {
                     output.autocomplete = if meta.input.peek(syn::Token![=]) {
                         meta.value()?.parse::<syn::LitBool>()?.value()
+                    } else {
+                        true
+                    };
+                } else if meta.path.is_ident("value_enum") {
+                    output.value_enum = if meta.input.peek(syn::Token![=]) {
+                        meta.value()?.parse::<syn::LitBool>()?.value
                     } else {
                         true
                     };
@@ -1863,6 +2070,10 @@ impl FieldOptions {
                     output
                         .conflicts
                         .push(meta.value()?.parse::<LitStr>()?.value());
+                } else if meta.path.is_ident("group") {
+                    output.groups.push(meta.value()?.parse::<LitStr>()?.value());
+                } else if meta.path.is_ident("validate") {
+                    output.validate = Some(meta.value()?.parse::<Path>()?);
                 } else {
                     return Err(meta.error("unknown #[arg(...)] option"));
                 }
@@ -1883,6 +2094,25 @@ struct CommandOptions {
     case_insensitive: bool,
     hidden: bool,
     subcommand: bool,
+    groups: Vec<GroupOptions>,
+    global_args: Option<Type>,
+    interactive: bool,
+}
+
+struct GroupOptions {
+    name: String,
+    required: bool,
+    multiple: bool,
+}
+
+impl Default for GroupOptions {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            required: false,
+            multiple: true,
+        }
+    }
 }
 
 impl CommandOptions {
@@ -1915,6 +2145,36 @@ impl CommandOptions {
                     output.hidden = true;
                 } else if meta.path.is_ident("subcommand") {
                     output.subcommand = true;
+                } else if meta.path.is_ident("global_args") {
+                    output.global_args = Some(meta.value()?.parse::<Type>()?);
+                } else if meta.path.is_ident("interactive") {
+                    output.interactive = if meta.input.peek(syn::Token![=]) {
+                        meta.value()?.parse::<syn::LitBool>()?.value
+                    } else {
+                        true
+                    };
+                } else if meta.path.is_ident("group") {
+                    let mut group = GroupOptions::default();
+                    meta.parse_nested_meta(|group_meta| {
+                        if group_meta.path.is_ident("name") {
+                            group.name = group_meta.value()?.parse::<LitStr>()?.value();
+                        } else if group_meta.path.is_ident("required") {
+                            group.required = if group_meta.input.peek(syn::Token![=]) {
+                                group_meta.value()?.parse::<syn::LitBool>()?.value
+                            } else {
+                                true
+                            };
+                        } else if group_meta.path.is_ident("multiple") {
+                            group.multiple = group_meta.value()?.parse::<syn::LitBool>()?.value;
+                        } else if group_meta.path.is_ident("exactly_one") {
+                            group.required = true;
+                            group.multiple = false;
+                        } else {
+                            return Err(group_meta.error("unknown command group option"));
+                        }
+                        Ok(())
+                    })?;
+                    output.groups.push(group);
                 } else {
                     return Err(meta.error("unknown #[command(...)] option"));
                 }
@@ -1925,6 +2185,7 @@ impl CommandOptions {
     }
 
     fn builder_tokens(&self) -> proc_macro2::TokenStream {
+        let oxidebot = oxidebot_crate();
         let mut expression = quote! { command };
         if let Some(description) = &self.description {
             expression = quote! { #expression.description(#description) };
@@ -1944,6 +2205,11 @@ impl CommandOptions {
         }
         if self.hidden {
             expression = quote! { #expression.hidden() };
+        }
+        if self.interactive {
+            expression = quote! {
+                #expression.completion(#oxidebot::runtime::CompletionConfig::new())
+            };
         }
         expression
     }

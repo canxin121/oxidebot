@@ -61,6 +61,39 @@ The generated schema drives:
 - unknown-option suggestions;
 - bounded missing-argument recovery.
 
+## Progressive chat forms
+
+Commands are not limited to one-shot shell-style input. Add `interactive` to
+the command declaration (or attach `CompletionConfig` manually) when a user
+should be able to start with only the command name and fill the remaining
+pieces conversationally:
+
+```rust
+#[derive(Debug, CommandArgs)]
+#[command(interactive)]
+struct CreateReminder {
+    #[arg(prompt = "提醒内容是什么？")]
+    text: String,
+
+    #[arg(prompt = "多久后提醒？", choice = "10m", choice = "1h", choice = "tomorrow")]
+    when: String,
+}
+```
+
+For `/remind` OxideBot asks one field at a time, includes declared choices and
+dynamic completion candidates when present, and accepts the next message as
+the answer. Invalid choices, type-conversion failures, ranges, lengths, and
+synchronous validators re-prompt the same field by default rather than ending
+the flow. `cancel`, `stop`, and `取消` always stop the form. Missing
+subcommands and required argument groups are also recoverable. The session is
+scoped to the exact bot, conversation, actor, and command branch, so another
+user cannot answer it.
+
+`CompletionConfig::max_rounds` bounds the total questions, while
+`max_attempts_per_field` bounds invalid retries for one field. Native platform
+commands remain one-shot because their UI already collects fields; the chat
+form path is used only for text invocations.
+
 ## Real subcommand trees
 
 Use `BotCommand` for a root command with branches. A tuple variant wraps one
@@ -181,6 +214,108 @@ force: bool,
 
 Canonical non-text segments are not flattened. Fields may consume `Mention`,
 `File`, `MessageSegment`, `FormValue`, or any custom `FromCommandValue` type.
+
+### Argument groups and global options
+
+Use an argument group whenever a relation is about a *set* of fields rather
+than one pair of fields. `exactly_one` is useful for credential sources:
+
+```rust
+#[derive(CommandArgs)]
+#[command(group(name = "credential", exactly_one))]
+struct LoginArgs {
+    #[arg(long, group = "credential")]
+    token: Option<String>,
+    #[arg(long, group = "credential")]
+    cookie: Option<String>,
+}
+```
+
+The group declaration supports `required`, `multiple = false`, and
+`exactly_one`. Its constraint appears in help and becomes a structured parse
+error, so interactive forms can ask for the group instead of exposing a vague
+handler failure.
+
+For a command tree, define shared named options once and attach them with
+`global_args`:
+
+```rust
+#[derive(CommandArgs)]
+struct TodoGlobalArgs {
+    #[arg(long)]
+    project: Option<String>,
+}
+
+#[derive(BotCommand)]
+#[command(name = "todo", global_args = TodoGlobalArgs)]
+enum TodoCommand {
+    Add(AddArgs),
+    List,
+}
+```
+
+Both `/todo --project oxidebot add release` and
+`/todo add --project oxidebot release` are valid. Global arguments must be
+named options or flags; positional globals would make branch recognition
+ambiguous and are rejected at build time.
+
+### Strongly typed finite choices and validators
+
+String `choice = ...` values remain useful for tiny schemas. For domain enums,
+derive `CommandEnum` instead:
+
+```rust
+#[derive(CommandEnum)]
+enum Environment {
+    #[choice(value = "development", alias = "dev")]
+    Development,
+    #[choice(value = "production", alias = "prod")]
+    Production,
+}
+
+#[derive(CommandArgs)]
+struct DeployArgs {
+    #[arg(long, value_enum)]
+    environment: Environment,
+}
+```
+
+The enum supplies parsing, aliases, help, text completion, and native command
+choices from one definition. For pure field checks, use a synchronous
+validator:
+
+```rust
+fn valid_batch_size(value: &u8) -> Result<(), &'static str> {
+    (*value <= 8).then_some(()).ok_or("must not exceed 8")
+}
+
+#[derive(CommandArgs)]
+struct BatchArgs {
+    #[arg(validate = valid_batch_size)]
+    size: u8,
+}
+```
+
+Stateful or I/O-dependent resolution remains explicitly separate through
+`ResolveCommandValue`; it never runs in the parser hot path.
+
+Use `heading` to keep a larger command's help scannable, and `hidden` only for
+intentional compatibility or integration fields that should remain parseable
+without appearing in ordinary help, completion, usage, or native publication:
+
+```rust
+#[derive(CommandArgs)]
+struct PublishArgs {
+    #[arg(long, heading = "Authentication")]
+    token: Option<String>,
+
+    #[arg(long, heading = "Output")]
+    format: Option<String>,
+
+    #[arg(long, hidden)]
+    legacy_wire_mode: bool,
+}
+```
 
 ## Accepted text syntax
 
@@ -327,6 +462,24 @@ Runtime shortcuts are bounded in `CommandRegistry` and require
 `CommandRewriter<S>` is the explicit extension point for transformations that
 need the complete message or state. It returns another canonical message and
 never executes a command directly.
+
+## Conservative root-command typo assistance
+
+Unknown roots do not normally enter command dispatch; this preserves the fast
+exact-route path and avoids treating ordinary chat as a command. Applications
+that want a small, explicit convenience layer can opt in after registering
+their commands:
+
+```rust
+let module = Module::new()
+    .add(DeployArgs::feature("deploy", deploy))
+    .typo_assist();
+```
+
+For a close prefixed typo such as `/deply`, it replies with a suggestion such
+as `/deploy`; it never executes the suggested command. The helper is a broad
+message handler by design, so use it only where its small additional decode
+cost and user-visible response are appropriate.
 
 ## Dynamic completion
 

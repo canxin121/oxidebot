@@ -53,7 +53,7 @@ impl PluginMetadata {
 ///
 /// ```no_run
 /// # use oxidebot_runtime::{Module, PluginBundle};
-/// let moderation = PluginBundle::new("moderation")
+/// let moderation = PluginBundle::<()>::new("moderation")
 ///     .version("1.0")
 ///     .description("Moderation commands and policy checks")
 ///     .include(Module::new());

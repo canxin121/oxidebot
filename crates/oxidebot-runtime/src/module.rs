@@ -780,6 +780,43 @@ where
         self
     }
 
+    /// Adds a conservative, opt-in suggestion for mistyped prefixed root
+    /// commands.
+    ///
+    /// The helper never executes a suggested command. It only replies when a
+    /// prefixed root name is within a small edit distance of one discoverable
+    /// command. Because this is intentionally a broad message handler, enable
+    /// it only where the small additional decode cost is desired.
+    #[must_use]
+    pub fn typo_assist(self) -> Self {
+        let catalog = Arc::new(self.catalog());
+        self.message(move |context: Context<S>| {
+            let catalog = Arc::clone(&catalog);
+            async move {
+                let Event::Message(message) = context.event() else {
+                    return Outcome::continue_();
+                };
+                let input = message.message.get_raw_text();
+                let catalog = catalog
+                    .for_identity(context.bot_identity())
+                    .enabled(&context.authoring().registry);
+                let Some(suggestion) = catalog.suggest_root_command(&input) else {
+                    return Outcome::continue_();
+                };
+                let locale = context.authoring().locale(&context).await;
+                let text = if locale
+                    .as_deref()
+                    .is_some_and(|locale| !locale.starts_with("zh"))
+                {
+                    format!("Unknown command. Did you mean `{suggestion}`?")
+                } else {
+                    format!("未知命令；你是不是想输入 `{suggestion}`？")
+                };
+                Outcome::stop().text(text)
+            }
+        })
+    }
+
     /// Returns the scoped command catalog after applying metadata overlays.
     #[must_use]
     pub fn catalog(&self) -> CommandCatalog {
@@ -1496,7 +1533,7 @@ where
         Ok(arguments) => {
             return finalize_command(context, result, arguments).await;
         }
-        Err(error) if error.missing_prompt().is_none() => {
+        Err(error) if form_target(&result, &error).is_none() => {
             return Ok(CommandPreparation::Respond(
                 command_match_error_outcome(&context, &result, error).await?,
             ));
@@ -1527,55 +1564,59 @@ where
                 .map_or(0, |branch| u64::from(branch.0))
         ))?;
 
+    let mut prior_error = None;
+    let mut active_target = None;
+    let mut attempts_for_target = 0usize;
     for _ in 0..completion.max_rounds {
         let error = match result.parse_active() {
-            Ok(arguments) => {
-                return finalize_command(context, result, arguments).await;
-            }
+            Ok(arguments) => return finalize_command(context, result, arguments).await,
             Err(error) => error,
         };
-        let Some(prompt) = error.missing_prompt() else {
+        let Some(target) = form_target(&result, &error) else {
             return Ok(CommandPreparation::Respond(
                 command_match_error_outcome(&context, &result, error).await?,
             ));
         };
-        let missing_name = error
-            .missing_name()
-            .expect("a missing prompt always belongs to a missing argument")
-            .to_owned();
-        let mut prompt_message = oxidebot_core::Message::text(prompt);
-        if let Some(argument) = result
-            .schema()
-            .find(&missing_name)
-            .filter(|argument| argument.is_autocomplete())
-        {
-            let locale = context.authoring().locale(&context).await;
-            let dynamic = context
-                .authoring()
-                .complete(
-                    &context,
-                    CompletionInput {
-                        command: result.command().clone(),
-                        field: argument.id(),
-                        partial: Arc::from(""),
-                        replace: SourceSpan::default(),
-                        locale,
-                        limit: 12,
-                    },
-                )
-                .await?;
-            if !dynamic.is_empty() {
-                let suggestions = context
+        if active_target.as_ref() != Some(&target) {
+            active_target = Some(target.clone());
+            attempts_for_target = 0;
+            prior_error = None;
+        }
+        let mut prompt_message = render_form_prompt(&result, &target, prior_error.as_ref());
+        if let FormTarget::Field(name) = &target {
+            if let Some(argument) = result
+                .schema()
+                .find(name)
+                .filter(|argument| argument.is_autocomplete())
+            {
+                let locale = context.authoring().locale(&context).await;
+                let dynamic = context
                     .authoring()
-                    .render(
+                    .complete(
                         &context,
-                        CommandOutput::Suggestions {
-                            items: dynamic.into(),
+                        CompletionInput {
+                            command: result.command().clone(),
+                            field: argument.id(),
+                            partial: Arc::from(""),
+                            replace: SourceSpan::default(),
+                            locale,
+                            limit: 12,
                         },
                     )
                     .await?;
-                prompt_message = prompt_message.then("\n");
-                prompt_message.extend(suggestions.segments);
+                if !dynamic.is_empty() {
+                    let suggestions = context
+                        .authoring()
+                        .render(
+                            &context,
+                            CommandOutput::Suggestions {
+                                items: dynamic.into(),
+                            },
+                        )
+                        .await?;
+                    prompt_message = prompt_message.then("\n");
+                    prompt_message.extend(suggestions.segments);
+                }
             }
         }
         let response = dialogue.ask_message(prompt_message).await?;
@@ -1599,7 +1640,37 @@ where
                 ));
             }
         };
-        result = result.with_answer(&missing_name, values);
+        let Some(answered) = target.apply(&result, values) else {
+            return Ok(CommandPreparation::Respond(
+                command_match_error_outcome(&context, &result, error).await?,
+            ));
+        };
+        match answered.parse_active() {
+            Ok(_) => {
+                result = answered;
+                active_target = None;
+                prior_error = None;
+            }
+            Err(next_error) => {
+                let next_target = form_target(&answered, &next_error);
+                if next_target.as_ref().is_some_and(|next| next != &target) {
+                    result = answered;
+                    active_target = None;
+                    prior_error = None;
+                    continue;
+                }
+                if completion.retry_invalid && form_retryable_error(&next_error) {
+                    attempts_for_target += 1;
+                    if attempts_for_target < completion.max_attempts_per_field {
+                        prior_error = Some(next_error);
+                        continue;
+                    }
+                }
+                return Ok(CommandPreparation::Respond(
+                    command_match_error_outcome(&context, &answered, next_error).await?,
+                ));
+            }
+        }
     }
 
     match result.parse_active() {
@@ -1612,6 +1683,149 @@ where
             command_match_error_outcome(&context, &result, error).await?,
         )),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FormTarget {
+    Field(Arc<str>),
+    Group(Arc<str>),
+    Subcommand,
+}
+
+impl FormTarget {
+    fn apply(
+        &self,
+        result: &CommandMatch,
+        values: Vec<crate::CommandValue>,
+    ) -> Option<CommandMatch> {
+        match self {
+            Self::Field(name) => Some(result.with_answer(name, values)),
+            Self::Group(_) => Some(result.with_appended(values)),
+            Self::Subcommand => result.with_subcommand_answer(values),
+        }
+    }
+}
+
+fn form_target(result: &CommandMatch, error: &CommandParseError) -> Option<FormTarget> {
+    match error {
+        CommandParseError::MissingArgument { name, .. } => {
+            Some(FormTarget::Field(Arc::clone(name)))
+        }
+        CommandParseError::Requires { required, .. } => result
+            .schema()
+            .find(required)
+            .map(|_| FormTarget::Field(Arc::clone(required))),
+        CommandParseError::MissingArgumentGroup { group, .. } => {
+            Some(FormTarget::Group(Arc::clone(group)))
+        }
+        CommandParseError::MissingSubcommand { .. } => Some(FormTarget::Subcommand),
+        _ => None,
+    }
+}
+
+fn form_retryable_error(error: &CommandParseError) -> bool {
+    matches!(
+        error,
+        CommandParseError::MissingArgument { .. }
+            | CommandParseError::MissingArgumentGroup { .. }
+            | CommandParseError::InvalidValue { .. }
+            | CommandParseError::InvalidChoice { .. }
+            | CommandParseError::OutOfRange { .. }
+            | CommandParseError::InvalidLength { .. }
+            | CommandParseError::UnexpectedValue { .. }
+            | CommandParseError::MissingOptionValue { .. }
+            | CommandParseError::DuplicateOption { .. }
+            | CommandParseError::ExtraArgument { .. }
+            | CommandParseError::UnknownOption { .. }
+            | CommandParseError::Requires { .. }
+            | CommandParseError::Conflict { .. }
+    )
+}
+
+fn render_form_prompt(
+    result: &CommandMatch,
+    target: &FormTarget,
+    prior_error: Option<&CommandParseError>,
+) -> oxidebot_core::Message {
+    let locale = result.locale();
+    let mut text = String::new();
+    if let Some(error) = prior_error {
+        text.push_str(if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+            "That value is not valid: "
+        } else {
+            "刚才的输入不符合要求："
+        });
+        text.push_str(&error.localized_message(locale));
+        text.push_str("\n\n");
+    }
+    if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+        text.push_str("Completing ");
+        text.push_str(&result.command().display_name());
+        text.push('\n');
+    } else {
+        text.push_str("正在完善 ");
+        text.push_str(&result.command().display_name());
+        text.push('\n');
+    }
+    match target {
+        FormTarget::Field(name) => {
+            let argument = result
+                .schema()
+                .find(name)
+                .expect("missing command field must exist in the active schema");
+            text.push_str(&argument.prompt_text_for(locale));
+            if !argument.choices().is_empty() {
+                text.push_str(if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+                    "\nChoices: "
+                } else {
+                    "\n可选："
+                });
+                text.push_str(
+                    &argument
+                        .choices()
+                        .iter()
+                        .map(|choice| choice.name.resolve(locale))
+                        .collect::<Vec<_>>()
+                        .join("、"),
+                );
+            }
+        }
+        FormTarget::Group(group) => {
+            let members = result
+                .schema()
+                .groups()
+                .iter()
+                .find(|candidate| candidate.name() == group.as_ref())
+                .map(|candidate| {
+                    candidate
+                        .arguments_ref()
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<_>>()
+                        .join("、")
+                })
+                .unwrap_or_default();
+            text.push_str(if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+                "Send one of these option values: "
+            } else {
+                "请发送下列字段之一的完整选项和值："
+            });
+            text.push_str(&members);
+        }
+        FormTarget::Subcommand => {
+            text.push_str(if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+                "Choose a subcommand."
+            } else {
+                "请选择一个子命令。"
+            });
+        }
+    }
+    text.push_str(if locale.is_some_and(|locale| !locale.starts_with("zh")) {
+        "\nSend `cancel` to stop."
+    } else {
+        "\n直接发送这一项即可；发送 `取消` 可退出。"
+    });
+    oxidebot_core::Message::text(text)
 }
 
 enum CommandEventError {

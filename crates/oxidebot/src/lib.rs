@@ -16,10 +16,10 @@ pub use oxidebot_core::{
     EventId, Message, PlatformId,
 };
 pub use oxidebot_runtime::{
-    command, Adapter, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandTree,
-    CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue, DialogueForm,
-    DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
-    GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
+    command, Adapter, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandEnum,
+    CommandTree, CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue,
+    DialogueForm, DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt,
+    FromState, GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
     MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, PluginBundle,
     PluginMetadata, Propagation, Receipt, Reply, Responder, Result, ResultExt, RuntimeMetrics,
     RuntimeProfile, Segments, Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
@@ -27,7 +27,7 @@ pub use oxidebot_runtime::{
 
 /// Derives a strongly typed command schema and parser.
 pub use oxidebot_macros::{
-    branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
+    branch, command, completer, BotCommand, BotState, CommandArgs, CommandEnum, DialogueForm,
 };
 
 /// Typed values that ordinary handler functions may request.
@@ -47,26 +47,29 @@ pub mod extract {
 pub mod commands {
     pub use oxidebot_runtime::{
         command, value_pattern, when_branch, when_field_equals, ArgumentAction, ArgumentChoice,
-        ArgumentSpec, BranchArgs, CatalogCommandRenderer, Command, CommandArgs, CommandBranch,
-        CommandBranchTag, CommandCatalog, CommandFieldId, CommandFieldTag, CommandId, CommandMatch,
-        CommandNodeId, CommandOutput, CommandOverlay, CommandParseError, CommandRegistry,
-        CommandRenderer, CommandSchema, CommandSource, CommandTree, CommandValue, CommandValueKind,
-        CompletionConfig, CompletionInput, CompletionItem, CompletionKind, DefaultCommandRenderer,
-        DynamicCompleter, FnValuePattern, FromCommandMatch, FromCommandValue, LocalizedText,
-        Mention, ParsedArguments, RegexTextPattern, Resolve, ResolveCommandValue, Shortcut,
-        ShortcutPattern, SourceSpan, UnitBranch, ValuePattern,
+        ArgumentGroup, ArgumentSpec, BranchArgs, CatalogCommandRenderer, Command, CommandArgs,
+        CommandBranch, CommandBranchTag, CommandCatalog, CommandEnum, CommandFieldId,
+        CommandFieldTag, CommandId, CommandMatch, CommandNodeId, CommandOutput, CommandOverlay,
+        CommandParseError, CommandRegistry, CommandRenderer, CommandSchema, CommandSource,
+        CommandTree, CommandValue, CommandValueKind, CompletionConfig, CompletionInput,
+        CompletionItem, CompletionKind, DefaultCommandRenderer, DynamicCompleter, FnValuePattern,
+        FromCommandMatch, FromCommandValue, LocalizedText, Mention, ParsedArguments,
+        RegexTextPattern, Resolve, ResolveCommandValue, Shortcut, ShortcutPattern, SourceSpan,
+        UnitBranch, ValuePattern,
     };
 
     /// Common command-authoring imports.
     pub mod prelude {
         pub use super::{
-            command, ArgumentAction, ArgumentChoice, ArgumentSpec, BranchArgs, Command,
-            CommandArgs, CommandBranchTag, CommandFieldTag, CommandMatch, CommandOutput,
-            CommandRegistry, CommandTree, CompletionConfig, CompletionInput, CompletionItem,
-            CompletionKind, FromCommandValue, LocalizedText, Mention, Resolve, ResolveCommandValue,
-            Shortcut, ValuePattern,
+            command, ArgumentAction, ArgumentChoice, ArgumentGroup, ArgumentSpec, BranchArgs,
+            Command, CommandArgs, CommandBranchTag, CommandEnum, CommandFieldTag, CommandMatch,
+            CommandOutput, CommandRegistry, CommandTree, CompletionConfig, CompletionInput,
+            CompletionItem, CompletionKind, FromCommandValue, LocalizedText, Mention, Resolve,
+            ResolveCommandValue, Shortcut, ValuePattern,
         };
-        pub use oxidebot_macros::{branch, command, completer, BotCommand, CommandArgs};
+        pub use oxidebot_macros::{
+            branch, command, completer, BotCommand, CommandArgs, CommandEnum,
+        };
     }
 }
 
@@ -187,16 +190,16 @@ pub mod prelude {
         PlatformId,
     };
     pub use oxidebot_macros::{
-        branch, command, completer, BotCommand, BotState, CommandArgs, DialogueForm,
+        branch, command, completer, BotCommand, BotState, CommandArgs, CommandEnum, DialogueForm,
     };
     pub use oxidebot_runtime::{
-        command, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandTree,
-        CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue, DialogueForm,
-        DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt, FromState,
-        GuardDecision, GuardResult, HandlerError, HandlerResult, I18n, MaybeConversation,
-        MessageContext, MessageId, Messenger, Module, OptionExt, Outcome, OxideBot, PluginBundle,
-        Propagation, Receipt, Reply, Responder, ResultExt, Segments, Sender, SessionPolicy,
-        ShutdownSignal, State, Target, Text,
+        command, Args, Bot, BranchArgs, Command, CommandArgs, CommandBranchTag, CommandEnum,
+        CommandTree, CompletionConfig, ConfirmationWords, Context, Conversation, Dialogue,
+        DialogueForm, DialogueQuestion, EventContext, Extract, ExtractError, Feature, FeatureExt,
+        FromState, GuardDecision, GuardResult, HandlerError, HandlerResult, I18n,
+        MaybeConversation, MessageContext, MessageId, Messenger, Module, OptionExt, Outcome,
+        OxideBot, PluginBundle, Propagation, Receipt, Reply, Responder, ResultExt, Segments,
+        Sender, SessionPolicy, ShutdownSignal, State, Target, Text,
     };
 }
 
