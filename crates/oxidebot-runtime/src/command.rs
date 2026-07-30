@@ -22,7 +22,9 @@ use thiserror::Error;
 #[path = "command_parse.rs"]
 mod command_parse;
 
-use command_parse::validate_argument_value;
+use command_parse::{
+    branch_choice_list, edit_distance, unknown_option, unknown_subcommand, validate_argument_value,
+};
 pub use command_parse::{tokenize_segments, tokenize_text};
 
 /// A deterministic identifier for one command tree.
@@ -4079,88 +4081,6 @@ fn apply_flag_action(output: &mut ParsedArguments, spec: &ArgumentSpec) {
             output.set_flag(spec, true);
         }
     }
-}
-
-fn branch_choice_list(children: &[CommandBranch]) -> Arc<str> {
-    Arc::from(
-        children
-            .iter()
-            .filter(|branch| !branch.hidden)
-            .map(|branch| branch.name.as_ref())
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
-}
-
-fn unknown_subcommand(
-    children: &[CommandBranch],
-    value: &str,
-    case_sensitive: bool,
-) -> CommandParseError {
-    let normalized = if case_sensitive {
-        value.to_owned()
-    } else {
-        value.to_ascii_lowercase()
-    };
-    let suggestion = children
-        .iter()
-        .flat_map(|branch| {
-            std::iter::once(branch.name.as_ref())
-                .chain(branch.aliases.iter().map(AsRef::as_ref))
-                .map(move |candidate| (branch.name.as_ref(), candidate))
-        })
-        .map(|(canonical, candidate)| {
-            let candidate = if case_sensitive {
-                candidate.to_owned()
-            } else {
-                candidate.to_ascii_lowercase()
-            };
-            (edit_distance(&normalized, &candidate), canonical)
-        })
-        .filter(|(distance, _)| *distance <= 3)
-        .min_by_key(|(distance, _)| *distance)
-        .map(|(_, canonical)| Arc::from(canonical));
-    CommandParseError::UnknownSubcommand {
-        value: Arc::from(value),
-        suggestion: CompletionSuggestion::new(suggestion),
-        choices: branch_choice_list(children),
-    }
-}
-
-fn unknown_option(schema: &CommandSchema, option: String) -> CommandParseError {
-    let candidates = schema.arguments.iter().flat_map(|argument| {
-        argument
-            .long
-            .as_ref()
-            .map(|long| format!("--{long}"))
-            .into_iter()
-            .chain(argument.short.map(|short| format!("-{short}")))
-    });
-    let suggestion = candidates
-        .map(|candidate| (edit_distance(&option, &candidate), candidate))
-        .filter(|(distance, _)| *distance <= 3)
-        .min_by_key(|(distance, _)| *distance)
-        .map(|(_, value)| Arc::from(value));
-    CommandParseError::UnknownOption {
-        option: Arc::from(option),
-        suggestion: CompletionSuggestion::new(suggestion),
-    }
-}
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
-    let mut current = vec![0; previous.len()];
-    for (left_index, left_char) in left.chars().enumerate() {
-        current[0] = left_index + 1;
-        for (right_index, right_char) in right.chars().enumerate() {
-            let substitution = previous[right_index] + usize::from(left_char != right_char);
-            let insertion = current[right_index] + 1;
-            let deletion = previous[right_index + 1] + 1;
-            current[right_index + 1] = substitution.min(insertion).min(deletion);
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[right.chars().count()]
 }
 
 /// Renderer-neutral command output. Help, diagnostics, and completion are kept

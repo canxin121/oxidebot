@@ -1,6 +1,9 @@
 //! Text and segment tokenization for command invocations.
 
-use super::{form_value_label, ArgumentSpec, CommandParseError, CommandValue};
+use super::{
+    form_value_label, ArgumentSpec, CommandBranch, CommandParseError, CommandSchema, CommandValue,
+    CompletionSuggestion,
+};
 use oxidebot_core::source::message::MessageSegment;
 use std::sync::Arc;
 
@@ -68,6 +71,90 @@ pub(super) fn validate_argument_value(
         validator(value)?;
     }
     Ok(())
+}
+
+pub(super) fn unknown_subcommand(
+    children: &[CommandBranch],
+    value: &str,
+    case_sensitive: bool,
+) -> CommandParseError {
+    let normalized = if case_sensitive {
+        value.to_owned()
+    } else {
+        value.to_ascii_lowercase()
+    };
+    let suggestion = children
+        .iter()
+        .flat_map(|branch| {
+            std::iter::once(branch.name.as_ref())
+                .chain(branch.aliases.iter().map(AsRef::as_ref))
+                .map(move |candidate| (branch.name.as_ref(), candidate))
+        })
+        .map(|(canonical, candidate)| {
+            let candidate = if case_sensitive {
+                candidate.to_owned()
+            } else {
+                candidate.to_ascii_lowercase()
+            };
+            (edit_distance(&normalized, &candidate), canonical)
+        })
+        .filter(|(distance, _)| *distance <= 3)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, canonical)| Arc::from(canonical));
+    CommandParseError::UnknownSubcommand {
+        value: Arc::from(value),
+        suggestion: CompletionSuggestion::new(suggestion),
+        choices: branch_choice_list(children),
+    }
+}
+
+pub(super) fn unknown_option(schema: &CommandSchema, option: String) -> CommandParseError {
+    let suggestion = schema
+        .arguments
+        .iter()
+        .flat_map(|argument| {
+            argument
+                .long
+                .as_ref()
+                .map(|long| format!("--{long}"))
+                .into_iter()
+                .chain(argument.short.map(|short| format!("-{short}")))
+        })
+        .map(|candidate| (edit_distance(&option, &candidate), candidate))
+        .filter(|(distance, _)| *distance <= 3)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, value)| Arc::from(value));
+    CommandParseError::UnknownOption {
+        option: Arc::from(option),
+        suggestion: CompletionSuggestion::new(suggestion),
+    }
+}
+
+pub(super) fn branch_choice_list(children: &[CommandBranch]) -> Arc<str> {
+    Arc::from(
+        children
+            .iter()
+            .filter(|branch| !branch.hidden)
+            .map(|branch| branch.name.as_ref())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+pub(super) fn edit_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
+    let mut current = vec![0; previous.len()];
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let substitution = previous[right_index] + usize::from(left_char != right_char);
+            let insertion = current[right_index] + 1;
+            let deletion = previous[right_index + 1] + 1;
+            current[right_index + 1] = substitution.min(insertion).min(deletion);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.chars().count()]
 }
 
 /// Tokenizes canonical message segments while preserving mentions and files.
