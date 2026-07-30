@@ -5,12 +5,12 @@
 //! [`Message`] IR, keeping adapters free to replace presentation without
 //! depending on parser internals.
 
-use super::{
-    is_chinese, render_catalog_text, render_command_help, Command, CommandParseError,
-    CompletionItem,
-};
+use super::{Command, CommandBranch, CommandParseError, CompletionItem};
 use oxidebot_core::{source::message::Message, TemplateValue, TranslationCatalog};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// Renderer-neutral command output. Help, diagnostics, and completion are kept
 /// structured until the last step so they can become plain text, rich layout,
@@ -222,4 +222,253 @@ impl CommandRenderer for CatalogCommandRenderer {
             .render(locale, &self.key(suffix), &values)
             .unwrap_or(fallback)
     }
+}
+
+fn is_chinese(locale: Option<&str>) -> bool {
+    locale.is_none_or(|locale| locale.starts_with("zh"))
+}
+
+fn render_catalog_text(commands: &[Command], locale: Option<&str>) -> String {
+    let visible = commands.iter().filter(|command| !command.hidden);
+    let mut groups = HashMap::<Option<Arc<str>>, Vec<&Command>>::new();
+    for command in visible {
+        groups
+            .entry(command.category.clone())
+            .or_default()
+            .push(command);
+    }
+    let mut categories = groups.into_iter().collect::<Vec<_>>();
+    categories.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut output = String::from(if is_chinese(locale) {
+        "可用命令\n"
+    } else {
+        "Available commands\n"
+    });
+    for (category, mut commands) in categories {
+        commands.sort_by(|left, right| left.name.cmp(&right.name));
+        if let Some(category) = category {
+            output.push('\n');
+            output.push_str(&category);
+            output.push('\n');
+        }
+        for command in commands {
+            output.push_str("  ");
+            output.push_str(&command.display_name());
+            let description = command.localized_description(locale);
+            if !description.is_empty() {
+                output.push_str(" — ");
+                output.push_str(description);
+            }
+            if !command.branches.is_empty() {
+                output.push_str(if is_chinese(locale) {
+                    "（含子命令）"
+                } else {
+                    " (subcommands)"
+                });
+            }
+            output.push('\n');
+        }
+    }
+    output.push_str(if is_chinese(locale) {
+        "\n使用 /help <命令> 查看详细说明。"
+    } else {
+        "\nUse /help <command> for detailed help."
+    });
+    output
+}
+
+fn resolve_branch<'a>(command: &'a Command, path: &[Arc<str>]) -> Option<&'a CommandBranch> {
+    let mut children = command.branches.as_slice();
+    let mut selected = None;
+    for name in path {
+        let branch = children.iter().find(|branch| branch.name == *name)?;
+        selected = Some(branch);
+        children = branch.children.as_slice();
+    }
+    selected
+}
+
+fn render_command_help(
+    command: &Command,
+    branch_names: &[Arc<str>],
+    locale: Option<&str>,
+) -> String {
+    let usage = command.usage_for(branch_names);
+    let selected = resolve_branch(command, branch_names);
+    let description = selected.map_or_else(
+        || command.localized_description(locale),
+        |branch| branch.localized_description(locale),
+    );
+    let schema = command.schema_for_branch_names(branch_names);
+    let children = selected.map_or(command.branches.as_slice(), |branch| {
+        branch.children.as_slice()
+    });
+    let title = if branch_names.is_empty() {
+        command.display_name()
+    } else {
+        format!(
+            "{} {}",
+            command.display_name(),
+            branch_names
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    let usage_label = if is_chinese(locale) {
+        "用法"
+    } else {
+        "Usage"
+    };
+    let mut output = format!("{title}\n\n{usage_label}：{usage}");
+    if !description.is_empty() {
+        output.push_str("\n\n");
+        output.push_str(description);
+    }
+    if branch_names.is_empty() && !command.aliases.is_empty() {
+        output.push_str(if is_chinese(locale) {
+            "\n\n别名："
+        } else {
+            "\n\nAliases: "
+        });
+        output.push_str(
+            &command
+                .aliases
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if !children.is_empty() {
+        output.push_str(if is_chinese(locale) {
+            "\n\n子命令：\n"
+        } else {
+            "\n\nSubcommands:\n"
+        });
+        for branch in children.iter().filter(|branch| !branch.hidden) {
+            output.push_str("  ");
+            output.push_str(&branch.name);
+            let branch_description = branch.localized_description(locale);
+            if !branch_description.is_empty() {
+                output.push_str(" — ");
+                output.push_str(branch_description);
+            }
+            output.push('\n');
+        }
+    }
+    if !schema.arguments.is_empty() {
+        output.push_str(if is_chinese(locale) {
+            "\n参数：\n"
+        } else {
+            "\nArguments:\n"
+        });
+        let mut previous_heading = None::<String>;
+        for argument in schema.arguments.iter().filter(|argument| !argument.hidden) {
+            let heading = argument.heading_text(locale).unwrap_or_default();
+            if !heading.is_empty() && previous_heading.as_deref() != Some(heading) {
+                output.push_str("\n  ");
+                output.push_str(heading);
+                output.push('\n');
+                previous_heading = Some(heading.to_owned());
+            }
+            output.push_str("  ");
+            output.push_str(&argument.usage_fragment());
+            let help = argument.help_text(locale);
+            if !help.is_empty() {
+                output.push_str(" — ");
+                output.push_str(help);
+            }
+            if let Some(default) = &argument.default {
+                if is_chinese(locale) {
+                    output.push_str(&format!("（默认：{default}）"));
+                } else {
+                    output.push_str(&format!(" (default: {default})"));
+                }
+            }
+            if !argument.choices.is_empty() {
+                output.push_str(if is_chinese(locale) {
+                    "；可选："
+                } else {
+                    "; choices: "
+                });
+                output.push_str(
+                    &argument
+                        .choices
+                        .iter()
+                        .map(|choice| choice.value.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            output.push('\n');
+        }
+    }
+    if !schema.groups.is_empty() {
+        output.push_str(if is_chinese(locale) {
+            "\n参数组：\n"
+        } else {
+            "\nArgument groups:\n"
+        });
+        for group in &schema.groups {
+            output.push_str("  ");
+            output.push_str(&group.name);
+            output.push_str(" — ");
+            let relation = match (group.required, group.multiple) {
+                (true, false) => {
+                    if is_chinese(locale) {
+                        "必须且只能提供其中一个"
+                    } else {
+                        "exactly one is required"
+                    }
+                }
+                (true, true) => {
+                    if is_chinese(locale) {
+                        "至少提供其中一个"
+                    } else {
+                        "at least one is required"
+                    }
+                }
+                (false, false) => {
+                    if is_chinese(locale) {
+                        "最多提供其中一个"
+                    } else {
+                        "at most one may be supplied"
+                    }
+                }
+                (false, true) => {
+                    if is_chinese(locale) {
+                        "可组合提供"
+                    } else {
+                        "may be combined"
+                    }
+                }
+            };
+            output.push_str(relation);
+            output.push('：');
+            output.push_str(
+                &group
+                    .arguments
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            output.push('\n');
+        }
+    }
+    if branch_names.is_empty() && !command.examples.is_empty() {
+        output.push_str(if is_chinese(locale) {
+            "\n示例：\n"
+        } else {
+            "\nExamples:\n"
+        });
+        for example in &command.examples {
+            output.push_str("  ");
+            output.push_str(example);
+            output.push('\n');
+        }
+    }
+    output
 }
