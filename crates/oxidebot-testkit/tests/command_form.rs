@@ -1,21 +1,29 @@
-use oxidebot::{Args, BotCommand, CommandArgs, CommandTree, HandlerResult, Module};
+use oxidebot::{Args, BotCommand, CommandArgs, CommandEnum, CommandTree, HandlerResult, Module};
 use oxidebot_testkit::BotTest;
+
+#[derive(Debug, CommandEnum)]
+enum TaskKind {
+    #[choice(value = "normal", name = "普通任务", alias = "普通任务")]
+    Normal,
+    #[choice(value = "urgent", name = "紧急任务", alias = "紧急任务")]
+    Urgent,
+}
 
 #[derive(Debug, CommandArgs)]
 #[command(interactive)]
 struct CreateArgs {
-    #[arg(
-        prompt = "要创建哪一种任务？",
-        choice = "普通任务",
-        choice = "紧急任务"
-    )]
-    kind: String,
+    #[arg(prompt = "要创建哪一种任务？", value_enum)]
+    kind: TaskKind,
     #[arg(prompt = "要创建几个？", min = 1, max = 3)]
     count: u8,
 }
 
 async fn create(Args(args): Args<CreateArgs>) -> HandlerResult<String> {
-    Ok(format!("已创建 {} 个{}", args.count, args.kind))
+    let kind = match args.kind {
+        TaskKind::Normal => "普通任务",
+        TaskKind::Urgent => "紧急任务",
+    };
+    Ok(format!("已创建 {} 个{kind}", args.count))
 }
 
 #[derive(Debug, CommandArgs)]

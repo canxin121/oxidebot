@@ -69,14 +69,24 @@ should be able to start with only the command name and fill the remaining
 pieces conversationally:
 
 ```rust
+#[derive(Debug, CommandEnum)]
+enum ReminderTime {
+    #[choice(value = "10m", name = "10 分钟后")]
+    TenMinutes,
+    #[choice(value = "1h", name = "1 小时后")]
+    OneHour,
+    #[choice(value = "tomorrow", name = "明天")]
+    Tomorrow,
+}
+
 #[derive(Debug, CommandArgs)]
 #[command(interactive)]
 struct CreateReminder {
     #[arg(prompt = "提醒内容是什么？")]
     text: String,
 
-    #[arg(prompt = "多久后提醒？", choice = "10m", choice = "1h", choice = "tomorrow")]
-    when: String,
+    #[arg(prompt = "多久后提醒？", value_enum)]
+    when: ReminderTime,
 }
 ```
 
@@ -196,8 +206,8 @@ include: Vec<String>,
 #[arg(long, short = 'v', action = "count")]
 verbosity: u8,
 
-#[arg(choice = "dev", choice = "staging", choice = "production")]
-environment: String,
+#[arg(value_enum)]
+environment: Environment,
 
 #[arg(min = 1.0, max = 100.0)]
 percentage: f64,
@@ -261,15 +271,20 @@ ambiguous and are rejected at build time.
 
 ### Strongly typed finite choices and validators
 
-String `choice = ...` values remain useful for tiny schemas. For domain enums,
-derive `CommandEnum` instead:
+For a finite, stable business domain, use `CommandEnum` rather than a
+`String` plus repeated `choice = ...` values. The latter validates input, but
+the handler still receives an untyped string: every consumer must repeat
+string comparisons and the compiler cannot check that all cases are handled.
+An enum makes impossible states unrepresentable in the handler and keeps
+parsing, aliases, displayed labels, text completion, and native choices in
+one definition:
 
 ```rust
 #[derive(CommandEnum)]
 enum Environment {
-    #[choice(value = "development", alias = "dev")]
+    #[choice(value = "development", name = "开发环境", alias = "dev")]
     Development,
-    #[choice(value = "production", alias = "prod")]
+    #[choice(value = "production", name = "生产环境", alias = "prod")]
     Production,
 }
 
@@ -279,6 +294,13 @@ struct DeployArgs {
     environment: Environment,
 }
 ```
+
+Use `String` only when the value is truly open-ended, such as a title or free
+text. When the candidate set comes from a database or remote API at runtime,
+use a stable typed identifier where possible, attach a dynamic completer for
+discovery, and resolve it explicitly with `ResolveCommandValue`. Do not model
+a closed domain such as an environment, task priority, or publish mode as a
+bare string.
 
 The enum supplies parsing, aliases, help, text completion, and native command
 choices from one definition. For pure field checks, use a synchronous
