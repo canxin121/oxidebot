@@ -23,7 +23,8 @@ use thiserror::Error;
 mod command_parse;
 
 use command_parse::{
-    branch_choice_list, edit_distance, unknown_option, unknown_subcommand, validate_argument_value,
+    apply_flag_action, branch_choice_list, edit_distance, parse_native_arguments, unknown_option,
+    unknown_subcommand, validate_argument_value,
 };
 pub use command_parse::{tokenize_segments, tokenize_text};
 
@@ -4035,52 +4036,6 @@ fn parse_arguments(
 
     output.validate(schema, locale)?;
     Ok(output)
-}
-
-fn parse_native_arguments(
-    schema: &CommandSchema,
-    invocation: &CommandInvocation,
-) -> Result<ParsedArguments, CommandParseError> {
-    let mut output = ParsedArguments::default();
-    for (name, values) in &invocation.options {
-        let Some(spec) = schema.arguments.iter().find(|argument| {
-            argument.name.as_ref() == name || argument.long.as_deref() == Some(name)
-        }) else {
-            return Err(CommandParseError::UnknownNativeOption {
-                option: Arc::from(name.as_str()),
-            });
-        };
-        if spec.flag {
-            match values.first() {
-                Some(FormValue::Boolean(value)) => output.set_flag(spec, *value),
-                Some(FormValue::Integer(value)) if spec.action == ArgumentAction::Count => {
-                    output.set_count(spec, u32::try_from(*value).unwrap_or(u32::MAX));
-                }
-                Some(_) | None => apply_flag_action(&mut output, spec),
-            }
-            continue;
-        }
-        if !spec.is_multiple() && values.len() > 1 {
-            return Err(CommandParseError::DuplicateOption {
-                option: Arc::from(name.as_str()),
-            });
-        }
-        for value in values {
-            output.insert_value(spec, CommandValue::Form(value.clone()));
-        }
-    }
-    output.validate(schema, invocation.locale.as_deref())?;
-    Ok(output)
-}
-
-fn apply_flag_action(output: &mut ParsedArguments, spec: &ArgumentSpec) {
-    match spec.action {
-        ArgumentAction::Count => output.increment_count(spec),
-        ArgumentAction::SetFalse => output.set_flag(spec, false),
-        ArgumentAction::Store | ArgumentAction::Append | ArgumentAction::SetTrue => {
-            output.set_flag(spec, true);
-        }
-    }
 }
 
 /// Renderer-neutral command output. Help, diagnostics, and completion are kept
