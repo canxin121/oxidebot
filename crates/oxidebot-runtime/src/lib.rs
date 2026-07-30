@@ -1,6 +1,7 @@
 //! Runtime orchestration, compiled dispatch, bounded queues, and adapter contracts.
 
 mod adapter;
+mod address;
 mod app;
 mod authoring;
 mod bot;
@@ -31,6 +32,7 @@ mod session;
 mod standard;
 
 pub use adapter::*;
+pub use address::*;
 pub use app::*;
 pub use authoring::*;
 pub use bot::*;
