@@ -19,6 +19,7 @@ mod filter;
 mod function;
 mod handler;
 mod hooks;
+mod media;
 mod messenger;
 mod metrics;
 mod module;
@@ -51,6 +52,7 @@ pub use handler::{EventContext, MessageContext};
 pub use hooks::{After, Before, Guard, GuardDecision, GuardResult};
 #[doc(hidden)]
 pub use hooks::{AfterOutput, BeforeOutput, Endpoint, GuardOutput};
+pub use media::*;
 pub use messenger::*;
 pub use metrics::*;
 pub use module::{Feature, FeatureExt, GeneratedFeature, IntoFeature, Module};
