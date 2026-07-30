@@ -87,7 +87,7 @@ jobs:
       - name: Inspect the root package manifest and sources
         run: |
           set -euo pipefail
-          tar -tzf "target/package/oxidebot-core-${{ needs.validate.outputs.version }}.crate"
+          tar -tzf "target/package/oxidebot-core-${{ steps.release.outputs.version }}.crate"
 
   publish:
     name: Publish crates.io release
